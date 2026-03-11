@@ -20,13 +20,17 @@ Dolphin via libmelee and drives a controller in real time.
 The GameCube controller has five input groups. Each maps to a dedicated
 prediction head in `model.py`:
 
-| Physical Input | Model Head | Dims | Activation | Loss | Notes |
+| Physical Input | Model Head | Dims | Output | Loss | Notes |
 |---|---|---|---|---|---|
-| Main Stick (x, y) | `main_head` | 2 | Sigmoid [0,1] | MSE | Center 0.5; deadzone ~0.28, tilt < 0.65, smash > 0.8 |
-| L Trigger (analog) | `L_head` | 1 | Sigmoid [0,1] | MSE | 0 = released, 1 = full press |
-| R Trigger (analog) | `R_head` | 1 | Sigmoid [0,1] | MSE | 0 = released, 1 = full press |
-| C-Stick | `cdir_head` | 5 | Softmax | Focal CE | Neutral / Up / Down / Left / Right |
-| Digital Buttons (12) | `btn_head` | 12 | Sigmoid | BCE | A, B, X, Y, Z, L, R, Start, D-pad x4 |
+| Main Stick (x, y) | `main_head` | 2 | Raw (clamp at inference) | MSE | Center 0.5; deadzone ~0.28, tilt < 0.65, smash > 0.8 |
+| L Trigger (analog) | `L_head` | 1 | Raw (clamp at inference) | MSE | 0 = released, 1 = full press |
+| R Trigger (analog) | `R_head` | 1 | Raw (clamp at inference) | MSE | 0 = released, 1 = full press |
+| C-Stick | `cdir_head` | 5 | Logits | Focal CE | Neutral / Up / Down / Left / Right |
+| Digital Buttons (12) | `btn_head` | 12 | Logits | BCE | A, B, X, Y, Z, L, R, Start, D-pad x4 |
+
+Regression heads output unbounded values during training (no Sigmoid).
+MSE naturally pushes outputs into [0, 1] since all targets live there.
+At inference, outputs are clamped to [0, 1].
 
 ## Architecture
 
@@ -37,7 +41,7 @@ Slippi Frame ──► FrameEncoder (intra-frame attention) ──► 1024-d per
                          │
                     4× Pre-Norm Causal Transformer Blocks
                          │
-                    Last hidden state h_T
+                    All T hidden states (autoregressive)
                          │
               ┌──────────┼──────────┬───────────┐
           main_xy    L / R val   c_dir_5way   btn_12way
@@ -50,7 +54,8 @@ categorical embeddings (stage, characters, actions, costumes, c-stick
 directions, projectile types) and numeric MLP encodings (positions, speeds,
 ECBs, shield, buttons, flags, analog values). A 2-layer self-attention
 block with a learned [CLS] query token pools these into a single 256-d
-frame summary, then projects up to 1024-d.
+frame summary, then projects up to 1024-d. A final LayerNorm is applied
+after the attention layers before CLS pooling.
 
 Why attention over flat concat: the model can learn which feature groups
 are most relevant to each other within a single frame (e.g., opponent
@@ -70,10 +75,20 @@ used for speed; `torch.compile` fuses the full forward pass.
 
 ### Phase 3 -- Action Prediction (`model.py` PredictionHeads)
 
-The last hidden state h_T (which has attended to all 60 prior frames) feeds
-into five independent prediction heads, each with a 256-d hidden layer.
-This is standard GPT-style next-token prediction where the "token" is a
-full controller state.
+All T hidden states are fed into five independent prediction heads, each
+with a 256-d hidden layer and GELU activation. Every position in the
+sequence predicts the controller state R frames ahead, providing T×
+more training signal than predicting from only the last position. This is
+autoregressive training analogous to GPT-style next-token prediction
+where the "token" is a full controller state.
+
+### Weight Initialization
+
+GPT-2-style initialization: all Linear weights are `N(0, 0.02)`, biases
+are zeroed, and Embedding weights are `N(0, 0.02)`. Residual output
+projections (attention out_proj and feedforward final linear) are scaled
+by `1/sqrt(2 * num_layers)` for stable gradient flow through deep
+residual chains.
 
 ### Reaction Delay
 
@@ -115,11 +130,20 @@ inputs are rare and resolve to one cardinal direction.
 
 ### Main Stick 2D Regression
 
-Sigmoid + MSE over [0,1] is the simplest approach. Melee has discontinuous
-stick zones (deadzone ~0.28, tilt ~0.3-0.65, smash > 0.8) so MSE treats
-all positional errors equally regardless of zone boundaries. This is
-adequate for initial R&D; a zone-aware loss or discretization is a future
-improvement.
+Raw MSE over [0,1] targets is the simplest approach. Melee has
+discontinuous stick zones (deadzone ~0.28, tilt ~0.3-0.65, smash > 0.8)
+so MSE treats all positional errors equally regardless of zone boundaries.
+This is adequate for initial R&D; a zone-aware loss or discretization is
+a future improvement.
+
+### No Sigmoid on Regression Heads
+
+Trigger and stick targets are overwhelmingly bimodal (0.0 or 1.0) with
+rare intermediate values. With Sigmoid, predicting 0.0 requires logits
+at -inf and 1.0 requires +inf -- exactly the most common targets sit
+where gradients vanish. Without Sigmoid, the model outputs 0.0 or 1.0
+directly with clean, proportional MSE gradients. Under BF16, raw values
+near 0 and 1 are perfectly representable.
 
 ### Dead Button Dimensions
 
@@ -153,8 +177,11 @@ wastes a small amount of head capacity.
 | Model width (d_model) | 1024 |
 | Transformer layers | 4 |
 | Attention heads | 8 |
-| Feedforward dim | 2048 |
+| Feedforward dim | 4096 (4x expansion) |
 | Intra-frame width | 256 |
+| Batch size | 200 |
+| AMP dtype | bfloat16 |
+| Parameters | ~54M |
 
 ## Project Structure
 
@@ -162,16 +189,12 @@ wastes a small amount of head capacity.
 .
 ├── train.py            # Training loop & checkpointing
 ├── preprocess.py       # Compute metadata (norm stats, categorical maps, file index)
-├── inference.py        # Real-time single-window inference
+├── inference.py        # Real-time single-window inference via libmelee
 ├── model.py            # FramePredictor + Transformer heads
 ├── frame_encoder.py    # Intra-frame cross-attention encoder
 ├── features.py         # Shared feature engineering (columns, preprocessing, tensors)
 ├── dataset.py          # Dataset classes (raw parquet debug + streaming)
 ├── cat_maps.py         # Melee enum → dense index maps
-├── forward_check.py    # NaN check on cold forward pass
-├── weight_check.py     # Audit checkpoints for NaN/Inf weights
-├── dataset_check.py    # Inspect parquet columns and mappings
-├── inspect_window.py   # Audit window features and targets
 ├── checkpoints/        # Saved *.pt files
 └── data/               # Slippi parquet files + source replays
     └── source_replays/ # Original .slp files for reproduction
@@ -205,11 +228,28 @@ This produces three small JSON files alongside the parquets:
 
 ## Training
 
-Point `--data-dir` at a parquet directory (auto-detects metadata for streaming, falls back to slow in-memory loading):
+Point `--data-dir` at a parquet directory (auto-detects metadata for
+streaming, falls back to slow in-memory loading):
 
 ```bash
-python3 train.py [--max-steps 2000] [--data-dir ./data/subset] [--debug] [--resume checkpoints/step_XXXXXX.pt] [--no-compile]
+# Train for 1 epoch (default)
+python3 train.py --data-dir data/subset
+
+# Train for multiple epochs
+python3 train.py --epochs 3 --data-dir data/subset
+
+# Short test run (overrides epochs)
+python3 train.py --max-steps 100 --data-dir data/subset
+
+# Resume from checkpoint
+python3 train.py --epochs 2 --data-dir data/subset --resume checkpoints/step_XXXXXX.pt
+
+# Disable torch.compile for debugging
+python3 train.py --no-compile --debug
 ```
+
+Logging, validation, and checkpoint intervals auto-scale as a percentage
+of total steps (~0.5% log, ~5% val/checkpoint, ~1% warmup).
 
 ## Inference
 
@@ -219,4 +259,7 @@ python3 inference.py --dolphin-path /path/to/dolphin --iso-path /path/to/melee.i
 
 ## Notes
 
-The `overfit_log*.txt` files in this repo are from intentional overfit experiments on a small fsmash-only subset. Near-zero main/l/r/btn losses in those logs are expected -- the model learned the dominant neutral/no-press pattern on that narrow data.
+The `overfit_log*.txt` files in this repo are from intentional overfit
+experiments on a small fsmash-only subset. Near-zero main/l/r/btn losses
+in those logs are expected -- the model learned the dominant neutral/no-press
+pattern on that narrow data.
