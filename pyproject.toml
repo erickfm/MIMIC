@@ -14,6 +14,7 @@ pyarrow = "*"
 melee = "0.45.1"
 typing-extensions = "*"
 wandb = "^0.20.1"
+huggingface_hub = "*"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

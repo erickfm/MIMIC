@@ -168,20 +168,33 @@ wastes a small amount of head capacity.
   simultaneously could help the model learn action planning and committal
   sequences.
 
+## Model Presets
+
+Pass `--model <preset>` to `train.py` for scaling experiments:
+
+| Preset | d_model | Heads | Layers | FF dim | ~Params |
+|---|---|---|---|---|---|
+| `tiny` | 256 | 4 | 4 | 1024 | ~3.5M |
+| `small` | 512 | 8 | 4 | 2048 | ~14M |
+| `medium` | 768 | 8 | 4 | 3072 | ~30M |
+| `base` (default) | 1024 | 8 | 4 | 4096 | ~54M |
+| `shallow` | 1024 | 8 | 2 | 4096 | ~27M |
+
 ## Default Configuration
 
 | Setting | Value |
 |---|---|
 | Window length (W) | 60 frames |
 | Reaction delay (R) | 1 frame |
-| Model width (d_model) | 1024 |
+| Model width (d_model) | 1024 (base preset) |
 | Transformer layers | 4 |
 | Attention heads | 8 |
 | Feedforward dim | 4096 (4x expansion) |
 | Intra-frame width | 256 |
 | Batch size | 200 |
 | AMP dtype | bfloat16 |
-| Parameters | ~54M |
+| Parameters | ~54M (base) |
+| GPU tested | RTX 4090 24 GB |
 
 ## Project Structure
 
@@ -195,33 +208,61 @@ wastes a small amount of head capacity.
 ├── features.py         # Shared feature engineering (columns, preprocessing, tensors)
 ├── dataset.py          # Dataset classes (raw parquet debug + streaming)
 ├── cat_maps.py         # Melee enum → dense index maps
+├── setup.sh            # One-command setup for fresh machines
 ├── checkpoints/        # Saved *.pt files
 └── data/               # Slippi parquet files + source replays
     └── source_replays/ # Original .slp files for reproduction
 ```
 
-## Setup
+## Quick Start (New Machine)
 
-Install dependencies using [Poetry](https://python-poetry.org/):
+Spin up any machine with an NVIDIA GPU, clone the repo, and run:
 
 ```bash
-poetry install
+export HF_TOKEN=<your-huggingface-token>
+bash setup.sh --run
+```
+
+This installs deps, downloads the dataset from HuggingFace, runs
+preprocessing if needed, and starts a 1-epoch training run.
+
+For scaling experiments:
+
+```bash
+bash setup.sh --run --model small     # 14M param model
+bash setup.sh --run --model tiny      # 3.5M param model
+```
+
+The dataset is hosted at [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset).
+
+## Manual Setup
+
+Install dependencies:
+
+```bash
+pip install torch numpy pandas pyarrow wandb huggingface_hub melee==0.45.1 typing-extensions
 ```
 
 ## Data
 
 Parquet files are generated from Slippi `.slp` replays using [slippi-frame-extractor](https://github.com/erickfm/slippi-frame-extractor).
 
-## Preprocessing
+Download the preprocessed dataset from HuggingFace:
 
-Compute training metadata (one-time, streams files, ~20 MB peak RAM):
+```bash
+python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download('erickfm/frame-melee-subset', repo_type='dataset', local_dir='data/subset')
+"
+```
+
+Or, to preprocess from raw parquets (one-time, streams files, ~20 MB peak RAM):
 
 ```bash
 python3 preprocess.py --data-dir data/subset
-python3 preprocess.py --data-dir data/full
 ```
 
-This produces three small JSON files alongside the parquets:
+Preprocessing produces three small JSON files alongside the parquets:
 - `norm_stats.json` -- per-column mean/std for normalization
 - `cat_maps.json` -- dynamic categorical mappings (ports, costumes)
 - `file_index.json` -- frame counts per file (for train/val split + length estimation)
@@ -232,14 +273,20 @@ Point `--data-dir` at a parquet directory (auto-detects metadata for
 streaming, falls back to slow in-memory loading):
 
 ```bash
-# Train for 1 epoch (default)
+# Train for 1 epoch (default, base model ~54M params)
 python3 train.py --data-dir data/subset
+
+# Train with a smaller model
+python3 train.py --data-dir data/subset --model small
 
 # Train for multiple epochs
 python3 train.py --epochs 3 --data-dir data/subset
 
 # Short test run (overrides epochs)
 python3 train.py --max-steps 100 --data-dir data/subset
+
+# Scaling experiment: tiny model, 1 epoch
+python3 train.py --model tiny --data-dir data/subset
 
 # Resume from checkpoint
 python3 train.py --epochs 2 --data-dir data/subset --resume checkpoints/step_XXXXXX.pt

@@ -34,7 +34,7 @@ class ModelConfig:
     d_model: int         = 1024
     nhead: int           = 8
     num_layers: int      = 4
-    dim_feedforward: int = 4096      # 4x expansion (was 2048)
+    dim_feedforward: int = 4096      # 4x expansion
     dropout: float       = 0.0
 
     # sequence length
@@ -49,6 +49,15 @@ class ModelConfig:
     num_c_dirs: int       = 5
     num_proj_types: int   = len(PROJECTILE_TYPE_MAP)
     num_proj_subtypes: int= 40
+
+
+MODEL_PRESETS = {
+    "tiny":    dict(d_model=256,  nhead=4, num_layers=4, dim_feedforward=1024),
+    "small":   dict(d_model=512,  nhead=8, num_layers=4, dim_feedforward=2048),
+    "medium":  dict(d_model=768,  nhead=8, num_layers=4, dim_feedforward=3072),
+    "base":    dict(d_model=1024, nhead=8, num_layers=4, dim_feedforward=4096),
+    "shallow": dict(d_model=1024, nhead=8, num_layers=2, dim_feedforward=4096),
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Attention + Transformer block

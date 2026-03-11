@@ -23,7 +23,7 @@ from pathlib import Path
 import wandb
 
 from dataset import MeleeFrameDatasetWithDelay, StreamingMeleeDataset
-from model   import FramePredictor, ModelConfig
+from model   import FramePredictor, ModelConfig, MODEL_PRESETS
 
 # -----------------------------------------------------------------------------
 # 1. Config
@@ -196,8 +196,9 @@ def get_dataloader(ds, shuffle=True):
         persistent_workers=True,
     )
 
-def get_model(compile_model=True):
-    cfg   = ModelConfig(max_seq_len=SEQUENCE_LENGTH)
+def get_model(compile_model=True, model_preset=None):
+    overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
+    cfg = ModelConfig(max_seq_len=SEQUENCE_LENGTH, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
         model = torch.compile(model)
@@ -213,7 +214,8 @@ def infinite_loader(dl):
 # 5. Training loop (step-based)
 # -----------------------------------------------------------------------------
 def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
-          debug: bool = False, resume: str = None, compile_model: bool = True):
+          debug: bool = False, resume: str = None, compile_model: bool = True,
+          model_preset: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -245,8 +247,8 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
     ckpt_interval = intervals["ckpt_interval"]
     warmup_steps  = intervals["warmup_steps"]
 
-    print(f"  Compiling model: {compile_model}", flush=True)
-    model, cfg = get_model(compile_model=compile_model)
+    print(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}", flush=True)
+    model, cfg = get_model(compile_model=compile_model, model_preset=model_preset)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE})", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -302,6 +304,8 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
             reaction_delay=REACTION_DELAY,
             amp_dtype=str(AMP_DTYPE),
             compiled=compile_model,
+            model_preset=model_preset or "base",
+            n_params=n_params,
             **cfg.__dict__,
         ),
     )
@@ -475,6 +479,9 @@ if __name__ == "__main__":
                         help="Disable torch.compile (debug)")
     parser.add_argument("--resume",     type=str, default=None,
                         help="Path to checkpoint (.pt) to resume from")
+    parser.add_argument("--model",      type=str, default=None,
+                        choices=list(MODEL_PRESETS.keys()),
+                        help="Model size preset (default: base)")
     args = parser.parse_args()
     train(
         epochs=args.epochs,
@@ -483,4 +490,5 @@ if __name__ == "__main__":
         debug=args.debug or bool(os.getenv("DEBUG", "")),
         resume=args.resume,
         compile_model=not args.no_compile,
+        model_preset=args.model,
     )
