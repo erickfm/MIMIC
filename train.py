@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# train.py  --  FRAME training with BF16 AMP, torch.compile, step-based loop
+# train.py  --  FRAME training with BF16 AMP, torch.compile, epoch/step-based loop
 #
 # NOTE: overfit_log*.txt files in this repo are from intentional overfit runs
 # on a small fsmash-only subset.  Near-zero main/l/r/btn losses in those logs
@@ -212,16 +212,10 @@ def infinite_loader(dl):
 # -----------------------------------------------------------------------------
 # 5. Training loop (step-based)
 # -----------------------------------------------------------------------------
-def train(max_steps: int, data_dir: str, debug: bool = False,
-          resume: str = None, compile_model: bool = True):
+def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
+          debug: bool = False, resume: str = None, compile_model: bool = True):
     if debug:
         torch.autograd.set_detect_anomaly(True)
-
-    intervals = _compute_intervals(max_steps)
-    log_interval  = intervals["log_interval"]
-    val_interval  = intervals["val_interval"]
-    ckpt_interval = intervals["ckpt_interval"]
-    warmup_steps  = intervals["warmup_steps"]
 
     print(f"Loading dataset from {data_dir} ...", flush=True)
     ds, val_ds = get_datasets(data_dir)
@@ -235,12 +229,26 @@ def train(max_steps: int, data_dir: str, debug: bool = False,
     dl     = get_dataloader(ds)
     val_dl = get_dataloader(val_ds, shuffle=False)
 
+    est_batches = max(n_train // BATCH_SIZE, 1)
+    if max_steps is None:
+        if epochs is None:
+            epochs = 1
+        max_steps = epochs * est_batches
+        print(f"  {epochs} epoch(s) x {est_batches} batches = {max_steps:,} steps", flush=True)
+    else:
+        epoch_frac = max_steps / est_batches
+        print(f"  {max_steps:,} steps (~{epoch_frac:.2f} epochs)", flush=True)
+
+    intervals = _compute_intervals(max_steps)
+    log_interval  = intervals["log_interval"]
+    val_interval  = intervals["val_interval"]
+    ckpt_interval = intervals["ckpt_interval"]
+    warmup_steps  = intervals["warmup_steps"]
+
     print(f"  Compiling model: {compile_model}", flush=True)
     model, cfg = get_model(compile_model=compile_model)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE})", flush=True)
-    est_batches = max(n_train // BATCH_SIZE, 1)
-    print(f"  ~Batches/epoch: {est_batches}  |  Max steps: {max_steps}", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
           f"ckpt={ckpt_interval}  warmup={warmup_steps}", flush=True)
 
@@ -450,21 +458,26 @@ def train(max_steps: int, data_dir: str, debug: bool = False,
 
     elapsed = time.time() - t0
     skip_msg = f"  skipped={skip_ct}" if skip_ct else ""
-    print(f"\nDone. {max_steps} steps in {elapsed:.0f}s "
+    epoch_frac = max_steps / max(est_batches, 1)
+    print(f"\nDone. {max_steps:,} steps ({epoch_frac:.2f} epochs) in {elapsed:.0f}s "
           f"({max_steps/elapsed:.1f} step/s){skip_msg}", flush=True)
     wandb.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FRAME training")
-    parser.add_argument("--max-steps", type=int, default=2000)
-    parser.add_argument("--data-dir",  type=str, default=DATA_DIR)
-    parser.add_argument("--debug",     action="store_true")
+    parser.add_argument("--epochs",     type=int, default=None,
+                        help="Number of epochs (default: 1 if --max-steps not set)")
+    parser.add_argument("--max-steps",  type=int, default=None,
+                        help="Override: train for exactly this many steps")
+    parser.add_argument("--data-dir",   type=str, default=DATA_DIR)
+    parser.add_argument("--debug",      action="store_true")
     parser.add_argument("--no-compile", action="store_true",
                         help="Disable torch.compile (debug)")
-    parser.add_argument("--resume",    type=str, default=None,
+    parser.add_argument("--resume",     type=str, default=None,
                         help="Path to checkpoint (.pt) to resume from")
     args = parser.parse_args()
     train(
+        epochs=args.epochs,
         max_steps=args.max_steps,
         data_dir=args.data_dir,
         debug=args.debug or bool(os.getenv("DEBUG", "")),
