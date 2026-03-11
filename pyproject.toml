@@ -11,7 +11,7 @@ torch = "*"
 numpy = "*"
 pandas = "*"
 pyarrow = "*"
-melee = "*"
+melee = "0.45.1"
 typing-extensions = "*"
 wandb = "^0.20.1"
 

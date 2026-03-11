@@ -196,5 +196,9 @@ cython_debug/
 # etc.
 .idea/
 .DS_Store
+.cursor/
+.vscode/
 wandb/
 checkpoints/
+data/
+*_log*.txt

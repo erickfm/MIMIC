@@ -1,117 +1,32 @@
 # dataset.py
-# -------------------------------------------------------------------------
-# Slippi parquet → fixed-length windows for FRAME
-# Caches preprocessed DataFrames in __init__ to avoid re-reading per sample.
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Slippi frame data -> fixed-length windows for FRAME training.
+#
+# Two dataset classes:
+#   MeleeFrameDatasetWithDelay  - reads raw parquets, preprocesses at init
+#                                 (slow startup, self-contained, good for debug)
+#   StreamingMeleeDataset       - IterableDataset that reads raw parquets
+#                                 on-the-fly using precomputed metadata
+#                                 (instant startup, scales to any dataset size)
+# ---------------------------------------------------------------------------
 
+import json
+import random
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-import json
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 
-from cat_maps import (
-    STAGE_MAP,
-    CHARACTER_MAP,
-    ACTION_MAP,
-    PROJECTILE_TYPE_MAP,
-)
+import features as F
 
-# -----------------------------------------------------------------------------
-# Helper generators – keep all column-name logic in one place
-# -----------------------------------------------------------------------------
-BTN = [
-    "BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y",
-    "BUTTON_Z", "BUTTON_L", "BUTTON_R", "BUTTON_START",
-    "BUTTON_D_UP", "BUTTON_D_DOWN", "BUTTON_D_LEFT", "BUTTON_D_RIGHT",
-]
-
-def btn_cols(prefix: str) -> List[str]:
-    return [f"{prefix}_btn_{b}" for b in BTN]
-
-def analog_cols(prefix: str) -> List[str]:
-    return [
-        f"{prefix}_main_x", f"{prefix}_main_y",
-        f"{prefix}_l_shldr", f"{prefix}_r_shldr",
-    ]
-
-def numeric_state(prefix: str) -> List[str]:
-    base = [
-        f"{prefix}_pos_x", f"{prefix}_pos_y",
-        f"{prefix}_percent", f"{prefix}_stock",
-        f"{prefix}_jumps_left",
-        f"{prefix}_speed_air_x_self", f"{prefix}_speed_ground_x_self",
-        f"{prefix}_speed_x_attack", f"{prefix}_speed_y_attack",
-        f"{prefix}_speed_y_self",
-        f"{prefix}_hitlag_left", f"{prefix}_hitstun_left",
-        f"{prefix}_invuln_left", f"{prefix}_shield_strength",
-    ]
-    ecb = [
-        f"{prefix}_ecb_{part}_{axis}"
-        for part in ("bottom", "left", "right", "top")
-        for axis in ("x", "y")
-    ]
-    return base + ecb
-
-def flags(prefix: str) -> List[str]:
-    return [
-        f"{prefix}_on_ground", f"{prefix}_off_stage",
-        f"{prefix}_facing", f"{prefix}_invulnerable",
-        f"{prefix}_moonwalkwarning",
-    ]
-
-def categorical_ids(prefix: str) -> List[str]:
-    return [
-        f"{prefix}_port",
-        f"{prefix}_character",
-        f"{prefix}_action",
-        f"{prefix}_costume",
-    ]
-
-# -----------------------------------------------------------------------------
-# C-stick direction encoding
-# -----------------------------------------------------------------------------
-def encode_cstick_dir(
-    df: pd.DataFrame,
-    prefix: str,
-    dead_zone: float = 0.15,
-) -> str:
-    dx = df[f"{prefix}_c_x"].astype("float32") - 0.5
-    dy = df[f"{prefix}_c_y"].astype("float32") - 0.5
-
-    mag   = np.hypot(dx, dy)
-    cat   = np.zeros_like(mag, dtype="int64")
-    alive = mag > dead_zone
-
-    horiz = alive & (np.abs(dx) >= np.abs(dy))
-    vert  = alive & (np.abs(dy) >  np.abs(dx))
-
-    cat[horiz & (dx > 0)] = 4
-    cat[horiz & (dx < 0)] = 3
-    cat[vert  & (dy > 0)] = 1
-    cat[vert  & (dy < 0)] = 2
-
-    new_col = f"{prefix}_c_dir"
-    df[new_col] = cat
-    return new_col
-
-# -----------------------------------------------------------------------------
-# Dataset
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Raw-parquet dataset (preprocesses at init -- slow but self-contained)
+# ---------------------------------------------------------------------------
 class MeleeFrameDatasetWithDelay(Dataset):
     """Fixed-length windows over Slippi frame data with a reaction delay."""
-
-    _stage_geom_cols = [
-        "blastzone_left", "blastzone_right", "blastzone_top", "blastzone_bottom",
-        "stage_edge_left", "stage_edge_right",
-        "left_platform_height",  "left_platform_left",  "left_platform_right",
-        "right_platform_height", "right_platform_left", "right_platform_right",
-        "top_platform_height",   "top_platform_left",   "top_platform_right",
-        "randall_height", "randall_left", "randall_right",
-    ]
 
     def __init__(
         self,
@@ -131,8 +46,6 @@ class MeleeFrameDatasetWithDelay(Dataset):
         if not all_files:
             raise RuntimeError(f"No .parquet files found in {parquet_dir}")
 
-        # Deterministic train/val split by file (seeded shuffle)
-        import random
         rng = random.Random(42)
         shuffled = list(all_files)
         rng.shuffle(shuffled)
@@ -142,278 +55,58 @@ class MeleeFrameDatasetWithDelay(Dataset):
         else:
             self.files = shuffled[n_val:] if n_val > 0 else shuffled
 
-        # Read all files once
         raw_dfs: Dict[Path, pd.DataFrame] = {}
         for f in self.files:
             df = pd.read_parquet(f)
             df = df[df["frame"] >= 0].reset_index(drop=True)
             raw_dfs[f] = df
 
-        # Map every valid window across all parquet files
         self.index_map: List[Tuple[Path, int]] = []
         for f, df in raw_dfs.items():
             max_start = len(df) - (sequence_length + reaction_delay)
-            if max_start > 0:
-                self.index_map.extend([(f, s) for s in range(max_start)])
+            if max_start >= 0:
+                self.index_map.extend([(f, s) for s in range(max_start + 1)])
         if not self.index_map:
             raise RuntimeError("No valid windows across the dataset.")
 
-        # Build feature spec & collect categorical columns
-        self.feature_groups: Dict[str, Dict] = self._build_feature_groups()
-        self._categorical_cols: List[str] = []
-        for _, meta in self._walk_groups(return_meta=True):
-            if meta["ftype"] == "categorical":
-                self._categorical_cols.extend(meta["cols"])
+        self._fg = F.build_feature_groups()
+        self._categorical_cols = F.get_categorical_cols(self._fg)
+        self._norm_cols = F.get_norm_cols(self._fg)
 
-        # Build dynamic categorical maps (uses raw_dfs, no re-read)
-        self._build_categorical_mappings(raw_dfs)
+        dynamic_maps = F.build_categorical_mappings_streaming(
+            [f for f in self.files], self._categorical_cols)
 
-        # Fixed enum maps
-        self._enum_maps: Dict[str, Dict[int, int]] = {
-            "stage": STAGE_MAP,
-            "_character": CHARACTER_MAP,
-            "_action":    ACTION_MAP,
-            "_type":      PROJECTILE_TYPE_MAP,
-            "c_dir":      {i: i for i in range(5)},
-        }
-
-        # Determine which columns to normalize (numeric inputs, not flags/buttons/categoricals)
-        self._norm_cols: List[str] = []
-        for _, meta in self._walk_groups(return_meta=True):
-            if meta["ftype"] in ("numeric", "analog", "action_elapsed"):
-                self._norm_cols.extend(meta["cols"])
-        self._norm_cols = sorted(set(self._norm_cols))
-
-        # Preprocess and cache all DataFrames (everything except normalization)
         self._df_cache: Dict[Path, pd.DataFrame] = {}
         for f, df in raw_dfs.items():
-            self._df_cache[f] = self._preprocess(df)
+            self._df_cache[f] = F.preprocess_df(df, self._categorical_cols, dynamic_maps)
 
-        # Compute normalization stats on preprocessed data (or reuse from train set)
         if norm_stats is not None:
             self.norm_stats = norm_stats
         else:
-            self.norm_stats = self._compute_norm_stats(self._df_cache)
+            col_sum: Dict[str, float] = {}
+            col_sq:  Dict[str, float] = {}
+            col_n:   Dict[str, int]   = {}
+            for df in self._df_cache.values():
+                F.update_norm_accumulators(df, self._norm_cols, col_sum, col_sq, col_n)
+            self.norm_stats = F.finalize_norm_stats(self._norm_cols, col_sum, col_sq, col_n)
 
-        # Apply normalization in-place
         for df in self._df_cache.values():
-            for c, (mean, std) in self.norm_stats.items():
-                if c in df.columns:
-                    df[c] = ((df[c].astype(np.float32) - mean) / std).astype(np.float32)
+            F.apply_normalization(df, self.norm_stats)
 
-        # Drop unused columns to save RAM
         used_cols = set()
-        for _, meta in self._walk_groups(return_meta=True):
+        for _, meta in F.walk_groups(self._fg, return_meta=True):
             used_cols.update(meta["cols"])
-        # target columns
         used_cols.update(["self_main_x", "self_main_y", "self_l_shldr",
-                          "self_r_shldr", "self_c_dir", *btn_cols("self")])
+                          "self_r_shldr", "self_c_dir", *F.btn_cols("self")])
         for f in self._df_cache:
             df = self._df_cache[f]
             drop = [c for c in df.columns if c not in used_cols]
             if drop:
                 self._df_cache[f] = df.drop(columns=drop)
 
-        # Save stats for inference
-        stats_path = self.parquet_dir / "norm_stats.json"
-        with open(stats_path, "w") as fh:
-            json.dump(self.norm_stats, fh)
-        print(f"  Saved normalization stats → {stats_path} ({len(self.norm_stats)} columns)")
-
-    def _compute_norm_stats(self, dfs: Dict[Path, pd.DataFrame]) -> Dict[str, Tuple[float, float]]:
-        """Compute per-column mean/std across all DataFrames for normalization."""
-        col_sum: Dict[str, float] = {}
-        col_sq:  Dict[str, float] = {}
-        col_n:   Dict[str, int]   = {}
-
-        for df in dfs.values():
-            for c in self._norm_cols:
-                if c not in df.columns:
-                    continue
-                vals = df[c].astype(np.float64).values
-                valid = np.isfinite(vals)
-                v = vals[valid]
-                col_sum[c] = col_sum.get(c, 0.0) + v.sum()
-                col_sq[c]  = col_sq.get(c, 0.0) + (v ** 2).sum()
-                col_n[c]   = col_n.get(c, 0) + len(v)
-
-        stats: Dict[str, Tuple[float, float]] = {}
-        for c in self._norm_cols:
-            n = col_n.get(c, 0)
-            if n > 1:
-                mean = col_sum[c] / n
-                var  = col_sq[c] / n - mean ** 2
-                std  = float(np.sqrt(max(var, 0.0)))
-                if std < 1e-6:
-                    std = 1.0  # constant column — don't scale
-                stats[c] = (float(mean), std)
-            else:
-                stats[c] = (0.0, 1.0)
-        return stats
-
-    def _preprocess(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Full preprocessing: c-stick encoding, fillna, categorical mapping."""
-        # C-stick direction
-        for p in ("self", "opp", "self_nana", "opp_nana"):
-            encode_cstick_dir(df, p, dead_zone=0.15)
-
-        # Drop unused
-        df = df.drop(columns=["startAt"], errors="ignore")
-
-        # Recompute distance from positions
-        df["distance"] = np.hypot(
-            df["self_pos_x"] - df["opp_pos_x"],
-            df["self_pos_y"] - df["opp_pos_y"],
-        ).astype("float32")
-
-        # Fill defaults & clamp all non-finite numeric values
-        num_cols  = [c for c, dt in df.dtypes.items() if dt.kind in ("i", "f")]
-        bool_cols = [c for c, dt in df.dtypes.items() if dt == "bool"]
-        df[num_cols]  = df[num_cols].fillna(0.0)
-        df[bool_cols] = df[bool_cols].fillna(False)
-
-        arr = df[num_cols].astype(np.float32).to_numpy()
-        mask = ~np.isfinite(arr)
-        if mask.any():
-            arr[mask] = 0.0
-            df.loc[:, num_cols] = arr
-
-        # Map categoricals → dense ids
-        for c in self._categorical_cols:
-            raw = df[c].fillna(0)
-            df[c] = raw.map(lambda x, col=c: self._get_enum_map(col).get(x, 0)).astype("int64")
-
-        # Defragment before adding more columns
-        df = df.copy()
-
-        # Synthetic Nana presence flags
-        df["self_nana_present"] = (df.get("self_nana_character", 0) > 0).astype("float32")
-        df["opp_nana_present"]  = (df.get("opp_nana_character", 0) > 0).astype("float32")
-
-        return df
-
-    def _get_enum_map(self, col: str) -> Dict[int, int]:
-        if col == "stage":
-            return self._enum_maps["stage"]
-        if col.endswith("_c_dir"):
-            return self._enum_maps["c_dir"]
-        for suffix, m in self._enum_maps.items():
-            if suffix != "stage" and col.endswith(suffix):
-                return m
-        return getattr(self, f"{col}_map")
-
-    def _build_feature_groups(self) -> Dict[str, Dict]:
-        fg: Dict[str, Dict] = {
-            "global": {
-                "numeric": ["distance", "frame", *self._stage_geom_cols],
-                "categorical": ["stage"],
-            },
-            "players": {
-                "self": {
-                    "categorical": categorical_ids("self") + ["self_c_dir"],
-                    "buttons": btn_cols("self"),
-                    "flags":   flags("self"),
-                    "analog":  analog_cols("self"),
-                    "numeric": numeric_state("self"),
-                    "action_elapsed": ["self_action_frame"],
-                },
-                "opp": {
-                    "categorical": categorical_ids("opp") + ["opp_c_dir"],
-                    "buttons": btn_cols("opp"),
-                    "flags":   flags("opp"),
-                    "analog":  analog_cols("opp"),
-                    "numeric": numeric_state("opp"),
-                    "action_elapsed": ["opp_action_frame"],
-                },
-                "self_nana": {
-                    "categorical": [
-                        "self_nana_character", "self_nana_action", "self_nana_c_dir"
-                    ],
-                    "buttons": btn_cols("self_nana"),
-                    "flags":   flags("self_nana") + ["self_nana_present"],
-                    "analog":  analog_cols("self_nana"),
-                    "numeric": numeric_state("self_nana") + [
-                        "self_nana_stock", "self_nana_jumps_left",
-                        "self_nana_hitlag_left", "self_nana_hitstun_left",
-                        "self_nana_invuln_left",
-                    ],
-                    "action_elapsed": ["self_nana_action_frame"],
-                },
-                "opp_nana": {
-                    "categorical": [
-                        "opp_nana_character", "opp_nana_action", "opp_nana_c_dir"
-                    ],
-                    "buttons": btn_cols("opp_nana"),
-                    "flags":   flags("opp_nana") + ["opp_nana_present"],
-                    "analog":  analog_cols("opp_nana"),
-                    "numeric": numeric_state("opp_nana") + [
-                        "opp_nana_stock", "opp_nana_jumps_left",
-                        "opp_nana_hitlag_left", "opp_nana_hitstun_left",
-                        "opp_nana_invuln_left",
-                    ],
-                    "action_elapsed": ["opp_nana_action_frame"],
-                },
-            },
-            "projectiles": {
-                k: {
-                    "categorical": [
-                        f"proj{k}_owner", f"proj{k}_type", f"proj{k}_subtype"
-                    ],
-                    "numeric": [
-                        f"proj{k}_pos_x", f"proj{k}_pos_y",
-                        f"proj{k}_speed_x", f"proj{k}_speed_y",
-                        f"proj{k}_frame",
-                    ],
-                }
-                for k in range(8)
-            },
-        }
-        return fg
-
-    def _walk_groups(self, *, return_meta=False):
-        stack = [((), self.feature_groups)]
-        while stack:
-            prefix, node = stack.pop()
-            if isinstance(node, dict) and all(
-                k in ("numeric", "categorical", "buttons", "flags", "analog", "action_elapsed")
-                for k in node
-            ):
-                for ftype, cols in node.items():
-                    if cols:
-                        meta = {
-                            "ftype": ftype,
-                            "cols": cols,
-                            "entity": prefix[-1] if prefix else "global",
-                        }
-                        if return_meta:
-                            yield prefix, meta
-                        else:
-                            yield cols
-            else:
-                for k, sub in node.items():
-                    stack.append(((*prefix, k), sub))
-
-    def _build_categorical_mappings(self, dfs: Dict[Path, pd.DataFrame]):
-        raw_unique = {
-            c: set()
-            for c in self._categorical_cols
-            if c not in {"stage"}
-            and not c.endswith("_character")
-            and not c.endswith("_action")
-            and not c.endswith("_type")
-            and not c.endswith("_c_dir")
-        }
-        for fpath in self.files:
-            df = dfs[fpath]
-            for c in list(raw_unique):
-                if c in df.columns:
-                    vals = df[c].dropna().astype("int64")
-                    raw_unique[c].update(v for v in vals if 0 <= v <= 4)
-        for c, s in raw_unique.items():
-            vals = sorted(s)
-            if 0 not in vals:
-                vals.insert(0, 0)
-            setattr(self, f"{c}_map", {raw: idx for idx, raw in enumerate(vals)})
+        self._target_cache: Dict[Path, Dict[str, torch.Tensor]] = {}
+        for f, df in self._df_cache.items():
+            self._target_cache[f] = F.build_targets_batch(df, self.norm_stats)
 
     def __len__(self):
         return len(self.index_map)
@@ -421,58 +114,133 @@ class MeleeFrameDatasetWithDelay(Dataset):
     def __getitem__(self, idx: int):
         fpath, start_idx = self.index_map[idx]
         W, R = self.sequence_length, self.reaction_delay
-
         df = self._df_cache[fpath]
 
-        # Slice window + target
-        end_idx    = start_idx + W
-        target_idx = end_idx + R - 1
-        slice_df   = df.iloc[start_idx:end_idx]
-        target_row = df.iloc[target_idx]
+        end_idx = start_idx + W
+        slice_df = df.iloc[start_idx:end_idx]
+        state_seq = F.df_to_state_tensors(slice_df, self._fg)
 
-        # ---------- Build state_seq ----------
-        state_seq: Dict[str, torch.Tensor] = {}
-        for _, meta in self._walk_groups(return_meta=True):
-            cols, ftype, entity = meta["cols"], meta["ftype"], meta["entity"]
-            key = f"{entity}_{ftype}" if entity != "global" else ftype
-
-            if ftype == "categorical":
-                for col in cols:
-                    state_seq[col] = torch.from_numpy(slice_df[col].values.copy()).long()
-            else:
-                arrs = [
-                    torch.from_numpy(slice_df[col].astype("float32").values.copy())
-                    for col in cols
-                ]
-                state_seq[key] = (
-                    torch.stack(arrs, dim=-1) if len(arrs) > 1 else arrs[0]
-                )
-
-        # ---------- Build target (denormalize analog targets back to [0,1]) ----------
-        def _denorm(col, val):
-            if col in self.norm_stats:
-                mean, std = self.norm_stats[col]
-                return val * std + mean
-            return val
-
-        target: Dict[str, torch.Tensor] = {
-            "main_x":   torch.tensor(_denorm("self_main_x", target_row["self_main_x"]), dtype=torch.float32),
-            "main_y":   torch.tensor(_denorm("self_main_y", target_row["self_main_y"]), dtype=torch.float32),
-            "l_shldr":  torch.tensor(_denorm("self_l_shldr", target_row["self_l_shldr"]), dtype=torch.float32),
-            "r_shldr":  torch.tensor(_denorm("self_r_shldr", target_row["self_r_shldr"]), dtype=torch.float32),
-        }
-
-        dir_idx = int(target_row["self_c_dir"])
-        target["c_dir"] = torch.tensor(
-            [1.0 if i == dir_idx else 0.0 for i in range(5)], dtype=torch.float32
-        )
-
-        target["btns"] = torch.stack(
-            [
-                torch.tensor(target_row[c], dtype=torch.float32)
-                for c in btn_cols("self")
-            ],
-            dim=0,
-        )
+        target_start = start_idx + R
+        target_end   = start_idx + W + R
+        targets = self._target_cache[fpath]
+        target = {k: v[target_start:target_end] for k, v in targets.items()}
 
         return state_seq, target
+
+
+# ---------------------------------------------------------------------------
+# Streaming dataset (instant startup, reads raw parquets on-the-fly)
+# ---------------------------------------------------------------------------
+SHUFFLE_BUFFER_SIZE = 8192
+
+
+class StreamingMeleeDataset(IterableDataset):
+    """Streams raw parquets with on-the-fly preprocessing.
+
+    Requires precomputed metadata from preprocess.py:
+      - norm_stats.json
+      - cat_maps.json
+      - file_index.json
+    """
+
+    def __init__(
+        self,
+        data_dir: str,
+        sequence_length: int = 60,
+        reaction_delay: int = 1,
+        split: str = "train",
+        val_frac: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.data_dir        = Path(data_dir)
+        self.sequence_length = sequence_length
+        self.reaction_delay  = reaction_delay
+        self.split           = split
+
+        with open(self.data_dir / "norm_stats.json") as fh:
+            self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
+        with open(self.data_dir / "cat_maps.json") as fh:
+            raw = json.load(fh)
+            self.cat_maps: Dict[str, Dict[int, int]] = {
+                col: {int(k): v for k, v in m.items()} for col, m in raw.items()
+            }
+        with open(self.data_dir / "file_index.json") as fh:
+            self.file_index: Dict[str, int] = json.load(fh)
+
+        self._fg = F.build_feature_groups()
+        self._categorical_cols = F.get_categorical_cols(self._fg)
+
+        all_names = sorted(self.file_index.keys())
+        rng = random.Random(42)
+        rng.shuffle(all_names)
+        n_val = int(len(all_names) * val_frac)
+
+        if split == "val" and n_val > 0:
+            names = all_names[:n_val]
+        else:
+            names = all_names[n_val:] if n_val > 0 else all_names
+
+        self.files = [self.data_dir / n for n in names]
+        self.n_games = len(self.files)
+
+        W, R = sequence_length, reaction_delay
+        self._total_windows = sum(
+            max(0, self.file_index[n] - W - R + 1)
+            for n in names
+        )
+
+    def __len__(self):
+        return self._total_windows
+
+    def _process_game(self, path: Path):
+        """Load one parquet, preprocess, return (state_tensors, target_tensors)."""
+        df = pd.read_parquet(path)
+        df = df[df["frame"] >= 0].reset_index(drop=True)
+        if len(df) < 2:
+            return None, None, 0
+
+        df = F.preprocess_df(df, self._categorical_cols, self.cat_maps)
+        F.apply_normalization(df, self.norm_stats)
+
+        state   = F.df_to_state_tensors(df, self._fg)
+        targets = F.build_targets_batch(df, self.norm_stats)
+        return state, targets, len(df)
+
+    def __iter__(self):
+        worker_info = get_worker_info()
+
+        files = list(self.files)
+        rng = random.Random(42)
+        rng.shuffle(files)
+        if worker_info is not None:
+            files = files[worker_info.id :: worker_info.num_workers]
+        random.shuffle(files)
+
+        W, R = self.sequence_length, self.reaction_delay
+        buf: List[Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]] = []
+
+        for path in files:
+            state, targets, n_frames = self._process_game(path)
+            if state is None:
+                continue
+
+            max_start = n_frames - W - R
+            for s in range(max_start + 1):
+                end = s + W
+                target_start = s + R
+                target_end   = s + W + R
+
+                window_state  = {k: v[s:end].clone() for k, v in state.items()}
+                window_target = {k: v[target_start:target_end].clone() for k, v in targets.items()}
+
+                buf.append((window_state, window_target))
+
+                if len(buf) >= SHUFFLE_BUFFER_SIZE:
+                    random.shuffle(buf)
+                    half = SHUFFLE_BUFFER_SIZE // 2
+                    for item in buf[:half]:
+                        yield item
+                    buf = buf[half:]
+
+        random.shuffle(buf)
+        yield from buf

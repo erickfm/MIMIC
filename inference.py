@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 # inference.py  –  FRAME bot
 #
-# • Converts live Slippi frames to dataset tensors
-# • Encodes c-stick floats → 5-way categorical direction
-# • Runs FramePredictor on a rolling window
-# • Converts model output back to Dolphin controller actions
+# Converts live Slippi frames → model tensors via features.py,
+# runs FramePredictor on a rolling window,
+# converts model output back to Dolphin controller actions.
 # ---------------------------------------------------------------------------
 
 import argparse
@@ -21,6 +20,9 @@ import melee
 import numpy as np
 import pandas as pd
 import torch
+
+import features as F
+from model import FramePredictor, ModelConfig
 
 # ── CLI / logging ───────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Realtime FRAME bot")
@@ -41,18 +43,14 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 torch.set_printoptions(sci_mode=False, precision=4)
 
-# ── maps & model ─────────────────────────────────────────────────────────────
-from cat_maps import STAGE_MAP, CHARACTER_MAP, ACTION_MAP, PROJECTILE_TYPE_MAP
-from model     import FramePredictor, ModelConfig
-from dataset   import MeleeFrameDatasetWithDelay  # only for feature spec
-
-# ════════════════════════════════════════════════════════════════════════════
-# 0)  Device + checkpoint
-# ════════════════════════════════════════════════════════════════════════════
+# ── Device + checkpoint ───────────────────────────────────────────────────
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 log.info("Device: %s", DEVICE)
 
-ckpts = sorted(Path("./checkpoints").glob("epoch_*.pt"))
+ckpt_patterns = ["step_*.pt", "epoch_*.pt"]
+ckpts: list[Path] = []
+for pat in ckpt_patterns:
+    ckpts.extend(Path("./checkpoints").glob(pat))
 if not ckpts:
     log.error("No checkpoints found."); sys.exit(1)
 ckpt_path = max(ckpts, key=lambda p: p.stat().st_mtime)
@@ -64,128 +62,68 @@ model.load_state_dict(ckpt["model_state_dict"])
 model.eval()
 log.info("Loaded checkpoint %s", ckpt_path)
 
-# Load normalization stats from checkpoint (or fallback to JSON)
+# ── Normalization stats + categorical maps ───────────────────────────────
+import json
+
+_SEARCH_DIRS = [
+    Path("./data"), Path("./data/subset"), Path("./data/full"),
+]
+
 norm_stats: Dict[str, tuple] = ckpt.get("norm_stats", {})
 if not norm_stats:
-    for p in [Path("./data/norm_stats.json"), Path("./data/subset/norm_stats.json"),
-              Path("./data/full/norm_stats.json")]:
-        if p.exists():
-            import json
-            with open(p) as fh:
+    for p in _SEARCH_DIRS:
+        ns = p / "norm_stats.json"
+        if ns.exists():
+            with open(ns) as fh:
                 norm_stats = json.load(fh)
             break
 if norm_stats:
     log.info("Loaded normalization stats for %d columns", len(norm_stats))
 else:
-    log.warning("No normalization stats found — running without input normalization")
+    log.warning("No normalization stats found")
+
+cat_maps: Dict[str, Dict[int, int]] = {}
+for p in _SEARCH_DIRS:
+    cm = p / "cat_maps.json"
+    if cm.exists():
+        with open(cm) as fh:
+            raw = json.load(fh)
+            cat_maps = {col: {int(k): v for k, v in m.items()} for col, m in raw.items()}
+        log.info("Loaded categorical maps for %d columns", len(cat_maps))
+        break
+if not cat_maps:
+    log.warning("No cat_maps.json found -- dynamic categoricals will map to 0")
 
 ROLL_WIN = cfg.max_seq_len
-MAX_PROJ = 8
 
-# ════════════════════════════════════════════════════════════════════════════
-# 1)  Feature spec from Dataset (bypass __init__ to avoid needing data files)
-# ════════════════════════════════════════════════════════════════════════════
-_spec = MeleeFrameDatasetWithDelay.__new__(MeleeFrameDatasetWithDelay)
-_spec.feature_groups = _spec._build_feature_groups()
-_spec._categorical_cols = [
-    col for _, meta in _spec._walk_groups(return_meta=True)
-    if meta["ftype"] == "categorical" for col in meta["cols"]
-]
-_spec._enum_maps = {
-    "stage":      STAGE_MAP,
-    "_character": CHARACTER_MAP,
-    "_action":    ACTION_MAP,
-    "_type":      PROJECTILE_TYPE_MAP,
-    "c_dir":      {i: i for i in range(5)},
-}
+# ── Feature spec ─────────────────────────────────────────────────────────
+_fg = F.build_feature_groups()
+_categorical_cols = F.get_categorical_cols(_fg)
 
-# ════════════════════════════════════════════════════════════════════════════
-# 2)  Debug helpers
-# ════════════════════════════════════════════════════════════════════════════
+# ── Debug helpers ────────────────────────────────────────────────────────
 def check_tensor_dict(tdict: Dict[str, torch.Tensor], where: str) -> None:
     if not DEBUG:
         return
     for k, v in tdict.items():
         if torch.isnan(v).any() or torch.isinf(v).any():
-            log.warning("NaN/Inf detected in %s → %s", where, k)
+            log.warning("NaN/Inf detected in %s -> %s", where, k)
 
-# ════════════════════════════════════════════════════════════════════════════
-# 3)  dataframe utils
-# ════════════════════════════════════════════════════════════════════════════
-def encode_cstick_dir_df(df: pd.DataFrame, prefix: str, dead: float = 0.15):
-    dx = df[f"{prefix}_c_x"].astype(np.float32) - 0.5
-    dy = df[f"{prefix}_c_y"].astype(np.float32) - 0.5
-    mag = np.hypot(dx, dy)
-
-    cat = np.zeros_like(mag, dtype=np.int64)
-    active = mag > dead
-    horiz  = active & (np.abs(dx) >= np.abs(dy))
-    vert   = active & (np.abs(dy) >  np.abs(dx))
-
-    cat[horiz & (dx > 0)] = 4
-    cat[horiz & (dx < 0)] = 3
-    cat[vert  & (dy > 0)] = 1
-    cat[vert  & (dy < 0)] = 2
-    df[f"{prefix}_c_dir"] = cat
-
-
-def _map_cat(col: str, x: Any) -> int:
-    if col == "stage":
-        return _spec._enum_maps["stage"].get(x, 0)
-    if col.endswith("_c_dir"):
-        return int(x) if 0 <= int(x) <= 4 else 0
-    for suf, mp in _spec._enum_maps.items():
-        if suf != "stage" and col.endswith(suf):
-            return mp.get(x, 0)
-    try:
-        return max(int(x), 0)
-    except Exception:
-        return 0
-
-
+# ── DataFrame conversion ────────────────────────────────────────────────
 def rows_to_state_seq(rows: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-    """Convert rolling list of row dicts → tensor batch (B=1)."""
-    df = pd.DataFrame(rows).drop(columns=["startAt"], errors="ignore")
+    """Convert rolling list of row dicts -> tensor batch (B=1)."""
+    df = pd.DataFrame(rows)
 
-    # ---------- C-stick dirs ----------
-    for p in ("self", "opp", "self_nana", "opp_nana"):
-        if f"{p}_c_x" in df.columns:
-            encode_cstick_dir_df(df, p)
+    df = F.preprocess_df(df, _categorical_cols, cat_maps)
 
-    # ---------- Fill NaNs & clamp non-finite ----------
-    num_cols  = [c for c, t in df.dtypes.items() if t.kind in ("i", "f")]
-    bool_cols = [c for c, t in df.dtypes.items() if t == "bool"]
-    df[num_cols]  = df[num_cols].fillna(0.0)
-    df[bool_cols] = df[bool_cols].fillna(False)
+    F.apply_normalization(df, norm_stats)
 
-    arr = df[num_cols].astype(np.float32).to_numpy()
-    mask = ~np.isfinite(arr)
-    if mask.any():
-        arr[mask] = 0.0
-        df.loc[:, num_cols] = arr
-
-    # ---------- Normalize (must match training) ----------
-    for c, (mean, std) in norm_stats.items():
-        if c in df.columns:
-            df[c] = ((df[c].astype(np.float32) - mean) / std).astype(np.float32)
-
-    # ---------- Ensure categorical columns ----------
-    missing_cats = [c for c in _spec._categorical_cols if c not in df.columns]
+    missing_cats = [c for c in _categorical_cols if c not in df.columns]
     if missing_cats:
         df = pd.concat([df, pd.DataFrame({c: 0 for c in missing_cats},
                                          index=df.index)], axis=1)
 
-    # ---------- Map categoricals ----------
-    for col in _spec._categorical_cols:
-        df[col] = df[col].map(lambda x, c=col: _map_cat(c, x)).astype("int64")
-
-    # ---------- Synthetic Nana flags ----------
-    df["self_nana_present"] = (df.get("self_nana_character", 0) > 0).astype("float32")
-    df["opp_nana_present"]  = (df.get("opp_nana_character", 0) > 0).astype("float32")
-
-    # ---------- Ensure numeric columns ----------
     numeric_missing = {}
-    for _, meta in _spec._walk_groups(return_meta=True):
+    for _, meta in F.walk_groups(_fg, return_meta=True):
         if meta["ftype"] != "categorical":
             for col in meta["cols"]:
                 if col not in df.columns:
@@ -197,26 +135,14 @@ def rows_to_state_seq(rows: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         bad = df.columns[df.isna().any()].tolist()
         log.warning("DataFrame still has NaNs in cols: %s", bad)
 
-    # ---------- Build tensor dict ----------
-    state_seq: Dict[str, torch.Tensor] = {}
-    for _, meta in _spec._walk_groups(return_meta=True):
-        cols, ftype, entity = meta["cols"], meta["ftype"], meta["entity"]
-        key = f"{entity}_{ftype}" if entity != "global" else ftype
-
-        if ftype == "categorical":
-            for col in cols:
-                state_seq[col] = torch.from_numpy(df[col].values).long().unsqueeze(0)
-        else:
-            mats = [torch.from_numpy(df[c].astype(np.float32).values) for c in cols]
-            state_seq[key] = (torch.stack(mats, -1) if len(mats) > 1 else mats[0]).unsqueeze(0)
+    state_seq = F.df_to_state_tensors(df, _fg)
+    state_seq = {k: v.unsqueeze(0) for k, v in state_seq.items()}
 
     if DEBUG:
         check_tensor_dict(state_seq, "state_seq")
     return state_seq
 
-# ════════════════════════════════════════════════════════════════════════════
-# 4)  Inference wrapper
-# ════════════════════════════════════════════════════════════════════════════
+# ── Inference wrapper ────────────────────────────────────────────────────
 @torch.no_grad()
 def run_inference(win_rows: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     batch = rows_to_state_seq(win_rows)
@@ -225,13 +151,12 @@ def run_inference(win_rows: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
 
     check_tensor_dict(batch, "batch_before_model")
     preds = model(batch)
+    preds = {k: v[:, -1] for k, v in preds.items()}
     check_tensor_dict(preds, "model_output")
 
     return {k: v.cpu().squeeze(0) for k, v in preds.items()}
 
-# ════════════════════════════════════════════════════════════════════════════
-# 5)  Controller output
-# ════════════════════════════════════════════════════════════════════════════
+# ── Controller output ────────────────────────────────────────────────────
 C_DIR_TO_FLOAT = {
     0: (0.5, 0.5),
     1: (0.5, 1.0),
@@ -258,23 +183,23 @@ def _safe(val: float, default: float = 0.5) -> float:
 def press_output(ctrl: melee.Controller,
                  pred: Dict[str, torch.Tensor],
                  thresh: float = 0.5):
-
-    mx, my = map(float, pred["main_xy"].tolist())
-    mx, my = _safe(mx), _safe(my)
+    clamped_main = torch.clamp(pred["main_xy"], 0.0, 1.0)
+    mx, my = map(float, clamped_main.tolist())
 
     dir_idx = int(torch.argmax(pred["c_dir_logits"]))
     cx, cy  = C_DIR_TO_FLOAT.get(dir_idx, (0.5, 0.5))
 
-    l_val = _safe(pred["L_val"].item(), 0.0)
-    r_val = _safe(pred["R_val"].item(), 0.0)
+    l_val = _safe(torch.clamp(pred["L_val"], 0.0, 1.0).item(), 0.0)
+    r_val = _safe(torch.clamp(pred["R_val"], 0.0, 1.0).item(), 0.0)
 
     ctrl.tilt_analog(melee.enums.Button.BUTTON_MAIN, mx, my)
     ctrl.tilt_analog(melee.enums.Button.BUTTON_C,    cx, cy)
     ctrl.press_shoulder(melee.enums.Button.BUTTON_L, l_val)
     ctrl.press_shoulder(melee.enums.Button.BUTTON_R, r_val)
 
+    btn_probs = torch.sigmoid(pred["btn_logits"])
     pressed = []
-    for prob, btn in zip(pred["btn_probs"], IDX_TO_BUTTON):
+    for prob, btn in zip(btn_probs, IDX_TO_BUTTON):
         if prob.item() > thresh:
             ctrl.press_button(btn)
             pressed.append(btn.name)
@@ -286,14 +211,12 @@ def press_output(ctrl: melee.Controller,
         mx, my, cx, cy, l_val, r_val, pressed
     )
 
-# ════════════════════════════════════════════════════════════════════════════
-# 6)  Dolphin loop
-# ════════════════════════════════════════════════════════════════════════════
+# ── Dolphin loop ─────────────────────────────────────────────────────────
 def signal_handler(sig, _):
     for c in controllers.values():
         c.disconnect()
     console.stop()
-    log.info("Shutting down…")
+    log.info("Shutting down...")
     sys.exit(0)
 
 if __name__ == "__main__":
@@ -324,7 +247,6 @@ if __name__ == "__main__":
         if gs is None:
             continue
 
-        # menu helper
         if gs.menu_state not in (melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH):
             c0, c1 = controllers[ports[0]], controllers[ports[1]]
             melee.MenuHelper().menu_helper_simple(
@@ -337,7 +259,7 @@ if __name__ == "__main__":
             )
             continue
 
-        # ---------- build row (matches extract.py schema) ----------
+        # -- build row (matches extract.py schema) --
         row: Dict[str, Any] = {}
         row["stage"]    = gs.stage.value if gs.stage else -1
         row["frame"]    = gs.frame
@@ -431,9 +353,28 @@ if __name__ == "__main__":
                 row[f"{npref}character"]    = -1
                 row[f"{npref}action"]       = -1
                 row[f"{npref}action_frame"] = -1
+                for b in F.BTN:
+                    row[f"{npref}btn_{b}"] = 0
+                row[f"{npref}main_x"] = 0.5
+                row[f"{npref}main_y"] = 0.5
+                row[f"{npref}c_x"]    = 0.5
+                row[f"{npref}c_y"]    = 0.5
+                row[f"{npref}l_shldr"] = 0.0
+                row[f"{npref}r_shldr"] = 0.0
+                for field in ("percent", "pos_x", "pos_y", "stock",
+                              "facing", "on_ground", "off_stage",
+                              "invulnerable", "moonwalkwarning",
+                              "shield_strength", "jumps_left",
+                              "hitlag_left", "hitstun_left", "invuln_left",
+                              "speed_air_x_self", "speed_ground_x_self",
+                              "speed_x_attack", "speed_y_attack",
+                              "speed_y_self"):
+                    row[f"{npref}{field}"] = 0.0
+                for part in ("bottom", "left", "right", "top"):
+                    for axis in ("x", "y"):
+                        row[f"{npref}ecb_{part}_{axis}"] = 0.0
 
-        # ---------- projectiles ----------
-        for j in range(MAX_PROJ):
+        for j in range(F.PROJ_SLOTS):
             pp = f"proj{j}_"
             if j < len(gs.projectiles):
                 p = gs.projectiles[j]
@@ -455,7 +396,6 @@ if __name__ == "__main__":
                 row[f"{pp}speed_y"] = np.nan
                 row[f"{pp}frame"]   = -1
 
-        # ---------- inference ----------
         rows.append(row)
         if len(rows) == ROLL_WIN:
             pred = run_inference(list(rows))

@@ -46,9 +46,10 @@ class _GroupAttention(nn.Module):
             nhead=nhead,
             dim_feedforward=4 * d_intra,
             dropout=DROPOUT_P,
-            batch_first=True,  # (B, N, C)
+            batch_first=True,
+            norm_first=True,
         )
-        self.encoder = nn.TransformerEncoder(enc_layer, nlayers)
+        self.encoder = nn.TransformerEncoder(enc_layer, nlayers, norm=nn.LayerNorm(d_intra))
 
         # k learnable query tokens (k=1 → classic [CLS])
         self.k_query = k_query
