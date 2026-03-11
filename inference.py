@@ -64,6 +64,21 @@ model.load_state_dict(ckpt["model_state_dict"])
 model.eval()
 log.info("Loaded checkpoint %s", ckpt_path)
 
+# Load normalization stats from checkpoint (or fallback to JSON)
+norm_stats: Dict[str, tuple] = ckpt.get("norm_stats", {})
+if not norm_stats:
+    for p in [Path("./data/norm_stats.json"), Path("./data/subset/norm_stats.json"),
+              Path("./data/full/norm_stats.json")]:
+        if p.exists():
+            import json
+            with open(p) as fh:
+                norm_stats = json.load(fh)
+            break
+if norm_stats:
+    log.info("Loaded normalization stats for %d columns", len(norm_stats))
+else:
+    log.warning("No normalization stats found — running without input normalization")
+
 ROLL_WIN = cfg.max_seq_len
 MAX_PROJ = 8
 
@@ -137,11 +152,22 @@ def rows_to_state_seq(rows: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
         if f"{p}_c_x" in df.columns:
             encode_cstick_dir_df(df, p)
 
-    # ---------- Fill NaNs ----------
+    # ---------- Fill NaNs & clamp non-finite ----------
     num_cols  = [c for c, t in df.dtypes.items() if t.kind in ("i", "f")]
     bool_cols = [c for c, t in df.dtypes.items() if t == "bool"]
     df[num_cols]  = df[num_cols].fillna(0.0)
     df[bool_cols] = df[bool_cols].fillna(False)
+
+    arr = df[num_cols].astype(np.float32).to_numpy()
+    mask = ~np.isfinite(arr)
+    if mask.any():
+        arr[mask] = 0.0
+        df.loc[:, num_cols] = arr
+
+    # ---------- Normalize (must match training) ----------
+    for c, (mean, std) in norm_stats.items():
+        if c in df.columns:
+            df[c] = ((df[c].astype(np.float32) - mean) / std).astype(np.float32)
 
     # ---------- Ensure categorical columns ----------
     missing_cats = [c for c in _spec._categorical_cols if c not in df.columns]

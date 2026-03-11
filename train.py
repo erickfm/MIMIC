@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-# train.py  —  FRAME training with strict finiteness checks
-#             + AdamW, loss rebalancing, cosine LR, and fp16 AMP
+# train.py  —  FRAME training with focal loss, cosine LR, and fp16 AMP
 
+import sys
 import os
+import math
+import time
 import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.utils as nn_utils
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 # —— AMP ————————————————————————————————————————————————————————
@@ -24,20 +27,23 @@ from model   import FramePredictor, ModelConfig
 # ─────────────────────────────────────────────────────────────────────────────
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BATCH_SIZE      = 64
+BATCH_SIZE      = 192
 NUM_EPOCHS      = 100
 LEARNING_RATE   = 1e-3
 WEIGHT_DECAY    = 1e-2            # AdamW (weights only)
-NUM_WORKERS     = 4
+NUM_WORKERS     = 8
 SEQUENCE_LENGTH = 60
 REACTION_DELAY  = 1
-DATA_DIR        = "./data"
+DATA_DIR        = "./data/subset"
 
 GRAD_CLIP_NORM      = 1.0
-REBALANCE_ALPHA     = 1.0
 TASK_NAMES          = ["main", "l", "r", "cdir", "btn"]
 
-USE_AMP         = torch.cuda.is_available()  # fp16 only if CUDA
+# —— Focal loss + label smoothing for c-dir ————————————————————————————
+FOCAL_GAMMA         = 2.0       # down-weight easy examples
+LABEL_SMOOTHING     = 0.1       # soften hard targets
+
+USE_AMP         = False  # disabled — fp16 causes NaN overflow on real data
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Collate
@@ -54,13 +60,30 @@ def collate_fn(batch):
 # 3. Loss (with per-term safety)
 # ─────────────────────────────────────────────────────────────────────────────
 _mse = nn.MSELoss()
-_ce  = nn.CrossEntropyLoss(reduction='mean')
 _bce = nn.BCEWithLogitsLoss()
+
+def focal_loss(logits, targets, gamma=FOCAL_GAMMA, label_smoothing=LABEL_SMOOTHING):
+    """Focal loss with label smoothing for multi-class classification."""
+    n_classes = logits.shape[-1]
+    # label smoothing: hard targets → soft targets
+    with torch.no_grad():
+        smooth = label_smoothing / n_classes
+        targets_smooth = torch.full_like(logits, smooth)
+        targets_smooth.scatter_(1, targets.unsqueeze(1), 1.0 - label_smoothing + smooth)
+
+    log_p = F.log_softmax(logits, dim=-1)
+    p     = log_p.exp()
+
+    # focal modulation by p_t (true-class probability) per sample
+    p_t = p.gather(1, targets.unsqueeze(1)).squeeze(1)   # (B,)
+    focal_weight = (1.0 - p_t).pow(gamma)                # (B,)
+
+    ce = -(targets_smooth * log_p).sum(dim=-1)            # (B,)
+    loss = focal_weight * ce
+    return loss.mean()
 
 def safe_loss(fn, pred, tgt, name):
     out = fn(pred, tgt)
-    if not torch.isfinite(out):
-        raise RuntimeError(f"❌ {name} produced non-finite value: {out}")
     return out
 
 def compute_loss(preds, targets):
@@ -82,17 +105,13 @@ def compute_loss(preds, targets):
     loss_main = safe_loss(_mse, main_pred, main_tgt, "main_xy")
     loss_l    = safe_loss(_mse, l_pred,    l_tgt,    "L_val")
     loss_r    = safe_loss(_mse, r_pred,    r_tgt,    "R_val")
-    loss_cdir = safe_loss(_ce,  c_logits,  cdir_tgt.argmax(dim=-1), "c_dir")
+    cdir_classes = cdir_tgt.argmax(dim=-1)
+    loss_cdir = focal_loss(c_logits, cdir_classes)
     loss_btn  = safe_loss(_bce, btn_pred,  btn_tgt, "btns")
 
-    # —— c-dir accuracy & prediction distribution ————————————————
-    cdir_true = cdir_tgt.argmax(dim=-1)
+    # —— c-dir accuracy ——————————————————————————————————————————
     cdir_pred = c_logits.argmax(dim=-1)
-    cdir_acc  = (cdir_pred == cdir_true).float().mean().item()
-
-    # count predictions per class (0=neutral, 1=up, 2=down, 3=left, 4=right)
-    pred_counts = torch.bincount(cdir_pred, minlength=5).tolist()
-    tgt_counts  = torch.bincount(cdir_true, minlength=5).tolist()
+    cdir_acc  = (cdir_pred == cdir_classes).float().mean().item()
 
     metrics = {
         "loss_main": loss_main.item(),
@@ -101,12 +120,6 @@ def compute_loss(preds, targets):
         "loss_cdir": loss_cdir.item(),
         "loss_btn":  loss_btn.item(),
         "cdir_acc":  cdir_acc,
-        "cdir_pred_neutral": pred_counts[0],
-        "cdir_pred_left":    pred_counts[3],
-        "cdir_pred_right":   pred_counts[4],
-        "cdir_tgt_neutral":  tgt_counts[0],
-        "cdir_tgt_left":     tgt_counts[3],
-        "cdir_tgt_right":    tgt_counts[4],
     }
     task_losses = (loss_main, loss_l, loss_r, loss_cdir, loss_btn)
     return metrics, task_losses
@@ -114,18 +127,27 @@ def compute_loss(preds, targets):
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Helpers
 # ─────────────────────────────────────────────────────────────────────────────
-def get_dataset():
-    return MeleeFrameDatasetWithDelay(
+def get_datasets():
+    train_ds = MeleeFrameDatasetWithDelay(
         parquet_dir=DATA_DIR,
         sequence_length=SEQUENCE_LENGTH,
         reaction_delay=REACTION_DELAY,
+        split="train",
     )
+    val_ds = MeleeFrameDatasetWithDelay(
+        parquet_dir=DATA_DIR,
+        sequence_length=SEQUENCE_LENGTH,
+        reaction_delay=REACTION_DELAY,
+        split="val",
+        norm_stats=train_ds.norm_stats,
+    )
+    return train_ds, val_ds
 
-def get_dataloader(ds):
+def get_dataloader(ds, shuffle=True):
     return DataLoader(
         ds,
         batch_size=BATCH_SIZE,
-        shuffle=True,
+        shuffle=shuffle,
         num_workers=NUM_WORKERS,
         collate_fn=collate_fn,
         drop_last=True,
@@ -144,9 +166,14 @@ def train(debug: bool = False, resume: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
-    ds        = get_dataset()
-    dl        = get_dataloader(ds)
+    print(f"Loading dataset from {DATA_DIR} ...", flush=True)
+    ds, val_ds = get_datasets()
+    print(f"  Train: {len(ds):,} windows from {len(ds.files)} files", flush=True)
+    print(f"  Val:   {len(val_ds):,} windows from {len(val_ds.files)} files", flush=True)
+    dl     = get_dataloader(ds)
+    val_dl = get_dataloader(val_ds, shuffle=False)
     model, cfg = get_model()
+    print(f"  Model: {sum(p.numel() for p in model.parameters()):,} params on {DEVICE}", flush=True)
 
     # —— Fixed task weights (no learnable weights — they collapse to 0) ——
     loss_weights = torch.ones(len(TASK_NAMES), device=DEVICE)
@@ -166,7 +193,9 @@ def train(debug: bool = False, resume: str = None):
         betas=(0.9, 0.999),
     )
 
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=NUM_EPOCHS)
+    cosine    = optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=NUM_EPOCHS)
+    warmup    = optim.lr_scheduler.LinearLR(optimiser, start_factor=0.01, total_iters=3)
+    scheduler = optim.lr_scheduler.SequentialLR(optimiser, [warmup, cosine], milestones=[3])
     scaler    = GradScaler(enabled=USE_AMP)
 
     # —— optional resume ————————————————————————————————————————
@@ -200,8 +229,9 @@ def train(debug: bool = False, resume: str = None):
     global_step = 0
     for epoch in range(start_epoch, NUM_EPOCHS + 1):
         model.train()
-        epoch_loss, batch_ct = 0.0, 0
-        print(f"\n=== Epoch {epoch}/{NUM_EPOCHS} ===")
+        epoch_loss, batch_ct, skip_ct = 0.0, 0, 0
+        t0 = time.time()
+        print(f"\n=== Epoch {epoch}/{NUM_EPOCHS} ===", flush=True)
 
         for i, (state, target) in enumerate(dl, 1):
             # —— move to device & sanity-check inputs ——————————————
@@ -228,6 +258,11 @@ def train(debug: bool = False, resume: str = None):
             loss_vec = torch.stack(task_losses)
             total_loss = (loss_weights * loss_vec).sum()
 
+            if not torch.isfinite(total_loss):
+                skip_ct += 1
+                print(f"⚠️  Skipping batch {i} — non-finite loss ({skip_ct} total)", flush=True)
+                continue
+
             # —— first-batch grad stats ————————————————————————————
             if i == 1 and epoch == start_epoch:
                 grads = torch.autograd.grad(total_loss,
@@ -252,29 +287,57 @@ def train(debug: bool = False, resume: str = None):
 
             # —— logging ——————————————————————————————————————
             global_step += 1
+            epoch_loss += total_loss.item()
+            batch_ct   += 1
             wandb.log(
                 dict(step=global_step,
                      total=total_loss.item(),
+                     avg_loss=epoch_loss / batch_ct,
                      lr=scheduler.get_last_lr()[0],
+                     epoch=epoch,
                      **metrics),
                 step=global_step,
             )
-            epoch_loss += total_loss.item()
-            batch_ct   += 1
 
-            if i % 25 == 0:
+            if i % 250 == 0:
                 print(
-                    f"[{i:04d}] total={total_loss.item():.4f} "
+                    f"[{i:05d}] total={total_loss.item():.4f} "
                     f"main={metrics['loss_main']:.3f} l={metrics['loss_l']:.3f} "
                     f"r={metrics['loss_r']:.3f} cdir={metrics['loss_cdir']:.3f} "
                     f"btn={metrics['loss_btn']:.3f} "
-                    f"cdir_acc={metrics['cdir_acc']:.1%}"
+                    f"cdir_acc={metrics['cdir_acc']:.1%}",
+                    flush=True,
                 )
+
+        # —— Validation ————————————————————————————————————————
+        model.eval()
+        val_loss, val_acc, val_ct = 0.0, 0.0, 0
+        with torch.no_grad():
+            for state, target in val_dl:
+                for k, v in state.items():
+                    state[k] = v.to(DEVICE, non_blocking=True)
+                for k, v in target.items():
+                    target[k] = v.to(DEVICE, non_blocking=True)
+                preds = model(state)
+                metrics, task_losses = compute_loss(preds, target)
+                loss = sum(task_losses).item()
+                if math.isfinite(loss):
+                    val_loss += loss
+                    val_acc  += metrics["cdir_acc"]
+                    val_ct   += 1
+
+        val_avg  = val_loss / max(val_ct, 1)
+        val_cacc = val_acc / max(val_ct, 1)
 
         # —— LR step & checkpoint ——————————————————————————————
         scheduler.step()
+        elapsed = time.time() - t0
         avg = epoch_loss / max(batch_ct, 1)
-        print(f"Epoch {epoch} done. Avg loss={avg:.4f}")
+        skip_msg = f"  skipped={skip_ct}" if skip_ct else ""
+        print(f"Epoch {epoch} done. train={avg:.4f} val={val_avg:.4f} "
+              f"val_cdir_acc={val_cacc:.1%}  "
+              f"batches={batch_ct}  time={elapsed:.0f}s{skip_msg}",
+              flush=True)
         os.makedirs("checkpoints", exist_ok=True)
         ckpt_path = f"checkpoints/epoch_{epoch:02d}.pt"
         torch.save({
@@ -284,10 +347,11 @@ def train(debug: bool = False, resume: str = None):
             "scheduler_state_dict":  scheduler.state_dict(),
             "loss_weights":          loss_weights.cpu(),
             "scaler_state_dict":     scaler.state_dict(),
+            "norm_stats":            ds.norm_stats,
             "config":                cfg.__dict__,
         }, ckpt_path)
         print("Saved checkpoint →", ckpt_path)
-        wandb.log(dict(epoch=epoch, avg_loss=avg), step=global_step)
+        wandb.log(dict(val_loss=val_avg, val_cdir_acc=val_cacc), step=global_step)
 
     wandb.finish()
 

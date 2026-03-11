@@ -7,6 +7,7 @@
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+import json
 import numpy as np
 import pandas as pd
 import torch
@@ -117,15 +118,29 @@ class MeleeFrameDatasetWithDelay(Dataset):
         parquet_dir: str,
         sequence_length: int = 30,
         reaction_delay: int = 1,
+        split: str = "train",
+        val_frac: float = 0.1,
+        norm_stats: Dict[str, Tuple[float, float]] = None,
     ) -> None:
         super().__init__()
         self.parquet_dir     = Path(parquet_dir)
         self.sequence_length = sequence_length
         self.reaction_delay  = reaction_delay
 
-        self.files = sorted(self.parquet_dir.glob("*.parquet"))
-        if not self.files:
+        all_files = sorted(self.parquet_dir.glob("*.parquet"))
+        if not all_files:
             raise RuntimeError(f"No .parquet files found in {parquet_dir}")
+
+        # Deterministic train/val split by file (seeded shuffle)
+        import random
+        rng = random.Random(42)
+        shuffled = list(all_files)
+        rng.shuffle(shuffled)
+        n_val = int(len(shuffled) * val_frac)
+        if split == "val" and n_val > 0:
+            self.files = shuffled[:n_val]
+        else:
+            self.files = shuffled[n_val:] if n_val > 0 else shuffled
 
         # Read all files once
         raw_dfs: Dict[Path, pd.DataFrame] = {}
@@ -162,10 +177,79 @@ class MeleeFrameDatasetWithDelay(Dataset):
             "c_dir":      {i: i for i in range(5)},
         }
 
-        # Preprocess and cache all DataFrames
+        # Determine which columns to normalize (numeric inputs, not flags/buttons/categoricals)
+        self._norm_cols: List[str] = []
+        for _, meta in self._walk_groups(return_meta=True):
+            if meta["ftype"] in ("numeric", "analog", "action_elapsed"):
+                self._norm_cols.extend(meta["cols"])
+        self._norm_cols = sorted(set(self._norm_cols))
+
+        # Preprocess and cache all DataFrames (everything except normalization)
         self._df_cache: Dict[Path, pd.DataFrame] = {}
         for f, df in raw_dfs.items():
             self._df_cache[f] = self._preprocess(df)
+
+        # Compute normalization stats on preprocessed data (or reuse from train set)
+        if norm_stats is not None:
+            self.norm_stats = norm_stats
+        else:
+            self.norm_stats = self._compute_norm_stats(self._df_cache)
+
+        # Apply normalization in-place
+        for df in self._df_cache.values():
+            for c, (mean, std) in self.norm_stats.items():
+                if c in df.columns:
+                    df[c] = ((df[c].astype(np.float32) - mean) / std).astype(np.float32)
+
+        # Drop unused columns to save RAM
+        used_cols = set()
+        for _, meta in self._walk_groups(return_meta=True):
+            used_cols.update(meta["cols"])
+        # target columns
+        used_cols.update(["self_main_x", "self_main_y", "self_l_shldr",
+                          "self_r_shldr", "self_c_dir", *btn_cols("self")])
+        for f in self._df_cache:
+            df = self._df_cache[f]
+            drop = [c for c in df.columns if c not in used_cols]
+            if drop:
+                self._df_cache[f] = df.drop(columns=drop)
+
+        # Save stats for inference
+        stats_path = self.parquet_dir / "norm_stats.json"
+        with open(stats_path, "w") as fh:
+            json.dump(self.norm_stats, fh)
+        print(f"  Saved normalization stats → {stats_path} ({len(self.norm_stats)} columns)")
+
+    def _compute_norm_stats(self, dfs: Dict[Path, pd.DataFrame]) -> Dict[str, Tuple[float, float]]:
+        """Compute per-column mean/std across all DataFrames for normalization."""
+        col_sum: Dict[str, float] = {}
+        col_sq:  Dict[str, float] = {}
+        col_n:   Dict[str, int]   = {}
+
+        for df in dfs.values():
+            for c in self._norm_cols:
+                if c not in df.columns:
+                    continue
+                vals = df[c].astype(np.float64).values
+                valid = np.isfinite(vals)
+                v = vals[valid]
+                col_sum[c] = col_sum.get(c, 0.0) + v.sum()
+                col_sq[c]  = col_sq.get(c, 0.0) + (v ** 2).sum()
+                col_n[c]   = col_n.get(c, 0) + len(v)
+
+        stats: Dict[str, Tuple[float, float]] = {}
+        for c in self._norm_cols:
+            n = col_n.get(c, 0)
+            if n > 1:
+                mean = col_sum[c] / n
+                var  = col_sq[c] / n - mean ** 2
+                std  = float(np.sqrt(max(var, 0.0)))
+                if std < 1e-6:
+                    std = 1.0  # constant column — don't scale
+                stats[c] = (float(mean), std)
+            else:
+                stats[c] = (0.0, 1.0)
+        return stats
 
     def _preprocess(self, df: pd.DataFrame) -> pd.DataFrame:
         """Full preprocessing: c-stick encoding, fillna, categorical mapping."""
@@ -182,24 +266,17 @@ class MeleeFrameDatasetWithDelay(Dataset):
             df["self_pos_y"] - df["opp_pos_y"],
         ).astype("float32")
 
-        # Fill defaults
+        # Fill defaults & clamp all non-finite numeric values
         num_cols  = [c for c, dt in df.dtypes.items() if dt.kind in ("i", "f")]
         bool_cols = [c for c, dt in df.dtypes.items() if dt == "bool"]
         df[num_cols]  = df[num_cols].fillna(0.0)
         df[bool_cols] = df[bool_cols].fillna(False)
 
-        # Clamp non-finite numeric features
-        numeric_cols = []
-        for _, meta in self._walk_groups(return_meta=True):
-            if meta["ftype"] == "numeric":
-                numeric_cols.extend(meta["cols"])
-        numeric_cols = [c for c in set(numeric_cols) if c in df.columns]
-
-        arr = df[numeric_cols].astype(np.float32).to_numpy()
+        arr = df[num_cols].astype(np.float32).to_numpy()
         mask = ~np.isfinite(arr)
         if mask.any():
             arr[mask] = 0.0
-            df.loc[:, numeric_cols] = arr
+            df.loc[:, num_cols] = arr
 
         # Map categoricals → dense ids
         for c in self._categorical_cols:
@@ -371,12 +448,18 @@ class MeleeFrameDatasetWithDelay(Dataset):
                     torch.stack(arrs, dim=-1) if len(arrs) > 1 else arrs[0]
                 )
 
-        # ---------- Build target ----------
+        # ---------- Build target (denormalize analog targets back to [0,1]) ----------
+        def _denorm(col, val):
+            if col in self.norm_stats:
+                mean, std = self.norm_stats[col]
+                return val * std + mean
+            return val
+
         target: Dict[str, torch.Tensor] = {
-            "main_x":   torch.tensor(target_row["self_main_x"], dtype=torch.float32),
-            "main_y":   torch.tensor(target_row["self_main_y"], dtype=torch.float32),
-            "l_shldr":  torch.tensor(target_row["self_l_shldr"], dtype=torch.float32),
-            "r_shldr":  torch.tensor(target_row["self_r_shldr"], dtype=torch.float32),
+            "main_x":   torch.tensor(_denorm("self_main_x", target_row["self_main_x"]), dtype=torch.float32),
+            "main_y":   torch.tensor(_denorm("self_main_y", target_row["self_main_y"]), dtype=torch.float32),
+            "l_shldr":  torch.tensor(_denorm("self_l_shldr", target_row["self_l_shldr"]), dtype=torch.float32),
+            "r_shldr":  torch.tensor(_denorm("self_r_shldr", target_row["self_r_shldr"]), dtype=torch.float32),
         }
 
         dir_idx = int(target_row["self_c_dir"])
