@@ -219,7 +219,6 @@ Pass `--model <preset>` to `train.py` for scaling experiments:
 Spin up any machine with an NVIDIA GPU, clone the repo, and run:
 
 ```bash
-export HF_TOKEN=<your-huggingface-token>
 bash setup.sh --run
 ```
 
@@ -233,7 +232,7 @@ bash setup.sh --run --model small     # 14M param model
 bash setup.sh --run --model tiny      # 3.5M param model
 ```
 
-The dataset is hosted at [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset).
+The dataset is hosted at [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) (public, no token needed to download).
 
 ## Manual Setup
 
@@ -245,9 +244,21 @@ pip install torch numpy pandas pyarrow wandb huggingface_hub melee==0.45.1 typin
 
 ## Data
 
-Parquet files are generated from Slippi `.slp` replays using [slippi-frame-extractor](https://github.com/erickfm/slippi-frame-extractor).
+The training dataset is publicly hosted on HuggingFace at
+[erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset).
+It contains everything needed to start training immediately (~780 MB):
 
-Download the preprocessed dataset from HuggingFace:
+| Contents | Count | Description |
+|---|---|---|
+| `*.parquet` | 2,000 | Raw Slippi replay frames (one file per player per game) |
+| `cat_maps.json` | 1 | Dynamic categorical mappings (ports, costumes, projectile subtypes) |
+| `norm_stats.json` | 1 | Per-column mean/std for feature normalization |
+| `file_index.json` | 1 | Frame counts per file (train/val split + length estimation) |
+
+Parquet files are generated from Slippi `.slp` replays using
+[slippi-frame-extractor](https://github.com/erickfm/slippi-frame-extractor).
+
+Download the dataset:
 
 ```bash
 python3 -c "
@@ -256,13 +267,14 @@ snapshot_download('erickfm/frame-melee-subset', repo_type='dataset', local_dir='
 "
 ```
 
-Or, to preprocess from raw parquets (one-time, streams files, ~20 MB peak RAM):
+Since the metadata JSONs are included, preprocessing can be skipped.
+To regenerate metadata from raw parquets (one-time, streams files, ~20 MB peak RAM):
 
 ```bash
 python3 preprocess.py --data-dir data/subset
 ```
 
-Preprocessing produces three small JSON files alongside the parquets:
+Preprocessing produces three JSON files alongside the parquets:
 - `norm_stats.json` -- per-column mean/std for normalization
 - `cat_maps.json` -- dynamic categorical mappings (ports, costumes)
 - `file_index.json` -- frame counts per file (for train/val split + length estimation)
