@@ -1,7 +1,7 @@
 # dataset.py
 # -------------------------------------------------------------------------
 # Slippi parquet → fixed-length windows for FRAME
-# Ensures no NaNs or Infs in any numeric feature (including distance)
+# Caches preprocessed DataFrames in __init__ to avoid re-reading per sample.
 # -------------------------------------------------------------------------
 
 from pathlib import Path
@@ -127,11 +127,16 @@ class MeleeFrameDatasetWithDelay(Dataset):
         if not self.files:
             raise RuntimeError(f"No .parquet files found in {parquet_dir}")
 
-        # Map every valid window across all parquet files
-        self.index_map: List[Tuple[Path, int]] = []
+        # Read all files once
+        raw_dfs: Dict[Path, pd.DataFrame] = {}
         for f in self.files:
             df = pd.read_parquet(f)
-            df = df[df["frame"] >= 0]
+            df = df[df["frame"] >= 0].reset_index(drop=True)
+            raw_dfs[f] = df
+
+        # Map every valid window across all parquet files
+        self.index_map: List[Tuple[Path, int]] = []
+        for f, df in raw_dfs.items():
             max_start = len(df) - (sequence_length + reaction_delay)
             if max_start > 0:
                 self.index_map.extend([(f, s) for s in range(max_start)])
@@ -145,8 +150,8 @@ class MeleeFrameDatasetWithDelay(Dataset):
             if meta["ftype"] == "categorical":
                 self._categorical_cols.extend(meta["cols"])
 
-        # Build dynamic categorical maps
-        self._build_categorical_mappings()
+        # Build dynamic categorical maps (uses raw_dfs, no re-read)
+        self._build_categorical_mappings(raw_dfs)
 
         # Fixed enum maps
         self._enum_maps: Dict[str, Dict[int, int]] = {
@@ -156,6 +161,59 @@ class MeleeFrameDatasetWithDelay(Dataset):
             "_type":      PROJECTILE_TYPE_MAP,
             "c_dir":      {i: i for i in range(5)},
         }
+
+        # Preprocess and cache all DataFrames
+        self._df_cache: Dict[Path, pd.DataFrame] = {}
+        for f, df in raw_dfs.items():
+            self._df_cache[f] = self._preprocess(df)
+
+    def _preprocess(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Full preprocessing: c-stick encoding, fillna, categorical mapping."""
+        # C-stick direction
+        for p in ("self", "opp", "self_nana", "opp_nana"):
+            encode_cstick_dir(df, p, dead_zone=0.15)
+
+        # Drop unused
+        df = df.drop(columns=["startAt"], errors="ignore")
+
+        # Recompute distance from positions
+        df["distance"] = np.hypot(
+            df["self_pos_x"] - df["opp_pos_x"],
+            df["self_pos_y"] - df["opp_pos_y"],
+        ).astype("float32")
+
+        # Fill defaults
+        num_cols  = [c for c, dt in df.dtypes.items() if dt.kind in ("i", "f")]
+        bool_cols = [c for c, dt in df.dtypes.items() if dt == "bool"]
+        df[num_cols]  = df[num_cols].fillna(0.0)
+        df[bool_cols] = df[bool_cols].fillna(False)
+
+        # Clamp non-finite numeric features
+        numeric_cols = []
+        for _, meta in self._walk_groups(return_meta=True):
+            if meta["ftype"] == "numeric":
+                numeric_cols.extend(meta["cols"])
+        numeric_cols = [c for c in set(numeric_cols) if c in df.columns]
+
+        arr = df[numeric_cols].astype(np.float32).to_numpy()
+        mask = ~np.isfinite(arr)
+        if mask.any():
+            arr[mask] = 0.0
+            df.loc[:, numeric_cols] = arr
+
+        # Map categoricals → dense ids
+        for c in self._categorical_cols:
+            raw = df[c].fillna(0)
+            df[c] = raw.map(lambda x, col=c: self._get_enum_map(col).get(x, 0)).astype("int64")
+
+        # Defragment before adding more columns
+        df = df.copy()
+
+        # Synthetic Nana presence flags
+        df["self_nana_present"] = (df.get("self_nana_character", 0) > 0).astype("float32")
+        df["opp_nana_present"]  = (df.get("opp_nana_character", 0) > 0).astype("float32")
+
+        return df
 
     def _get_enum_map(self, col: str) -> Dict[int, int]:
         if col == "stage":
@@ -258,7 +316,7 @@ class MeleeFrameDatasetWithDelay(Dataset):
                 for k, sub in node.items():
                     stack.append(((*prefix, k), sub))
 
-    def _build_categorical_mappings(self):
+    def _build_categorical_mappings(self, dfs: Dict[Path, pd.DataFrame]):
         raw_unique = {
             c: set()
             for c in self._categorical_cols
@@ -269,8 +327,7 @@ class MeleeFrameDatasetWithDelay(Dataset):
             and not c.endswith("_c_dir")
         }
         for fpath in self.files:
-            df = pd.read_parquet(fpath)
-            df = df[df["frame"] >= 0]
+            df = dfs[fpath]
             for c in list(raw_unique):
                 if c in df.columns:
                     vals = df[c].dropna().astype("int64")
@@ -288,71 +345,12 @@ class MeleeFrameDatasetWithDelay(Dataset):
         fpath, start_idx = self.index_map[idx]
         W, R = self.sequence_length, self.reaction_delay
 
-        df = pd.read_parquet(fpath)
-        df = df[df["frame"] >= 0].reset_index(drop=True)
+        df = self._df_cache[fpath]
 
-        # ---- Encode c-stick direction
-        for p in ("self", "opp", "self_nana", "opp_nana"):
-            encode_cstick_dir(df, p, dead_zone=0.15)
-
-        # ---- Drop unused & basic fillna
-        df = df.drop(columns=["startAt"], errors="ignore")
-
-        # ---- Recompute distance explicitly (using true on‐stage positions)
-        df["distance"] = np.hypot(
-            df["self_pos_x"] - df["opp_pos_x"],
-            df["self_pos_y"] - df["opp_pos_y"],
-        ).astype("float32")
-
-        # ---- Fill defaults
-        num_cols  = [c for c, dt in df.dtypes.items() if dt.kind in ("i", "f")]
-        bool_cols = [c for c, dt in df.dtypes.items() if dt == "bool"]
-        df[num_cols]  = df[num_cols].fillna(0.0)
-        df[bool_cols] = df[bool_cols].fillna(False)
-
-        # ---- Clamp only the exact numeric-features subset, with dtype coercion
-        numeric_cols = []
-        for _, meta in self._walk_groups(return_meta=True):
-            if meta["ftype"] == "numeric":
-                numeric_cols.extend(meta["cols"])
-        numeric_cols = [c for c in set(numeric_cols) if c in df.columns]
-
-        # **Fix**: cast to float32 before isfinite
-        arr = df[numeric_cols].astype(np.float32).to_numpy()
-        mask = ~np.isfinite(arr)
-        if mask.any():
-            arr[mask] = 0.0
-            df.loc[:, numeric_cols] = arr
-
-        # ---- Map categoricals → ids (with guards) ----
-        for c in self._categorical_cols:
-            raw = df[c].fillna(0)
-            df[c] = raw.map(lambda x: self._get_enum_map(c).get(x, 0)).astype("int64")
-            if df[c].isna().any():
-                bad = df.loc[df[c].isna(), c][:10].tolist()
-                raise ValueError(f"{c}: unmapped values → {bad}")
-            vocab_size = max(self._get_enum_map(c).values()) + 1
-            if (df[c] >= vocab_size).any():
-                max_bad = int(df[c].max())
-                raise ValueError(f"{c}: index {max_bad} ≥ vocab {vocab_size}")
-
-        # ---- Synthetic Nana presence flags ----
-        df = df.assign(
-            self_nana_present=(df.get("self_nana_character", 0) > 0).astype("float32"),
-            opp_nana_present =(df.get("opp_nana_character", 0) > 0).astype("float32"),
-        )
-
-        # ---- Final guard (reuses arr, so no dtype issue) ----
-        if not np.isfinite(arr).all():
-            bad = [numeric_cols[i] for i in np.where(~np.isfinite(arr).any(axis=0))[0]]
-            raise ValueError(f"Non-finite still in numeric: {bad[:5]}")
-
-        # -----------------------------------------------------------------
         # Slice window + target
-        # -----------------------------------------------------------------
         end_idx    = start_idx + W
         target_idx = end_idx + R - 1
-        slice_df   = df.iloc[start_idx:end_idx].reset_index(drop=True)
+        slice_df   = df.iloc[start_idx:end_idx]
         target_row = df.iloc[target_idx]
 
         # ---------- Build state_seq ----------
@@ -363,10 +361,10 @@ class MeleeFrameDatasetWithDelay(Dataset):
 
             if ftype == "categorical":
                 for col in cols:
-                    state_seq[col] = torch.from_numpy(slice_df[col].values).long()
+                    state_seq[col] = torch.from_numpy(slice_df[col].values.copy()).long()
             else:
                 arrs = [
-                    torch.from_numpy(slice_df[col].astype("float32").values)
+                    torch.from_numpy(slice_df[col].astype("float32").values.copy())
                     for col in cols
                 ]
                 state_seq[key] = (

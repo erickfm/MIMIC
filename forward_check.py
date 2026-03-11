@@ -11,7 +11,7 @@ def main():
     # 1) Build dataset + dataloader
     ds = MeleeFrameDatasetWithDelay(
         parquet_dir="./data",
-        sequence_length=30,
+        sequence_length=60,
         reaction_delay=1,
     )
     dl = DataLoader(

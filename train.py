@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # train.py  —  FRAME training with strict finiteness checks
-#             + AdamW, GradNorm, and fp16 AMP (PyTorch ≥ 2.3)
+#             + AdamW, loss rebalancing, cosine LR, and fp16 AMP
 
 import os
 import argparse
@@ -24,18 +24,18 @@ from model   import FramePredictor, ModelConfig
 # ─────────────────────────────────────────────────────────────────────────────
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BATCH_SIZE      = 128
-NUM_EPOCHS      = 200
-LEARNING_RATE   = 2e-4
+BATCH_SIZE      = 64
+NUM_EPOCHS      = 100
+LEARNING_RATE   = 1e-3
 WEIGHT_DECAY    = 1e-2            # AdamW (weights only)
-NUM_WORKERS     = 16
+NUM_WORKERS     = 4
 SEQUENCE_LENGTH = 60
 REACTION_DELAY  = 1
 DATA_DIR        = "./data"
 
-GRAD_CLIP_NORM  = 1.0
-GRADNORM_ALPHA  = 1.0
-TASK_NAMES      = ["main", "l", "r", "cdir", "btn"]
+GRAD_CLIP_NORM      = 1.0
+REBALANCE_ALPHA     = 1.0
+TASK_NAMES          = ["main", "l", "r", "cdir", "btn"]
 
 USE_AMP         = torch.cuda.is_available()  # fp16 only if CUDA
 
@@ -53,6 +53,10 @@ def collate_fn(batch):
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Loss (with per-term safety)
 # ─────────────────────────────────────────────────────────────────────────────
+_mse = nn.MSELoss()
+_ce  = nn.CrossEntropyLoss(reduction='mean')
+_bce = nn.BCEWithLogitsLoss()
+
 def safe_loss(fn, pred, tgt, name):
     out = fn(pred, tgt)
     if not torch.isfinite(out):
@@ -60,11 +64,6 @@ def safe_loss(fn, pred, tgt, name):
     return out
 
 def compute_loss(preds, targets):
-    # —— loss fns ————————————————————————————————————————————————
-    mse = nn.MSELoss()
-    ce  = nn.CrossEntropyLoss(reduction='mean')
-    bce = nn.BCEWithLogitsLoss()
-
     # —— predictions (cast to fp32 so dtypes match targets) ————————
     main_pred = preds["main_xy"].float()
     l_pred    = preds["L_val"].squeeze(-1).float()
@@ -80,11 +79,20 @@ def compute_loss(preds, targets):
     btn_tgt  = targets.get("btns", targets.get("btns_float")).float()
 
     # —— per-head losses ————————————————————————————————————————
-    loss_main = safe_loss(mse, main_pred, main_tgt, "main_xy")
-    loss_l    = safe_loss(mse, l_pred,    l_tgt,    "L_val")
-    loss_r    = safe_loss(mse, r_pred,    r_tgt,    "R_val")
-    loss_cdir = safe_loss(ce,  c_logits,  cdir_tgt.argmax(dim=-1), "c_dir")
-    loss_btn  = safe_loss(bce, btn_pred,  btn_tgt, "btns")
+    loss_main = safe_loss(_mse, main_pred, main_tgt, "main_xy")
+    loss_l    = safe_loss(_mse, l_pred,    l_tgt,    "L_val")
+    loss_r    = safe_loss(_mse, r_pred,    r_tgt,    "R_val")
+    loss_cdir = safe_loss(_ce,  c_logits,  cdir_tgt.argmax(dim=-1), "c_dir")
+    loss_btn  = safe_loss(_bce, btn_pred,  btn_tgt, "btns")
+
+    # —— c-dir accuracy & prediction distribution ————————————————
+    cdir_true = cdir_tgt.argmax(dim=-1)
+    cdir_pred = c_logits.argmax(dim=-1)
+    cdir_acc  = (cdir_pred == cdir_true).float().mean().item()
+
+    # count predictions per class (0=neutral, 1=up, 2=down, 3=left, 4=right)
+    pred_counts = torch.bincount(cdir_pred, minlength=5).tolist()
+    tgt_counts  = torch.bincount(cdir_true, minlength=5).tolist()
 
     metrics = {
         "loss_main": loss_main.item(),
@@ -92,6 +100,13 @@ def compute_loss(preds, targets):
         "loss_r":    loss_r.item(),
         "loss_cdir": loss_cdir.item(),
         "loss_btn":  loss_btn.item(),
+        "cdir_acc":  cdir_acc,
+        "cdir_pred_neutral": pred_counts[0],
+        "cdir_pred_left":    pred_counts[3],
+        "cdir_pred_right":   pred_counts[4],
+        "cdir_tgt_neutral":  tgt_counts[0],
+        "cdir_tgt_left":     tgt_counts[3],
+        "cdir_tgt_right":    tgt_counts[4],
     }
     task_losses = (loss_main, loss_l, loss_r, loss_cdir, loss_btn)
     return metrics, task_losses
@@ -123,27 +138,18 @@ def get_model():
     return model, cfg
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CLI / logging / resume setup
+# 5. Training loop
 # ─────────────────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Realtime FRAME bot w/ debug")
-parser.add_argument("--debug",  action="store_true", help="Verbose sanity checks")
-parser.add_argument("--resume", type=str, default=None,
-                    help="Path to checkpoint (.pt) to resume from")
-args  = parser.parse_args()
-DEBUG = args.debug or bool(os.getenv("DEBUG", ""))
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. Training loop with sanity checks, GradNorm, AMP, checkpointing
-# ─────────────────────────────────────────────────────────────────────────────
-def train():
-    torch.autograd.set_detect_anomaly(True)
+def train(debug: bool = False, resume: str = None):
+    if debug:
+        torch.autograd.set_detect_anomaly(True)
 
     ds        = get_dataset()
     dl        = get_dataloader(ds)
     model, cfg = get_model()
 
-    # —— GradNorm learnable weights ——————————————————————————————
-    loss_weights = torch.nn.Parameter(torch.ones(len(TASK_NAMES), device=DEVICE))
+    # —— Fixed task weights (no learnable weights — they collapse to 0) ——
+    loss_weights = torch.ones(len(TASK_NAMES), device=DEVICE)
 
     # —— AdamW param-groups (bias/Norm excluded from decay) ————————
     decay, no_decay = [], []
@@ -155,29 +161,26 @@ def train():
 
     optimiser = optim.AdamW(
         [{"params": decay,      "weight_decay": WEIGHT_DECAY},
-         {"params": no_decay,   "weight_decay": 0.0},
-         {"params": [loss_weights], "weight_decay": 0.0}],
+         {"params": no_decay,   "weight_decay": 0.0}],
         lr=LEARNING_RATE,
         betas=(0.9, 0.999),
     )
 
-    scaler = GradScaler(enabled=USE_AMP)  # fp16 scaler
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=NUM_EPOCHS)
+    scaler    = GradScaler(enabled=USE_AMP)
 
     # —— optional resume ————————————————————————————————————————
-    start_epoch     = 1
-    init_task_loss  = None
-    if args.resume:
-        ckpt = torch.load(args.resume, map_location=DEVICE)
+    start_epoch = 1
+    if resume:
+        ckpt = torch.load(resume, map_location=DEVICE)
         model.load_state_dict(ckpt['model_state_dict'])
         optimiser.load_state_dict(ckpt['optimizer_state_dict'])
-        loss_weights.data.copy_(ckpt['loss_weights'])
-        init_task_loss = ckpt.get("init_task_loss")
-        if init_task_loss is not None:
-            init_task_loss = init_task_loss.to(DEVICE)
         if USE_AMP and ckpt.get("scaler_state_dict"):
             scaler.load_state_dict(ckpt["scaler_state_dict"])
+        if ckpt.get("scheduler_state_dict"):
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch = ckpt['epoch'] + 1
-        print(f"Resumed from {args.resume}, starting at epoch {start_epoch}")
+        print(f"Resumed from {resume}, starting at epoch {start_epoch}")
 
     wandb.init(
         project="FRAME",
@@ -204,39 +207,28 @@ def train():
             # —— move to device & sanity-check inputs ——————————————
             for k, v in state.items():
                 state[k] = v.to(DEVICE, non_blocking=True)
-                if DEBUG and not torch.isfinite(state[k]).all():
+                if debug and not torch.isfinite(state[k]).all():
                     raise RuntimeError(f"Non-finite in state['{k}']")
             for k, v in target.items():
                 target[k] = v.to(DEVICE, non_blocking=True)
-                if DEBUG and not torch.isfinite(target[k]).all():
+                if debug and not torch.isfinite(target[k]).all():
                     raise RuntimeError(f"Non-finite in target['{k}']")
 
             # —— forward (fp16 autocast) ——————————————————————————
             with autocast("cuda", enabled=USE_AMP):
                 preds = model(state)
 
-            if DEBUG:
+            if debug:
                 for name, t in preds.items():
                     if not torch.isfinite(t).all():
                         raise RuntimeError(f"Non-finite in output '{name}'")
 
-            # —— losses & GradNorm weighting ——————————————————————
+            # —— losses ————————————————————————————————————————————
             metrics, task_losses = compute_loss(preds, target)
             loss_vec = torch.stack(task_losses)
-            if init_task_loss is None:
-                init_task_loss = loss_vec.detach()
+            total_loss = (loss_weights * loss_vec).sum()
 
-            weighted   = loss_weights * loss_vec
-            task_loss  = weighted.sum()
-
-            avg_loss   = loss_vec.mean().detach()
-            inv_rate   = (loss_vec / init_task_loss).detach()
-            target_g   = avg_loss * inv_rate.pow(GRADNORM_ALPHA)
-            gradnorm   = nn.functional.l1_loss(loss_vec, target_g)
-
-            total_loss = task_loss + gradnorm
-
-            # —— first-batch grad stats (unchanged) ————————————————
+            # —— first-batch grad stats ————————————————————————————
             if i == 1 and epoch == start_epoch:
                 grads = torch.autograd.grad(total_loss,
                                             model.parameters(),
@@ -258,17 +250,13 @@ def train():
             scaler.step(optimiser)
             scaler.update()
 
-            loss_weights.data.clamp_(min=0.0)
-
             # —— logging ——————————————————————————————————————
             global_step += 1
             wandb.log(
                 dict(step=global_step,
                      total=total_loss.item(),
-                     gradnorm=gradnorm.item(),
-                     **metrics,
-                     **{f"w_{n}": loss_weights[j].item()
-                        for j, n in enumerate(TASK_NAMES)}),
+                     lr=scheduler.get_last_lr()[0],
+                     **metrics),
                 step=global_step,
             )
             epoch_loss += total_loss.item()
@@ -279,22 +267,24 @@ def train():
                     f"[{i:04d}] total={total_loss.item():.4f} "
                     f"main={metrics['loss_main']:.3f} l={metrics['loss_l']:.3f} "
                     f"r={metrics['loss_r']:.3f} cdir={metrics['loss_cdir']:.3f} "
-                    f"btn={metrics['loss_btn']:.3f} gn={gradnorm.item():.3f}"
+                    f"btn={metrics['loss_btn']:.3f} "
+                    f"cdir_acc={metrics['cdir_acc']:.1%}"
                 )
 
-        # —— checkpoint & report ——————————————————————————————
+        # —— LR step & checkpoint ——————————————————————————————
+        scheduler.step()
         avg = epoch_loss / max(batch_ct, 1)
         print(f"Epoch {epoch} done. Avg loss={avg:.4f}")
         os.makedirs("checkpoints", exist_ok=True)
         ckpt_path = f"checkpoints/epoch_{epoch:02d}.pt"
         torch.save({
             "epoch": epoch,
-            "model_state_dict":     model.state_dict(),
-            "optimizer_state_dict": optimiser.state_dict(),
-            "loss_weights":         loss_weights.data.cpu(),
-            "init_task_loss":       init_task_loss.cpu(),
-            "scaler_state_dict":    scaler.state_dict(),
-            "config":               cfg.__dict__,
+            "model_state_dict":      model.state_dict(),
+            "optimizer_state_dict":  optimiser.state_dict(),
+            "scheduler_state_dict":  scheduler.state_dict(),
+            "loss_weights":          loss_weights.cpu(),
+            "scaler_state_dict":     scaler.state_dict(),
+            "config":                cfg.__dict__,
         }, ckpt_path)
         print("Saved checkpoint →", ckpt_path)
         wandb.log(dict(epoch=epoch, avg_loss=avg), step=global_step)
@@ -302,4 +292,10 @@ def train():
     wandb.finish()
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser(description="FRAME training")
+    parser.add_argument("--debug",  action="store_true", help="Verbose sanity checks")
+    parser.add_argument("--resume", type=str, default=None,
+                        help="Path to checkpoint (.pt) to resume from")
+    args  = parser.parse_args()
+    debug = args.debug or bool(os.getenv("DEBUG", ""))
+    train(debug=debug, resume=args.resume)

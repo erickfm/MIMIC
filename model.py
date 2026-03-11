@@ -53,7 +53,7 @@ class ModelConfig:
 # ─────────────────────────────────────────────────────────────────────────────
 class CausalSelfAttention(nn.Module):
     """Multi-head self-attention with an upper-triangular (causal) mask."""
-    def __init__(self, d_model: int, nhead: int, dropout: float):
+    def __init__(self, d_model: int, nhead: int, dropout: float, max_seq_len: int):
         super().__init__()
         self.attn = nn.MultiheadAttention(
             embed_dim=d_model,
@@ -61,14 +61,14 @@ class CausalSelfAttention(nn.Module):
             dropout=dropout,
             batch_first=True,
         )
+        self.register_buffer(
+            "mask",
+            torch.triu(torch.full((max_seq_len, max_seq_len), float("-inf")), diagonal=1),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        W = x.shape[1]
-        mask = torch.triu(
-            torch.full((W, W), float("-inf"), device=x.device),
-            diagonal=1,
-        )
-        out, _ = self.attn(x, x, x, attn_mask=mask)
+        T = x.shape[1]
+        out, _ = self.attn(x, x, x, attn_mask=self.mask[:T, :T])
         return out
 
 
@@ -76,7 +76,7 @@ class TransformerBlock(nn.Module):
     """Pre-norm Transformer block with causal self-attention."""
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.self_attn = CausalSelfAttention(cfg.d_model, cfg.nhead, cfg.dropout)
+        self.self_attn = CausalSelfAttention(cfg.d_model, cfg.nhead, cfg.dropout, cfg.max_seq_len)
         self.norm1 = nn.LayerNorm(cfg.d_model)
         self.drop1 = nn.Dropout(cfg.dropout)
 
@@ -101,12 +101,12 @@ class TransformerBlock(nn.Module):
 class PredictionHeads(nn.Module):
     """
     Outputs per next-frame target:
-      - main_xy          ∈ [-1, 1]              (regression, MSE/L1)
+      - main_xy          ∈ [0, 1]               (regression, MSE)
       - L_val, R_val     ∈ [0, 1]               (regression, MSE)
-      - c_dir_logits  5-way logits              (classification, BCE w/ one-hot)
-      - btn_logits       12-way logits          (multi-label BCE)
+      - c_dir_logits     5-way logits            (classification, CE)
+      - btn_logits       12-way logits           (multi-label BCE)
     """
-    def __init__(self, d_model: int, hidden: int = 64, btn_threshold: float = 0.5):
+    def __init__(self, d_model: int, hidden: int = 256, btn_threshold: float = 0.5):
         super().__init__()
         self.btn_threshold = btn_threshold
 
