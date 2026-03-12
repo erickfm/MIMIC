@@ -196,8 +196,10 @@ def get_dataloader(ds, shuffle=True):
         persistent_workers=True,
     )
 
-def get_model(compile_model=True, model_preset=None):
+def get_model(compile_model=True, model_preset=None, num_layers_override=None):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
+    if num_layers_override:
+        overrides["num_layers"] = num_layers_override
     cfg = ModelConfig(max_seq_len=SEQUENCE_LENGTH, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
@@ -213,11 +215,29 @@ def infinite_loader(dl):
 # -----------------------------------------------------------------------------
 # 5. Training loop (step-based)
 # -----------------------------------------------------------------------------
+def _auto_run_name(preset: str, lr: float, seq_len: int, extra: dict = None) -> str:
+    """Generate a descriptive run name from config."""
+    lr_str = f"{lr:.0e}".replace("e-0", "e-").replace("e+0", "e")
+    parts = [preset or "base", f"lr{lr_str}"]
+    if seq_len != 60:
+        parts.append(f"{seq_len}f")
+    if extra:
+        for k, v in extra.items():
+            parts.append(f"{k}{v}")
+    return "-".join(parts)
+
+
 def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
           debug: bool = False, resume: str = None, compile_model: bool = True,
-          model_preset: str = None, lr: float = None, run_name: str = None):
+          model_preset: str = None, lr: float = None, run_name: str = None,
+          wandb_tags: list = None, wandb_group: str = None,
+          num_layers_override: int = None, seq_len_override: int = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
+
+    global SEQUENCE_LENGTH
+    if seq_len_override:
+        SEQUENCE_LENGTH = seq_len_override
 
     print(f"Loading dataset from {data_dir} ...", flush=True)
     ds, val_ds = get_datasets(data_dir)
@@ -250,7 +270,8 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
     actual_lr = lr or LEARNING_RATE
 
     print(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}", flush=True)
-    model, cfg = get_model(compile_model=compile_model, model_preset=model_preset)
+    model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
+                           num_layers_override=num_layers_override)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -289,10 +310,19 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
         start_step = ckpt.get('global_step', 0)
         print(f"Resumed from {resume}, starting at step {start_step}")
 
+    if not run_name:
+        extra = {}
+        if num_layers_override:
+            extra["L"] = num_layers_override
+        run_name = _auto_run_name(model_preset, actual_lr, SEQUENCE_LENGTH, extra)
+
+    from frame_encoder import D_INTRA
     wandb.init(
         project="FRAME",
         entity="erickfm",
         name=run_name,
+        group=wandb_group,
+        tags=wandb_tags or [],
         config=dict(
             batch_size=BATCH_SIZE,
             learning_rate=actual_lr,
@@ -308,9 +338,11 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
             compiled=compile_model,
             model_preset=model_preset or "base",
             n_params=n_params,
+            d_intra=D_INTRA,
             **cfg.__dict__,
         ),
     )
+    wandb.run.summary["n_params"] = n_params
 
     loader = infinite_loader(dl)
     skip_ct = 0
@@ -488,7 +520,16 @@ if __name__ == "__main__":
                         help="Learning rate override (default: 1e-3)")
     parser.add_argument("--run-name",   type=str, default=None,
                         help="Wandb run name (auto-generated if not set)")
+    parser.add_argument("--wandb-tags", type=str, default=None,
+                        help="Comma-separated wandb tags (e.g. 'lr-sweep,small')")
+    parser.add_argument("--wandb-group", type=str, default=None,
+                        help="Wandb group for related runs (e.g. 'sweep-v1')")
+    parser.add_argument("--num-layers", type=int, default=None,
+                        help="Override number of transformer layers")
+    parser.add_argument("--seq-len",    type=int, default=None,
+                        help="Override sequence length (default: 60)")
     args = parser.parse_args()
+    tags = [t.strip() for t in args.wandb_tags.split(",")] if args.wandb_tags else None
     train(
         epochs=args.epochs,
         max_steps=args.max_steps,
@@ -499,4 +540,8 @@ if __name__ == "__main__":
         model_preset=args.model,
         lr=args.lr,
         run_name=args.run_name,
+        wandb_tags=tags,
+        wandb_group=args.wandb_group,
+        num_layers_override=args.num_layers,
+        seq_len_override=args.seq_len,
     )

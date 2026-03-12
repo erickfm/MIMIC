@@ -52,11 +52,13 @@ class ModelConfig:
 
 
 MODEL_PRESETS = {
-    "tiny":    dict(d_model=256,  nhead=4, num_layers=4, dim_feedforward=1024),
-    "small":   dict(d_model=512,  nhead=8, num_layers=4, dim_feedforward=2048),
-    "medium":  dict(d_model=768,  nhead=8, num_layers=4, dim_feedforward=3072),
-    "base":    dict(d_model=1024, nhead=8, num_layers=4, dim_feedforward=4096),
-    "shallow": dict(d_model=1024, nhead=8, num_layers=2, dim_feedforward=4096),
+    "tiny":         dict(d_model=256,  nhead=4,  num_layers=4, dim_feedforward=1024),
+    "small":        dict(d_model=512,  nhead=8,  num_layers=4, dim_feedforward=2048),
+    "medium":       dict(d_model=768,  nhead=8,  num_layers=4, dim_feedforward=3072),
+    "base":         dict(d_model=1024, nhead=8,  num_layers=4, dim_feedforward=4096),
+    "shallow":      dict(d_model=1024, nhead=8,  num_layers=2, dim_feedforward=4096),
+    "deep":         dict(d_model=512,  nhead=8,  num_layers=8, dim_feedforward=2048),
+    "wide-shallow": dict(d_model=1536, nhead=12, num_layers=2, dim_feedforward=6144),
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
