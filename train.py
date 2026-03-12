@@ -215,7 +215,7 @@ def infinite_loader(dl):
 # -----------------------------------------------------------------------------
 def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
           debug: bool = False, resume: str = None, compile_model: bool = True,
-          model_preset: str = None):
+          model_preset: str = None, lr: float = None, run_name: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -247,10 +247,12 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
     ckpt_interval = intervals["ckpt_interval"]
     warmup_steps  = intervals["warmup_steps"]
 
+    actual_lr = lr or LEARNING_RATE
+
     print(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}", flush=True)
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE})", flush=True)
+    print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
           f"ckpt={ckpt_interval}  warmup={warmup_steps}", flush=True)
 
@@ -262,11 +264,10 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
             continue
         (no_decay if n.endswith("bias") or "norm" in n.lower()
                   else decay).append(p)
-
     optimiser = optim.AdamW(
         [{"params": decay,    "weight_decay": WEIGHT_DECAY},
          {"params": no_decay, "weight_decay": 0.0}],
-        lr=LEARNING_RATE,
+        lr=actual_lr,
         betas=(0.9, 0.999),
         fused=True,
     )
@@ -291,9 +292,10 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
     wandb.init(
         project="FRAME",
         entity="erickfm",
+        name=run_name,
         config=dict(
             batch_size=BATCH_SIZE,
-            learning_rate=LEARNING_RATE,
+            learning_rate=actual_lr,
             max_steps=max_steps,
             warmup_steps=warmup_steps,
             log_interval=log_interval,
@@ -482,6 +484,10 @@ if __name__ == "__main__":
     parser.add_argument("--model",      type=str, default=None,
                         choices=list(MODEL_PRESETS.keys()),
                         help="Model size preset (default: base)")
+    parser.add_argument("--lr",         type=float, default=None,
+                        help="Learning rate override (default: 1e-3)")
+    parser.add_argument("--run-name",   type=str, default=None,
+                        help="Wandb run name (auto-generated if not set)")
     args = parser.parse_args()
     train(
         epochs=args.epochs,
@@ -491,4 +497,6 @@ if __name__ == "__main__":
         resume=args.resume,
         compile_model=not args.no_compile,
         model_preset=args.model,
+        lr=args.lr,
+        run_name=args.run_name,
     )
