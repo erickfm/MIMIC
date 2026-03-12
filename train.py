@@ -231,13 +231,16 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
           debug: bool = False, resume: str = None, compile_model: bool = True,
           model_preset: str = None, lr: float = None, run_name: str = None,
           wandb_tags: list = None, wandb_group: str = None,
-          num_layers_override: int = None, seq_len_override: int = None):
+          num_layers_override: int = None, seq_len_override: int = None,
+          batch_size_override: int = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
-    global SEQUENCE_LENGTH
+    global SEQUENCE_LENGTH, BATCH_SIZE
     if seq_len_override:
         SEQUENCE_LENGTH = seq_len_override
+    if batch_size_override:
+        BATCH_SIZE = batch_size_override
 
     print(f"Loading dataset from {data_dir} ...", flush=True)
     ds, val_ds = get_datasets(data_dir)
@@ -528,6 +531,8 @@ if __name__ == "__main__":
                         help="Override number of transformer layers")
     parser.add_argument("--seq-len",    type=int, default=None,
                         help="Override sequence length (default: 60)")
+    parser.add_argument("--batch-size", type=int, default=None,
+                        help="Override batch size (default: 200)")
     args = parser.parse_args()
     tags = [t.strip() for t in args.wandb_tags.split(",")] if args.wandb_tags else None
     train(
@@ -544,4 +549,5 @@ if __name__ == "__main__":
         wandb_group=args.wandb_group,
         num_layers_override=args.num_layers,
         seq_len_override=args.seq_len,
+        batch_size_override=args.batch_size,
     )
