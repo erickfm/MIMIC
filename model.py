@@ -186,7 +186,7 @@ class CausalSelfAttention(nn.Module):
         if self.pos_enc == "alibi":
             pos = torch.arange(T, device=x.device)
             dist = pos.unsqueeze(0) - pos.unsqueeze(1)  # (T, T)
-            causal = (dist >= 0).float().log()
+            causal = (dist <= 0).float().log()
             bias = -self.alibi_slopes.view(-1, 1, 1) * dist.abs().unsqueeze(0).float()
             attn_mask = (bias + causal).unsqueeze(0)  # (1, nhead, T, T)
             use_causal = False
