@@ -240,17 +240,18 @@ def get_datasets(data_dir):
         )
     return train_ds, val_ds
 
-def get_dataloader(ds, shuffle=True):
+def get_dataloader(ds, shuffle=True, persistent=True):
     is_iterable = isinstance(ds, IterableDataset)
+    nw = NUM_WORKERS if persistent else min(NUM_WORKERS, 2)
     return DataLoader(
         ds,
         batch_size=BATCH_SIZE,
         shuffle=(shuffle and not is_iterable),
-        num_workers=NUM_WORKERS,
+        num_workers=nw,
         collate_fn=collate_fn,
         drop_last=True,
         pin_memory=True,
-        persistent_workers=True,
+        persistent_workers=(persistent and nw > 0),
     )
 
 def get_model(compile_model=True, model_preset=None, num_layers_override=None,
@@ -340,7 +341,7 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
     print(f"  Val:   {n_val:,} windows from {n_val_games} games", flush=True)
 
     dl     = get_dataloader(ds)
-    val_dl = get_dataloader(val_ds, shuffle=False)
+    val_dl = get_dataloader(val_ds, shuffle=False, persistent=False)
 
     est_batches = max(n_train // BATCH_SIZE, 1)
     if max_steps is None:
