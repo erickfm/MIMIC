@@ -75,7 +75,10 @@ def collate_fn(batch):
 # 3. Loss
 # -----------------------------------------------------------------------------
 _mse = nn.MSELoss()
+_huber = nn.HuberLoss()
 _bce = nn.BCEWithLogitsLoss()
+
+_QUANTILES = torch.tensor([0.1, 0.5, 0.9])
 
 def focal_loss(logits, targets, gamma=FOCAL_GAMMA, label_smoothing=LABEL_SMOOTHING):
     n_classes = logits.shape[-1]
@@ -95,22 +98,76 @@ def focal_loss(logits, targets, gamma=FOCAL_GAMMA, label_smoothing=LABEL_SMOOTHI
     return loss.mean()
 
 
-def compute_loss(preds, targets):
-    main_pred = preds["main_xy"].float()
-    l_pred    = preds["L_val"].squeeze(-1).float()
-    r_pred    = preds["R_val"].squeeze(-1).float()
-    c_logits  = preds["c_dir_logits"].float()
-    btn_pred  = preds["btn_logits"].float()
+def _quantile_loss(pred, target, quantiles):
+    """Pinball loss for quantile regression. pred: (..., n_quantiles), target: (...)"""
+    target = target.unsqueeze(-1)
+    errors = target - pred
+    q = quantiles.to(pred.device)
+    losses = torch.max(q * errors, (q - 1) * errors)
+    return losses.mean()
+
+
+def _discrete_loss(logits, target, n_bins):
+    """Cross-entropy for discretized continuous targets in [0,1]."""
+    bins = (target * (n_bins - 1)).long().clamp(0, n_bins - 1)
+    return F.cross_entropy(logits.reshape(-1, n_bins), bins.reshape(-1))
+
+
+def _stick_regression_loss(pred, target, stick_loss_type):
+    """Compute regression loss for stick targets based on loss type."""
+    if stick_loss_type == "huber":
+        return _huber(pred, target)
+    return _mse(pred, target)
+
+
+def compute_loss(preds, targets, stick_loss_type="mse", stick_bins=32,
+                 delta_targets=False, state=None):
+    c_logits = preds["c_dir_logits"].float()
+    btn_pred = preds["btn_logits"].float()
 
     main_tgt = torch.stack([targets["main_x"], targets["main_y"]], dim=-1)
     l_tgt    = targets["l_shldr"]
     r_tgt    = targets["r_shldr"]
+
+    if delta_targets and state is not None:
+        cur_analog = state.get("self_analog")
+        if cur_analog is not None:
+            main_tgt = main_tgt - cur_analog[..., :2]
+            l_tgt = l_tgt - cur_analog[..., 2]
+            r_tgt = r_tgt - cur_analog[..., 3]
+
     cdir_tgt = targets["c_dir"].long()
     btn_tgt  = targets.get("btns", targets.get("btns_float")).float()
 
-    loss_main = _mse(main_pred, main_tgt)
-    loss_l    = _mse(l_pred, l_tgt)
-    loss_r    = _mse(r_pred, r_tgt)
+    if stick_loss_type == "quantile":
+        main_pred = preds["main_xy"].float()
+        q = _QUANTILES
+        loss_main = (_quantile_loss(main_pred[:, :, :3], main_tgt[:, :, 0], q) +
+                     _quantile_loss(main_pred[:, :, 3:], main_tgt[:, :, 1], q)) / 2
+        l_pred = preds["L_val"].float()
+        r_pred = preds["R_val"].float()
+        loss_l = _quantile_loss(l_pred, l_tgt, q)
+        loss_r = _quantile_loss(r_pred, r_tgt, q)
+    elif stick_loss_type == "discrete":
+        main_logits = preds["main_xy"].float()
+        B, T, _ = main_logits.shape
+        main_logits_2d = main_logits.reshape(B * T, stick_bins, stick_bins)
+        main_tgt_flat = main_tgt.reshape(B * T, 2)
+        x_bins = (main_tgt_flat[:, 0] * (stick_bins - 1)).long().clamp(0, stick_bins - 1)
+        y_bins = (main_tgt_flat[:, 1] * (stick_bins - 1)).long().clamp(0, stick_bins - 1)
+        bin_idx = x_bins * stick_bins + y_bins
+        loss_main = F.cross_entropy(main_logits.reshape(B * T, -1), bin_idx)
+        l_pred = preds["L_val"].float()
+        r_pred = preds["R_val"].float()
+        loss_l = _discrete_loss(l_pred, l_tgt, stick_bins)
+        loss_r = _discrete_loss(r_pred, r_tgt, stick_bins)
+    else:
+        main_pred = preds["main_xy"].float()
+        l_pred    = preds["L_val"].squeeze(-1).float()
+        r_pred    = preds["R_val"].squeeze(-1).float()
+        loss_main = _stick_regression_loss(main_pred, main_tgt, stick_loss_type)
+        loss_l    = _stick_regression_loss(l_pred, l_tgt, stick_loss_type)
+        loss_r    = _stick_regression_loss(r_pred, r_tgt, stick_loss_type)
 
     cdir_classes = cdir_tgt.argmax(dim=-1)
     c_logits_flat = c_logits.reshape(-1, c_logits.size(-1))
@@ -196,10 +253,36 @@ def get_dataloader(ds, shuffle=True):
         persistent_workers=True,
     )
 
-def get_model(compile_model=True, model_preset=None, num_layers_override=None):
+def get_model(compile_model=True, model_preset=None, num_layers_override=None,
+              encoder_type=None, d_intra=None, dropout_override=None,
+              k_query=None, intra_layers=None, scaled_emb=False,
+              pos_enc=None, attn_variant=None, n_kv_heads=None,
+              stick_loss=None, delta_targets=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
+    if encoder_type:
+        overrides["encoder_type"] = encoder_type
+    if d_intra is not None:
+        overrides["d_intra"] = d_intra
+    if dropout_override is not None:
+        overrides["dropout"] = dropout_override
+    if k_query is not None:
+        overrides["k_query"] = k_query
+    if intra_layers is not None:
+        overrides["encoder_nlayers"] = intra_layers
+    if scaled_emb:
+        overrides["scaled_emb"] = True
+    if pos_enc:
+        overrides["pos_enc"] = pos_enc
+    if attn_variant:
+        overrides["attn_variant"] = attn_variant
+    if n_kv_heads:
+        overrides["n_kv_heads"] = n_kv_heads
+    if stick_loss:
+        overrides["stick_loss"] = stick_loss
+    if delta_targets:
+        overrides["delta_targets"] = True
     cfg = ModelConfig(max_seq_len=SEQUENCE_LENGTH, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
@@ -232,7 +315,12 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
           model_preset: str = None, lr: float = None, run_name: str = None,
           wandb_tags: list = None, wandb_group: str = None,
           num_layers_override: int = None, seq_len_override: int = None,
-          batch_size_override: int = None):
+          batch_size_override: int = None,
+          encoder_type: str = None, d_intra: int = None,
+          dropout_override: float = None, k_query: int = None,
+          intra_layers: int = None, scaled_emb: bool = False,
+          pos_enc: str = None, attn_variant: str = None, n_kv_heads: int = None,
+          stick_loss: str = None, delta_targets: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -274,7 +362,13 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
 
     print(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}", flush=True)
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
-                           num_layers_override=num_layers_override)
+                           num_layers_override=num_layers_override,
+                           encoder_type=encoder_type, d_intra=d_intra,
+                           dropout_override=dropout_override, k_query=k_query,
+                           intra_layers=intra_layers, scaled_emb=scaled_emb,
+                           pos_enc=pos_enc, attn_variant=attn_variant,
+                           n_kv_heads=n_kv_heads,
+                           stick_loss=stick_loss, delta_targets=delta_targets)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -317,9 +411,10 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
         extra = {}
         if num_layers_override:
             extra["L"] = num_layers_override
+        if encoder_type and encoder_type != "default":
+            extra["enc"] = encoder_type
         run_name = _auto_run_name(model_preset, actual_lr, SEQUENCE_LENGTH, extra)
 
-    from frame_encoder import D_INTRA
     wandb.init(
         project="FRAME",
         entity="erickfm",
@@ -341,7 +436,6 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
             compiled=compile_model,
             model_preset=model_preset or "base",
             n_params=n_params,
-            d_intra=D_INTRA,
             **cfg.__dict__,
         ),
     )
@@ -360,6 +454,7 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
         for _ in range(start_step):
             next(loader)
 
+    _oom_retries = 0
     print(f"\n=== Training {max_steps} steps ===", flush=True)
     for step in range(start_step + 1, max_steps + 1):
         model.train()
@@ -370,10 +465,26 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
         for k, v in target.items():
             target[k] = v.to(DEVICE, non_blocking=True)
 
-        with autocast("cuda", dtype=AMP_DTYPE):
-            preds = model(state)
+        try:
+            with autocast("cuda", dtype=AMP_DTYPE):
+                preds = model(state)
 
-        metrics, task_losses = compute_loss(preds, target)
+            metrics, task_losses = compute_loss(
+                preds, target, stick_loss_type=cfg.stick_loss,
+                stick_bins=cfg.stick_bins, delta_targets=cfg.delta_targets,
+                state=state)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            _oom_retries += 1
+            if _oom_retries <= 3:
+                BATCH_SIZE = max(BATCH_SIZE // 2, 1)
+                print(f"  [OOM] Halving batch size to {BATCH_SIZE}, retry #{_oom_retries}", flush=True)
+                dl = get_dataloader(ds, shuffle=True)
+                loader = infinite_loader(dl)
+                scheduler.step()
+                continue
+            else:
+                raise RuntimeError(f"OOM after {_oom_retries} retries (batch_size={BATCH_SIZE})")
         loss_vec = torch.stack(task_losses)
         total_loss = (loss_weights * loss_vec).sum()
 
@@ -461,7 +572,11 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
                         vt[k] = v.to(DEVICE, non_blocking=True)
                     with autocast("cuda", dtype=AMP_DTYPE):
                         vpreds = model(vs)
-                    vm, vtl = compute_loss(vpreds, vt)
+                    vm, vtl = compute_loss(vpreds, vt,
+                                           stick_loss_type=cfg.stick_loss,
+                                           stick_bins=cfg.stick_bins,
+                                           delta_targets=cfg.delta_targets,
+                                           state=vs)
                     batch_total = sum(t.item() for t in vtl)
                     if math.isfinite(batch_total):
                         val_sums["total"] += batch_total
@@ -533,6 +648,32 @@ if __name__ == "__main__":
                         help="Override sequence length (default: 60)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
+    parser.add_argument("--encoder",   type=str, default=None,
+                        choices=["default", "flat", "composite8", "hybrid16"],
+                        help="Frame encoder variant")
+    parser.add_argument("--d-intra",   type=int, default=None,
+                        help="Intra-frame encoder width (default: 256)")
+    parser.add_argument("--dropout",   type=float, default=None,
+                        help="Dropout rate (default: 0.0)")
+    parser.add_argument("--k-query",   type=int, default=None,
+                        help="Number of query tokens in intra-frame attention")
+    parser.add_argument("--intra-layers", type=int, default=None,
+                        help="Number of intra-frame attention layers (0=no attn)")
+    parser.add_argument("--scaled-emb", action="store_true",
+                        help="Scale embedding dim by vocab size (emb = max(16, card^0.25*16))")
+    parser.add_argument("--pos-enc",   type=str, default=None,
+                        choices=["learned", "rope", "sinusoidal", "alibi"],
+                        help="Positional encoding type")
+    parser.add_argument("--attn-variant", type=str, default=None,
+                        choices=["standard", "sliding", "gqa"],
+                        help="Attention variant")
+    parser.add_argument("--n-kv-heads", type=int, default=None,
+                        help="Number of KV heads for GQA (default: nhead)")
+    parser.add_argument("--stick-loss", type=str, default=None,
+                        choices=["mse", "huber", "quantile", "discrete"],
+                        help="Stick regression loss type")
+    parser.add_argument("--delta-targets", action="store_true",
+                        help="Predict delta (next - current) for stick targets")
     args = parser.parse_args()
     tags = [t.strip() for t in args.wandb_tags.split(",")] if args.wandb_tags else None
     train(
@@ -550,4 +691,15 @@ if __name__ == "__main__":
         num_layers_override=args.num_layers,
         seq_len_override=args.seq_len,
         batch_size_override=args.batch_size,
+        encoder_type=args.encoder,
+        d_intra=args.d_intra,
+        dropout_override=args.dropout,
+        k_query=args.k_query,
+        intra_layers=args.intra_layers,
+        scaled_emb=args.scaled_emb,
+        pos_enc=args.pos_enc,
+        attn_variant=args.attn_variant,
+        n_kv_heads=args.n_kv_heads,
+        stick_loss=args.stick_loss,
+        delta_targets=args.delta_targets,
     )
