@@ -311,7 +311,8 @@ def _auto_run_name(preset: str, lr: float, seq_len: int, extra: dict = None) -> 
     return "-".join(parts)
 
 
-def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
+def train(epochs: int = None, max_steps: int = None, max_samples: int = None,
+          data_dir: str = DATA_DIR,
           debug: bool = False, resume: str = None, compile_model: bool = True,
           model_preset: str = None, lr: float = None, run_name: str = None,
           wandb_tags: list = None, wandb_group: str = None,
@@ -344,7 +345,10 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
     val_dl = get_dataloader(val_ds, shuffle=False, persistent=False)
 
     est_batches = max(n_train // BATCH_SIZE, 1)
-    if max_steps is None:
+    if max_samples and max_steps is None:
+        max_steps = max_samples // BATCH_SIZE
+        print(f"  {max_samples:,} samples / bs {BATCH_SIZE} = {max_steps:,} steps", flush=True)
+    elif max_steps is None:
         if epochs is None:
             epochs = 1
         max_steps = epochs * est_batches
@@ -426,6 +430,7 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
             batch_size=BATCH_SIZE,
             learning_rate=actual_lr,
             max_steps=max_steps,
+            total_samples=max_steps * BATCH_SIZE,
             warmup_steps=warmup_steps,
             log_interval=log_interval,
             val_interval=val_interval,
@@ -626,6 +631,8 @@ if __name__ == "__main__":
                         help="Number of epochs (default: 1 if --max-steps not set)")
     parser.add_argument("--max-steps",  type=int, default=None,
                         help="Override: train for exactly this many steps")
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="Train on exactly this many samples (computes steps from batch size)")
     parser.add_argument("--data-dir",   type=str, default=DATA_DIR)
     parser.add_argument("--debug",      action="store_true")
     parser.add_argument("--no-compile", action="store_true",
@@ -680,6 +687,7 @@ if __name__ == "__main__":
     train(
         epochs=args.epochs,
         max_steps=args.max_steps,
+        max_samples=args.max_samples,
         data_dir=args.data_dir,
         debug=args.debug or bool(os.getenv("DEBUG", "")),
         resume=args.resume,
