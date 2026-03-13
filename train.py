@@ -242,7 +242,7 @@ def get_datasets(data_dir):
 
 def get_dataloader(ds, shuffle=True, persistent=True):
     is_iterable = isinstance(ds, IterableDataset)
-    nw = NUM_WORKERS if persistent else min(NUM_WORKERS, 2)
+    nw = NUM_WORKERS if persistent else 0
     return DataLoader(
         ds,
         batch_size=BATCH_SIZE,
@@ -250,7 +250,7 @@ def get_dataloader(ds, shuffle=True, persistent=True):
         num_workers=nw,
         collate_fn=collate_fn,
         drop_last=True,
-        pin_memory=True,
+        pin_memory=(nw > 0),
         persistent_workers=(persistent and nw > 0),
     )
 
