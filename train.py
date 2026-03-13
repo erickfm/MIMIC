@@ -466,16 +466,6 @@ def train(epochs: int = None, max_steps: int = None, data_dir: str = DATA_DIR,
         for k, v in target.items():
             target[k] = v.to(DEVICE, non_blocking=True)
 
-        _has_nan = False
-        for k, v in state.items():
-            if v.is_floating_point() and not torch.isfinite(v).all():
-                state[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
-                _has_nan = True
-        for k, v in target.items():
-            if v.is_floating_point() and not torch.isfinite(v).all():
-                target[k] = torch.nan_to_num(v, nan=0.0, posinf=0.0, neginf=0.0)
-                _has_nan = True
-
         try:
             with autocast("cuda", dtype=AMP_DTYPE):
                 preds = model(state)

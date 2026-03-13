@@ -274,6 +274,15 @@ def preprocess_df(
         df["self_pos_y"] - df["opp_pos_y"],
     ).astype("float32")
 
+    # Coerce object-dtype columns that should be numeric (e.g. platform
+    # geometry columns that are 100% NaN on stages without platforms).
+    for c in df.columns:
+        if df[c].dtype == object:
+            try:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+            except (ValueError, TypeError):
+                pass
+
     num_cols  = [c for c, dt in df.dtypes.items() if dt.kind in ("i", "f")]
     bool_cols = [c for c, dt in df.dtypes.items() if dt == "bool"]
     df[num_cols]  = df[num_cols].fillna(0.0)
