@@ -209,6 +209,7 @@ Pass `--model <preset>` to `train.py` for scaling experiments:
 ├── dataset.py          # Dataset classes (raw parquet debug + streaming)
 ├── cat_maps.py         # Melee enum → dense index maps
 ├── setup.sh            # One-command setup for fresh machines
+├── upload_dataset.py   # Package parquets into tar shards and upload to HuggingFace
 ├── checkpoints/        # Saved *.pt files
 └── data/               # Slippi parquet files + source replays
     └── source_replays/ # Original .slp files for reproduction
@@ -232,7 +233,8 @@ bash setup.sh --run --model small     # 14M param model
 bash setup.sh --run --model tiny      # 3.5M param model
 ```
 
-The dataset is hosted at [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) (public, no token needed to download).
+The full dataset is hosted at [erickfm/frame-melee](https://huggingface.co/datasets/erickfm/frame-melee) (~94k replays, 86 GB as tar shards).
+A smaller 2k-replay subset is at [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) for quick experiments.
 
 ## Manual Setup
 
@@ -244,40 +246,53 @@ pip install torch numpy pandas pyarrow wandb huggingface_hub melee==0.45.1 typin
 
 ## Data
 
-The training dataset is publicly hosted on HuggingFace at
-[erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset).
-It contains everything needed to start training immediately (~780 MB):
+Two datasets are hosted on HuggingFace:
 
-| Contents | Count | Description |
-|---|---|---|
-| `*.parquet` | 2,000 | Raw Slippi replay frames (one file per player per game) |
-| `cat_maps.json` | 1 | Dynamic categorical mappings (ports, costumes, projectile subtypes) |
-| `norm_stats.json` | 1 | Per-column mean/std for feature normalization |
-| `file_index.json` | 1 | Frame counts per file (train/val split + length estimation) |
+| Dataset | Replays | Parquets | Size | Use |
+|---|---|---|---|---|
+| [erickfm/frame-melee](https://huggingface.co/datasets/erickfm/frame-melee) | ~94k | 188k | ~86 GB (tar shards) | Full training |
+| [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) | ~1k | 2k | ~780 MB | Quick experiments |
+
+The full dataset is stored as tar shards (`shard_000.tar` ... `shard_NNN.tar`) for efficient
+download. `setup.sh` automatically extracts them. Both datasets include precomputed metadata:
+
+| File | Description |
+|---|---|
+| `cat_maps.json` | Dynamic categorical mappings (ports, costumes, projectile subtypes) |
+| `norm_stats.json` | Per-column mean/std for feature normalization |
+| `file_index.json` | Frame counts per file (train/val split + length estimation) |
 
 Parquet files are generated from Slippi `.slp` replays using
 [slippi-frame-extractor](https://github.com/erickfm/slippi-frame-extractor).
 
-Download the dataset:
+Download the full dataset:
+
+```bash
+bash setup.sh
+```
+
+Or manually:
 
 ```bash
 python3 -c "
 from huggingface_hub import snapshot_download
-snapshot_download('erickfm/frame-melee-subset', repo_type='dataset', local_dir='data/subset')
+snapshot_download('erickfm/frame-melee', repo_type='dataset', local_dir='data/full')
 "
+# Extract tar shards
+for f in data/full/shard_*.tar; do tar xf "$f" -C data/full && rm "$f"; done
 ```
 
-Since the metadata JSONs are included, preprocessing can be skipped.
-To regenerate metadata from raw parquets (one-time, streams files, ~20 MB peak RAM):
+For the smaller subset:
 
 ```bash
-python3 preprocess.py --data-dir data/subset
+bash setup.sh --repo erickfm/frame-melee-subset --data-dir data/subset
 ```
 
-Preprocessing produces three JSON files alongside the parquets:
-- `norm_stats.json` -- per-column mean/std for normalization
-- `cat_maps.json` -- dynamic categorical mappings (ports, costumes)
-- `file_index.json` -- frame counts per file (for train/val split + length estimation)
+To regenerate metadata from raw parquets:
+
+```bash
+python3 preprocess.py --data-dir data/full
+```
 
 ## Training
 
@@ -286,22 +301,19 @@ streaming, falls back to slow in-memory loading):
 
 ```bash
 # Train for 1 epoch (default, base model ~54M params)
-python3 train.py --data-dir data/subset
+python3 train.py --data-dir data/full
+
+# Fixed number of steps (useful with large datasets)
+python3 train.py --data-dir data/full --max-steps 80000
 
 # Train with a smaller model
-python3 train.py --data-dir data/subset --model small
+python3 train.py --data-dir data/full --model small
 
-# Train for multiple epochs
-python3 train.py --epochs 3 --data-dir data/subset
-
-# Short test run (overrides epochs)
-python3 train.py --max-steps 100 --data-dir data/subset
-
-# Scaling experiment: tiny model, 1 epoch
-python3 train.py --model tiny --data-dir data/subset
+# Quick experiment on the 2k subset
+python3 train.py --data-dir data/subset --model tiny
 
 # Resume from checkpoint
-python3 train.py --epochs 2 --data-dir data/subset --resume checkpoints/step_XXXXXX.pt
+python3 train.py --data-dir data/full --resume checkpoints/step_XXXXXX.pt
 
 # Disable torch.compile for debugging
 python3 train.py --no-compile --debug

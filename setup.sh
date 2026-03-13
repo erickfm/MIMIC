@@ -8,8 +8,8 @@ set -euo pipefail
 #   bash setup.sh --run        # also starts a 1-epoch training run
 #   bash setup.sh --run --model small   # train with a smaller model
 
-REPO_ID="${HF_REPO:-erickfm/frame-melee-subset}"
-DATA_DIR="${DATA_DIR:-data/subset}"
+REPO_ID="${HF_REPO:-erickfm/frame-melee}"
+DATA_DIR="${DATA_DIR:-data/full}"
 RUN_AFTER=false
 EXTRA_TRAIN_ARGS=()
 
@@ -59,14 +59,28 @@ snapshot_download(
 print(f'Dataset downloaded to ${DATA_DIR}')
 "
 
-# ── 4. Run preprocessing if metadata missing ─────────────────────────────────
+# ── 4. Extract tar shards if present ──────────────────────────────────────────
+TARS=("${DATA_DIR}"/*.tar)
+if [[ -e "${TARS[0]}" ]]; then
+    echo ""
+    echo "── Extracting tar shards ──"
+    for tf in "${TARS[@]}"; do
+        echo "  Extracting $(basename "$tf") ..."
+        tar xf "$tf" -C "$DATA_DIR"
+        rm "$tf"
+    done
+    N_EXTRACTED=$(ls "${DATA_DIR}"/*.parquet 2>/dev/null | wc -l)
+    echo "  Done. ${N_EXTRACTED} parquet files extracted."
+fi
+
+# ── 5. Run preprocessing if metadata missing ─────────────────────────────────
 if [[ ! -f "${DATA_DIR}/norm_stats.json" ]] || [[ ! -f "${DATA_DIR}/cat_maps.json" ]] || [[ ! -f "${DATA_DIR}/file_index.json" ]]; then
     echo ""
     echo "── Running preprocessing (metadata only) ──"
     python3 preprocess.py --data-dir "$DATA_DIR"
 fi
 
-# ── 5. Verify GPU ────────────────────────────────────────────────────────────
+# ── 6. Verify GPU ────────────────────────────────────────────────────────────
 echo ""
 echo "── GPU check ──"
 python3 -c "
@@ -84,7 +98,7 @@ echo "  Data: ${N_FILES} parquet files in ${DATA_DIR}"
 echo ""
 echo "=== Setup complete ==="
 
-# ── 6. Optionally start training ─────────────────────────────────────────────
+# ── 7. Optionally start training ─────────────────────────────────────────────
 if $RUN_AFTER; then
     echo ""
     echo "── Starting training ──"
