@@ -38,7 +38,7 @@ class ModelConfig:
     dropout: float       = 0.0
 
     # frame encoder
-    encoder_type: str    = "default"
+    encoder_type: str    = "hybrid16"
     d_intra: int         = 256
     encoder_nlayers: int = 2
     k_query: int         = 1
@@ -57,6 +57,7 @@ class ModelConfig:
     # loss / output configuration
     stick_loss: str      = "mse"      # mse | huber | quantile | discrete
     stick_bins: int      = 32         # bins per axis for discrete mode
+    btn_loss: str        = "bce"      # bce | focal
     delta_targets: bool  = False
 
     # fixed categorical vocab sizes

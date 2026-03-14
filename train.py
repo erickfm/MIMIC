@@ -30,13 +30,14 @@ from model   import FramePredictor, ModelConfig, MODEL_PRESETS
 # -----------------------------------------------------------------------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BATCH_SIZE      = 200
-LEARNING_RATE   = 1e-3
+BATCH_SIZE      = 128
+LEARNING_RATE   = 8e-4
 WEIGHT_DECAY    = 1e-2
 NUM_WORKERS     = 8
 SEQUENCE_LENGTH = 60
 REACTION_DELAY  = 1
-DATA_DIR        = "./data/subset"
+DATA_DIR        = "./data/full"
+MAX_SAMPLES     = 2_000_000
 
 GRAD_CLIP_NORM      = 1.0
 TASK_NAMES          = ["main", "l", "r", "cdir", "btn"]
@@ -120,8 +121,20 @@ def _stick_regression_loss(pred, target, stick_loss_type):
     return _mse(pred, target)
 
 
+def focal_bce(pred, target, gamma=FOCAL_GAMMA):
+    """Focal binary cross-entropy for multi-label classification.
+
+    Downweights easy-to-classify examples (the vast majority of unpressed
+    buttons) and focuses gradient on uncertain / rare presses.
+    """
+    bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+    p = torch.sigmoid(pred)
+    pt = p * target + (1 - p) * (1 - target)
+    return ((1 - pt).pow(gamma) * bce).mean()
+
+
 def compute_loss(preds, targets, stick_loss_type="mse", stick_bins=32,
-                 delta_targets=False, state=None):
+                 btn_loss_type="bce", delta_targets=False, state=None):
     c_logits = preds["c_dir_logits"].float()
     btn_pred = preds["btn_logits"].float()
 
@@ -173,7 +186,7 @@ def compute_loss(preds, targets, stick_loss_type="mse", stick_bins=32,
     c_logits_flat = c_logits.reshape(-1, c_logits.size(-1))
     cdir_flat     = cdir_classes.reshape(-1)
     loss_cdir = focal_loss(c_logits_flat, cdir_flat)
-    loss_btn  = _bce(btn_pred, btn_tgt)
+    loss_btn  = focal_bce(btn_pred, btn_tgt) if btn_loss_type == "focal" else _bce(btn_pred, btn_tgt)
 
     cdir_pred = c_logits_flat.argmax(dim=-1)
     cdir_acc  = (cdir_pred == cdir_flat).float().mean().item()
@@ -258,7 +271,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               encoder_type=None, d_intra=None, dropout_override=None,
               k_query=None, intra_layers=None, scaled_emb=False,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
-              stick_loss=None, delta_targets=False):
+              stick_loss=None, btn_loss=None, delta_targets=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -282,6 +295,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["n_kv_heads"] = n_kv_heads
     if stick_loss:
         overrides["stick_loss"] = stick_loss
+    if btn_loss:
+        overrides["btn_loss"] = btn_loss
     if delta_targets:
         overrides["delta_targets"] = True
     cfg = ModelConfig(max_seq_len=SEQUENCE_LENGTH, **overrides)
@@ -311,7 +326,7 @@ def _auto_run_name(preset: str, lr: float, seq_len: int, extra: dict = None) -> 
     return "-".join(parts)
 
 
-def train(epochs: int = None, max_steps: int = None, max_samples: int = None,
+def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMPLES,
           data_dir: str = DATA_DIR,
           debug: bool = False, resume: str = None, compile_model: bool = True,
           model_preset: str = None, lr: float = None, run_name: str = None,
@@ -322,7 +337,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = None,
           dropout_override: float = None, k_query: int = None,
           intra_layers: int = None, scaled_emb: bool = False,
           pos_enc: str = None, attn_variant: str = None, n_kv_heads: int = None,
-          stick_loss: str = None, delta_targets: bool = False):
+          stick_loss: str = None, btn_loss: str = None,
+          delta_targets: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -373,7 +389,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = None,
                            intra_layers=intra_layers, scaled_emb=scaled_emb,
                            pos_enc=pos_enc, attn_variant=attn_variant,
                            n_kv_heads=n_kv_heads,
-                           stick_loss=stick_loss, delta_targets=delta_targets)
+                           stick_loss=stick_loss, btn_loss=btn_loss,
+                           delta_targets=delta_targets)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -477,8 +494,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = None,
 
             metrics, task_losses = compute_loss(
                 preds, target, stick_loss_type=cfg.stick_loss,
-                stick_bins=cfg.stick_bins, delta_targets=cfg.delta_targets,
-                state=state)
+                stick_bins=cfg.stick_bins, btn_loss_type=cfg.btn_loss,
+                delta_targets=cfg.delta_targets, state=state)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             _oom_retries += 1
@@ -581,6 +598,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = None,
                     vm, vtl = compute_loss(vpreds, vt,
                                            stick_loss_type=cfg.stick_loss,
                                            stick_bins=cfg.stick_bins,
+                                           btn_loss_type=cfg.btn_loss,
                                            delta_targets=cfg.delta_targets,
                                            state=vs)
                     batch_total = sum(t.item() for t in vtl)
@@ -631,17 +649,17 @@ if __name__ == "__main__":
                         help="Number of epochs (default: 1 if --max-steps not set)")
     parser.add_argument("--max-steps",  type=int, default=None,
                         help="Override: train for exactly this many steps")
-    parser.add_argument("--max-samples", type=int, default=None,
-                        help="Train on exactly this many samples (computes steps from batch size)")
+    parser.add_argument("--max-samples", type=int, default=MAX_SAMPLES,
+                        help="Train on exactly this many samples (computes steps from batch size, default: 2M)")
     parser.add_argument("--data-dir",   type=str, default=DATA_DIR)
     parser.add_argument("--debug",      action="store_true")
     parser.add_argument("--no-compile", action="store_true",
                         help="Disable torch.compile (debug)")
     parser.add_argument("--resume",     type=str, default=None,
                         help="Path to checkpoint (.pt) to resume from")
-    parser.add_argument("--model",      type=str, default=None,
+    parser.add_argument("--model",      type=str, default="medium",
                         choices=list(MODEL_PRESETS.keys()),
-                        help="Model size preset (default: base)")
+                        help="Model size preset (default: medium ~32M params)")
     parser.add_argument("--lr",         type=float, default=None,
                         help="Learning rate override (default: 1e-3)")
     parser.add_argument("--run-name",   type=str, default=None,
@@ -656,9 +674,9 @@ if __name__ == "__main__":
                         help="Override sequence length (default: 60)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
-    parser.add_argument("--encoder",   type=str, default=None,
+    parser.add_argument("--encoder",   type=str, default="hybrid16",
                         choices=["default", "flat", "composite8", "hybrid16"],
-                        help="Frame encoder variant")
+                        help="Frame encoder variant (default: hybrid16)")
     parser.add_argument("--d-intra",   type=int, default=None,
                         help="Intra-frame encoder width (default: 256)")
     parser.add_argument("--dropout",   type=float, default=None,
@@ -680,6 +698,9 @@ if __name__ == "__main__":
     parser.add_argument("--stick-loss", type=str, default=None,
                         choices=["mse", "huber", "quantile", "discrete"],
                         help="Stick regression loss type")
+    parser.add_argument("--btn-loss", type=str, default=None,
+                        choices=["bce", "focal"],
+                        help="Button loss type (default: bce)")
     parser.add_argument("--delta-targets", action="store_true",
                         help="Predict delta (next - current) for stick targets")
     args = parser.parse_args()
@@ -710,5 +731,6 @@ if __name__ == "__main__":
         attn_variant=args.attn_variant,
         n_kv_heads=args.n_kv_heads,
         stick_loss=args.stick_loss,
+        btn_loss=args.btn_loss,
         delta_targets=args.delta_targets,
     )

@@ -35,9 +35,9 @@ At inference, outputs are clamped to [0, 1].
 ## Architecture
 
 ```
-Slippi Frame ──► FrameEncoder (intra-frame attention) ──► 1024-d per-frame vector
-                                                              │
-60-frame window ──► + Learned Positional Embeddings ──────────┘
+Slippi Frame ──► HybridFrameEncoder (16 entity tokens + attention) ──► 768-d per-frame vector
+                                                                            │
+60-frame window ──► + Learned Positional Embeddings ────────────────────────┘
                          │
                     4× Pre-Norm Causal Transformer Blocks
                          │
@@ -49,18 +49,18 @@ Slippi Frame ──► FrameEncoder (intra-frame attention) ──► 1024-d per
 
 ### Phase 1 -- Frame Understanding (`frame_encoder.py`)
 
-Each frame is decomposed into 40+ heterogeneous feature-group tokens:
-categorical embeddings (stage, characters, actions, costumes, c-stick
-directions, projectile types) and numeric MLP encodings (positions, speeds,
-ECBs, shield, buttons, flags, analog values). A 2-layer self-attention
-block with a learned [CLS] query token pools these into a single 256-d
-frame summary, then projects up to 1024-d. A final LayerNorm is applied
-after the attention layers before CLS pooling.
+Each frame is decomposed into 16 entity-level tokens via the **hybrid16**
+encoder: game state, self/opponent identity, action, state, and input
+tokens, plus Nana and projectile groups. Each token mixes its constituent
+categorical embeddings and numeric MLP encodings into a 256-d vector. A
+2-layer self-attention block with a learned [CLS] query token pools these
+16 tokens into a single 256-d frame summary, then projects up to 768-d.
 
-Why attention over flat concat: the model can learn which feature groups
-are most relevant to each other within a single frame (e.g., opponent
-position + opponent action = threat assessment) rather than relying on a
-fixed concatenation order.
+Why 16 entity tokens: a middle ground between the original 55 fine-grained
+tokens (expensive 55×55 attention) and a flat concatenation (no cross-group
+interaction). 16 tokens let the model learn which entities and feature
+types are most relevant to each other (e.g., opponent position + opponent
+action = threat assessment) while keeping intra-frame attention cheap (16×16).
 
 ### Phase 2 -- Temporal Patterns (`model.py`)
 
@@ -70,8 +70,10 @@ positions 0..T. This is where the model learns sequential patterns:
 approach sequences, attack commitments, recovery trajectories, combo
 follow-ups. 60 frames captures most neutral interactions and short combos.
 
-Flash Attention via `F.scaled_dot_product_attention(is_causal=True)` is
-used for speed; `torch.compile` fuses the full forward pass.
+The backbone supports multiple positional encoding schemes (`--pos-enc`):
+learned (default), RoPE, sinusoidal, and ALiBi. Flash Attention via
+`F.scaled_dot_product_attention(is_causal=True)` is used for speed;
+`torch.compile` fuses the full forward pass.
 
 ### Phase 3 -- Action Prediction (`model.py` PredictionHeads)
 
@@ -175,9 +177,9 @@ Pass `--model <preset>` to `train.py` for scaling experiments:
 | Preset | d_model | Heads | Layers | FF dim | ~Params |
 |---|---|---|---|---|---|
 | `tiny` | 256 | 4 | 4 | 1024 | ~3.5M |
-| `small` | 512 | 8 | 4 | 2048 | ~14M |
-| `medium` | 768 | 8 | 4 | 3072 | ~30M |
-| `base` (default) | 1024 | 8 | 4 | 4096 | ~54M |
+| `small` | 512 | 8 | 4 | 2048 | ~16M |
+| `medium` (default) | 768 | 8 | 4 | 3072 | ~32M |
+| `base` | 1024 | 8 | 4 | 4096 | ~55M |
 | `shallow` | 1024 | 8 | 2 | 4096 | ~27M |
 
 ## Default Configuration
@@ -186,14 +188,17 @@ Pass `--model <preset>` to `train.py` for scaling experiments:
 |---|---|
 | Window length (W) | 60 frames |
 | Reaction delay (R) | 1 frame |
-| Model width (d_model) | 1024 (base preset) |
+| Model width (d_model) | 768 (medium preset) |
 | Transformer layers | 4 |
 | Attention heads | 8 |
-| Feedforward dim | 4096 (4x expansion) |
+| Feedforward dim | 3072 (4x expansion) |
+| Frame encoder | hybrid16 (16 entity tokens) |
 | Intra-frame width | 256 |
-| Batch size | 200 |
+| Batch size | 128 |
+| Learning rate | 8e-4 |
+| Training samples | 2M (~1 hr on 4090) |
 | AMP dtype | bfloat16 |
-| Parameters | ~54M (base) |
+| Parameters | ~32M (medium + hybrid16) |
 | GPU tested | RTX 4090 24 GB |
 
 ## Project Structure
@@ -300,20 +305,32 @@ Point `--data-dir` at a parquet directory (auto-detects metadata for
 streaming, falls back to slow in-memory loading):
 
 ```bash
-# Train for 1 epoch (default, base model ~54M params)
-python3 train.py --data-dir data/full
+# Default: medium model ~32M params, hybrid16 encoder, 2M samples (~1 hr)
+python3 train.py
 
-# Fixed number of steps (useful with large datasets)
-python3 train.py --data-dir data/full --max-steps 80000
+# Full epoch on the full dataset
+python3 train.py --max-samples 0 --epochs 1
 
-# Train with a smaller model
-python3 train.py --data-dir data/full --model small
+# Fixed number of steps
+python3 train.py --max-steps 80000
+
+# Train with a different model size
+python3 train.py --model small
+python3 train.py --model base
 
 # Quick experiment on the 2k subset
-python3 train.py --data-dir data/subset --model tiny
+python3 train.py --data-dir data/subset --model tiny --max-samples 0 --epochs 1
 
 # Resume from checkpoint
-python3 train.py --data-dir data/full --resume checkpoints/step_XXXXXX.pt
+python3 train.py --resume checkpoints/step_XXXXXX.pt
+
+# Experiment with loss functions
+python3 train.py --stick-loss huber            # Robust stick regression
+python3 train.py --stick-loss discrete         # Discretised stick (32x32 bins)
+python3 train.py --btn-loss focal              # Focal BCE for buttons
+
+# Positional encoding variants
+python3 train.py --pos-enc rope                # Rotary position embeddings
 
 # Disable torch.compile for debugging
 python3 train.py --no-compile --debug
