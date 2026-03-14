@@ -150,9 +150,23 @@ Top 5 runs by val/total:
 | 4 | `baseline` | **0.0680** | 0.0862 | 99.3% | 99.6% | medium, hybrid16, lr=8e-4, 60 frames |
 | 5 | `pos-rope` | **0.0709** | 0.0709 | 99.2% | 99.5% | medium, hybrid16, lr=8e-4, RoPE, 60 frames |
 
-## Phase 4: Champion (planned)
+## Phase 4: No Opponent Inputs (in progress)
 
-Combine best settings from Phase 3 and train longer on full data:
-- 768d / 4L / Huber stick loss / BCE buttons / Learned pos-enc / 180-frame context
-- Train on full 94k replay dataset for multiple epochs
-- Evaluate on held-out validation set + qualitative inference testing
+**Hypothesis**: Opponent controller inputs (analog stick, buttons, c-stick direction) are effectively dead when playing against a CPU at inference time (all neutral/zero), creating a train-test distribution mismatch. Removing them forces the model to rely on observable game state (positions, actions, flags) rather than opponent intent signals that won't exist during deployment.
+
+**Changes**: `--no-opp-inputs` flag strips `opp_buttons`, `opp_analog`, `opp_c_dir` (and Nana equivalents) from feature groups. Encoder drops the OPP_INPUT composite token (16 → 15 tokens in hybrid16). Button/nana-button encoders take only self inputs (12-dim vs 24-dim).
+
+**Sweep**: 21 runs across 21 GPUs, medium (768d/4L) + hybrid16 + learned pos-enc + MSE stick + BCE btn.
+
+| Context | Seeds | Steps | Duration | Samples |
+|---------|-------|-------|----------|---------|
+| 60 (bs=384) | s1-s4 | 65,000 | ~6h | ~25M |
+| 60 (bs=384) | s5-s8 | 80,000 | ~7.4h | ~31M |
+| 60 (bs=384) | s9-s10 | 120,000 | ~11h | ~46M |
+| 60 (bs=384) | s11 | 260,000 | ~24h | ~100M |
+| 180 (bs=128) | s1-s4 | 65,000 | ~6.2h | ~8.3M |
+| 180 (bs=128) | s5-s7 | 80,000 | ~7.7h | ~10.2M |
+| 180 (bs=128) | s8-s9 | 120,000 | ~11.5h | ~15.4M |
+| 180 (bs=128) | s10 | 250,000 | ~24h | ~32M |
+
+Wandb group: `no-opp-inputs`. Results pending.

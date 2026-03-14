@@ -3,10 +3,10 @@
 # Converts structured Melee frame dictionaries -> (B, T, d_model) tensor.
 #
 # Encoder variants (selected via --encoder CLI flag):
-#   "default"     – 55 individual tokens + intra-frame self-attention (original)
+#   "default"     – N individual tokens + intra-frame self-attention (original)
 #   "flat"        – concat all tokens, 2-layer MLP to d_model (no attention)
-#   "composite8"  – 8 semantic group tokens + intra-frame self-attention
-#   "hybrid16"    – 16 entity-level tokens + intra-frame self-attention
+#   "composite8"  – 7-8 semantic group tokens + intra-frame self-attention
+#   "hybrid16"    – 15-16 entity-level tokens + intra-frame self-attention
 # -----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -76,7 +76,6 @@ class _BaseFrameEncoder(nn.Module):
     NANA_FLAGS   = 6
     PROJ_NUM_PER = 5
     PROJ_SLOTS   = 8
-    N_RAW_TOKENS = 55
 
     def __init__(
         self,
@@ -92,10 +91,12 @@ class _BaseFrameEncoder(nn.Module):
         d_intra: int = 256,
         dropout: float = 0.0,
         scaled_emb: bool = False,
+        no_opp_inputs: bool = False,
     ) -> None:
         super().__init__()
         self._d_intra = d_intra
         self._dropout = dropout
+        self._no_opp_inputs = no_opp_inputs
 
         def _emb_dim(n_vocab: int) -> int:
             if scaled_emb:
@@ -124,55 +125,74 @@ class _BaseFrameEncoder(nn.Module):
         self.nana_enc      = _mlp(self.NANA_NUM + 1, d_intra, dropout)
         self.analog_enc    = _mlp(self.ANALOG_DIM, d_intra, dropout)
         self.proj_num_enc  = _mlp(self.PROJ_NUM_PER * self.PROJ_SLOTS, d_intra, dropout)
-        self.btn_enc       = _mlp(self.BTN_DIM * 2, d_intra, dropout)
+
+        btn_in = self.BTN_DIM if no_opp_inputs else self.BTN_DIM * 2
+        self.btn_enc       = _mlp(btn_in, d_intra, dropout)
         self.flag_enc      = _mlp(self.FLAGS_DIM * 2, d_intra, dropout)
-        self.nana_btn_enc  = _mlp(self.BTN_DIM * 2, d_intra, dropout)
+        nana_btn_in = self.BTN_DIM if no_opp_inputs else self.BTN_DIM * 2
+        self.nana_btn_enc  = _mlp(nana_btn_in, d_intra, dropout)
         self.nana_flag_enc = _mlp(self.NANA_FLAGS * 2, d_intra, dropout)
 
-    def _build_raw_tokens(self, seq: Dict[str, torch.Tensor]) -> List[torch.Tensor]:
-        """Build all ~55 individual feature-group tokens, each (B,T,d_intra)."""
-        tok: List[torch.Tensor] = []
+    @property
+    def n_raw_tokens(self) -> int:
+        return 51 if self._no_opp_inputs else 55
 
-        tok.append(self.stage_emb(seq["stage"]))
-        tok.append(self.port_emb(seq["self_port"]))
-        tok.append(self.port_emb(seq["opp_port"]))
-        tok.append(self.char_emb(seq["self_character"]))
-        tok.append(self.char_emb(seq["opp_character"]))
-        tok.append(self.act_emb(seq["self_action"]))
-        tok.append(self.act_emb(seq["opp_action"]))
-        tok.append(self.cost_emb(seq["self_costume"]))
-        tok.append(self.cost_emb(seq["opp_costume"]))
-        tok.append(self.cdir_emb(seq["self_c_dir"]))
-        tok.append(self.cdir_emb(seq["opp_c_dir"]))
+    def _build_raw_tokens(self, seq: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Build named feature-group tokens, each (B,T,d_intra)."""
+        t: Dict[str, torch.Tensor] = {}
+        noi = self._no_opp_inputs
 
-        tok.append(self.char_emb(seq["self_nana_character"]))
-        tok.append(self.char_emb(seq["opp_nana_character"]))
-        tok.append(self.act_emb(seq["self_nana_action"]))
-        tok.append(self.act_emb(seq["opp_nana_action"]))
-        tok.append(self.cdir_emb(seq["self_nana_c_dir"]))
-        tok.append(self.cdir_emb(seq["opp_nana_c_dir"]))
+        t["stage"]        = self.stage_emb(seq["stage"])
+        t["self_port"]    = self.port_emb(seq["self_port"])
+        t["opp_port"]     = self.port_emb(seq["opp_port"])
+        t["self_char"]    = self.char_emb(seq["self_character"])
+        t["opp_char"]     = self.char_emb(seq["opp_character"])
+        t["self_action"]  = self.act_emb(seq["self_action"])
+        t["opp_action"]   = self.act_emb(seq["opp_action"])
+        t["self_costume"] = self.cost_emb(seq["self_costume"])
+        t["opp_costume"]  = self.cost_emb(seq["opp_costume"])
+        t["self_c_dir"]   = self.cdir_emb(seq["self_c_dir"])
+        if not noi:
+            t["opp_c_dir"] = self.cdir_emb(seq["opp_c_dir"])
+
+        t["self_nana_char"]   = self.char_emb(seq["self_nana_character"])
+        t["opp_nana_char"]    = self.char_emb(seq["opp_nana_character"])
+        t["self_nana_action"] = self.act_emb(seq["self_nana_action"])
+        t["opp_nana_action"]  = self.act_emb(seq["opp_nana_action"])
+        t["self_nana_c_dir"]  = self.cdir_emb(seq["self_nana_c_dir"])
+        if not noi:
+            t["opp_nana_c_dir"] = self.cdir_emb(seq["opp_nana_c_dir"])
 
         for j in range(self.PROJ_SLOTS):
-            tok.append(self.port_emb(seq[f"proj{j}_owner"]))
-            tok.append(self.ptype_emb(seq[f"proj{j}_type"]))
-            tok.append(self.psub_emb(seq[f"proj{j}_subtype"]))
+            t[f"proj{j}_owner"]   = self.port_emb(seq[f"proj{j}_owner"])
+            t[f"proj{j}_type"]    = self.ptype_emb(seq[f"proj{j}_type"])
+            t[f"proj{j}_subtype"] = self.psub_emb(seq[f"proj{j}_subtype"])
 
-        tok.append(self.glob_enc(seq["numeric"]))
-        tok.append(self.player_enc(torch.cat([seq["self_numeric"], seq["self_action_elapsed"].unsqueeze(-1).float()], dim=-1)))
-        tok.append(self.player_enc(torch.cat([seq["opp_numeric"], seq["opp_action_elapsed"].unsqueeze(-1).float()], dim=-1)))
-        tok.append(self.nana_enc(torch.cat([seq["self_nana_numeric"], seq["self_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1)))
-        tok.append(self.nana_enc(torch.cat([seq["opp_nana_numeric"], seq["opp_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1)))
-        tok.append(self.analog_enc(seq["self_analog"]))
-        tok.append(self.analog_enc(seq["opp_analog"]))
-        tok.append(self.analog_enc(seq["self_nana_analog"]))
-        tok.append(self.analog_enc(seq["opp_nana_analog"]))
-        tok.append(self.proj_num_enc(torch.cat([seq[f"{k}_numeric"] for k in map(str, range(self.PROJ_SLOTS))], dim=-1)))
-        tok.append(self.btn_enc(torch.cat([seq["self_buttons"].float(), seq["opp_buttons"].float()], dim=-1)))
-        tok.append(self.flag_enc(torch.cat([seq["self_flags"].float(), seq["opp_flags"].float()], dim=-1)))
-        tok.append(self.nana_btn_enc(torch.cat([seq["self_nana_buttons"].float(), seq["opp_nana_buttons"].float()], dim=-1)))
-        tok.append(self.nana_flag_enc(torch.cat([seq["self_nana_flags"].float(), seq["opp_nana_flags"].float()], dim=-1)))
+        t["global_num"]      = self.glob_enc(seq["numeric"])
+        t["self_player_num"] = self.player_enc(torch.cat([seq["self_numeric"], seq["self_action_elapsed"].unsqueeze(-1).float()], dim=-1))
+        t["opp_player_num"]  = self.player_enc(torch.cat([seq["opp_numeric"], seq["opp_action_elapsed"].unsqueeze(-1).float()], dim=-1))
+        t["self_nana_num"]   = self.nana_enc(torch.cat([seq["self_nana_numeric"], seq["self_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
+        t["opp_nana_num"]    = self.nana_enc(torch.cat([seq["opp_nana_numeric"], seq["opp_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
 
-        return tok
+        t["self_analog"]      = self.analog_enc(seq["self_analog"])
+        t["self_nana_analog"] = self.analog_enc(seq["self_nana_analog"])
+        if not noi:
+            t["opp_analog"]      = self.analog_enc(seq["opp_analog"])
+            t["opp_nana_analog"] = self.analog_enc(seq["opp_nana_analog"])
+
+        t["proj_num"] = self.proj_num_enc(torch.cat([seq[f"{k}_numeric"] for k in map(str, range(self.PROJ_SLOTS))], dim=-1))
+
+        if noi:
+            t["buttons"]      = self.btn_enc(seq["self_buttons"].float())
+            t["nana_buttons"] = self.nana_btn_enc(seq["self_nana_buttons"].float())
+        else:
+            t["buttons"]      = self.btn_enc(torch.cat([seq["self_buttons"].float(), seq["opp_buttons"].float()], dim=-1))
+            t["nana_buttons"] = self.nana_btn_enc(torch.cat([seq["self_nana_buttons"].float(), seq["opp_nana_buttons"].float()], dim=-1))
+
+        t["flags"]      = self.flag_enc(torch.cat([seq["self_flags"].float(), seq["opp_flags"].float()], dim=-1))
+        t["nana_flags"] = self.nana_flag_enc(torch.cat([seq["self_nana_flags"].float(), seq["opp_nana_flags"].float()], dim=-1))
+
+        return t
 
     @staticmethod
     def _collapse(x: torch.Tensor) -> torch.Tensor:
@@ -181,11 +201,11 @@ class _BaseFrameEncoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# Original encoder: 55 tokens + intra-frame attention
+# Original encoder: N tokens + intra-frame attention
 # ---------------------------------------------------------------------------
 
 class FrameEncoder(_BaseFrameEncoder):
-    """55-token intra-frame attention encoder (original architecture)."""
+    """Variable-count token intra-frame attention encoder."""
 
     def __init__(
         self,
@@ -212,7 +232,8 @@ class FrameEncoder(_BaseFrameEncoder):
 
     def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
         B, T = seq["stage"].shape
-        tokens = self._build_raw_tokens(seq)
+        raw = self._build_raw_tokens(seq)
+        tokens = list(raw.values())
         group_stack = torch.stack(tokens, dim=2)
         group_flat = self._collapse(group_stack)
         pooled_flat = self.set_attn(group_flat)
@@ -236,7 +257,7 @@ class FlatFrameEncoder(_BaseFrameEncoder):
         **kwargs,
     ) -> None:
         super().__init__(d_intra=d_intra, dropout=dropout, **kwargs)
-        cat_dim = self.N_RAW_TOKENS * d_intra
+        cat_dim = self.n_raw_tokens * d_intra
         self.proj = nn.Sequential(
             nn.LayerNorm(cat_dim),
             nn.Linear(cat_dim, d_model),
@@ -247,13 +268,14 @@ class FlatFrameEncoder(_BaseFrameEncoder):
         )
 
     def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
-        tokens = self._build_raw_tokens(seq)
+        raw = self._build_raw_tokens(seq)
+        tokens = list(raw.values())
         cat = torch.cat(tokens, dim=-1)
         return self.proj(cat)
 
 
 # ---------------------------------------------------------------------------
-# Composite encoder: 8 semantic group tokens + intra-frame attention
+# Composite encoder: 7-8 semantic group tokens + intra-frame attention
 # ---------------------------------------------------------------------------
 
 class _CompositeTokenMixer(nn.Module):
@@ -273,17 +295,20 @@ class _CompositeTokenMixer(nn.Module):
 
 
 class CompositeFrameEncoder(_BaseFrameEncoder):
-    """8 semantic composite tokens + intra-frame attention.
+    """7-8 semantic composite tokens + intra-frame attention.
 
-    Groups:
+    When no_opp_inputs=False (default, 8 tokens):
       0: GAME_STATE  (stage, global numerics)
-      1: SELF_INPUT  (self analog, self buttons)
-      2: OPP_INPUT   (opp analog, opp buttons)
-      3: SELF_STATE  (self port/char/act/cost/cdir, self numeric, self flags)
-      4: OPP_STATE   (opp port/char/act/cost/cdir, opp numeric, opp flags)
+      1: SELF_INPUT  (self analog, buttons)
+      2: OPP_INPUT   (opp analog, buttons)
+      3: SELF_STATE  (self port/char/act/cost/cdir, self numeric, flags)
+      4: OPP_STATE   (opp port/char/act/cost/cdir, opp numeric, flags)
       5: NANA_SELF   (all self nana features)
       6: NANA_OPP    (all opp nana features)
       7: PROJECTILES (all proj cats + proj numerics)
+
+    When no_opp_inputs=True (7 tokens): OPP_INPUT removed, OPP_STATE/NANA_OPP
+    lose opp controller input tokens.
     """
 
     def __init__(
@@ -297,97 +322,7 @@ class CompositeFrameEncoder(_BaseFrameEncoder):
         **kwargs,
     ) -> None:
         super().__init__(d_intra=d_intra, dropout=dropout, **kwargs)
-        self.mixers = nn.ModuleList([_CompositeTokenMixer(d_intra, dropout) for _ in range(8)])
-        nhead = max(1, d_intra // 64)
-        self.set_attn = _GroupAttention(d_intra=d_intra, nhead=nhead, nlayers=nlayers,
-                                        k_query=k_query, dropout=dropout)
-        self.to_model = nn.Sequential(
-            nn.LayerNorm(d_intra),
-            nn.Linear(d_intra, d_model),
-            nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        self._d_model = d_model
-
-    def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
-        B, T = seq["stage"].shape
-        raw = self._build_raw_tokens(seq)
-
-        # Token indices from _build_raw_tokens:
-        # 0: stage
-        # 1-2: self/opp port
-        # 3-4: self/opp char
-        # 5-6: self/opp action
-        # 7-8: self/opp costume
-        # 9-10: self/opp cdir
-        # 11-16: nana cats (self_char, opp_char, self_act, opp_act, self_cdir, opp_cdir)
-        # 17-40: proj cats (8 slots × 3)
-        # 41: global numeric
-        # 42-43: self/opp player numeric
-        # 44-45: self/opp nana numeric
-        # 46-47: self/opp analog
-        # 48-49: self/opp nana analog
-        # 50: proj numerics
-        # 51: buttons
-        # 52: flags
-        # 53: nana buttons
-        # 54: nana flags
-
-        groups = [
-            [raw[0], raw[41]],                                                  # GAME_STATE
-            [raw[46], raw[51]],                                                 # SELF_INPUT
-            [raw[47], raw[51]],                                                 # OPP_INPUT
-            [raw[1], raw[3], raw[5], raw[7], raw[9], raw[42], raw[52]],         # SELF_STATE
-            [raw[2], raw[4], raw[6], raw[8], raw[10], raw[43], raw[52]],        # OPP_STATE
-            [raw[11], raw[13], raw[15], raw[44], raw[48], raw[53], raw[54]],    # NANA_SELF
-            [raw[12], raw[14], raw[16], raw[45], raw[49], raw[53], raw[54]],    # NANA_OPP
-            raw[17:41] + [raw[50]],                                             # PROJECTILES
-        ]
-
-        composite = [self.mixers[i](g) for i, g in enumerate(groups)]
-        stack = torch.stack(composite, dim=2)           # (B,T,8,d_intra)
-        flat = self._collapse(stack)                    # (B*T,8,d_intra)
-        pooled = self.set_attn(flat)                    # (B*T,d_intra)
-        pooled = pooled.view(B, T, self._d_intra)
-        return self.to_model(pooled)
-
-
-# ---------------------------------------------------------------------------
-# Hybrid encoder: 16 entity-level tokens + intra-frame attention
-# ---------------------------------------------------------------------------
-
-class HybridFrameEncoder(_BaseFrameEncoder):
-    """16 tokens (entity x feature-type) + intra-frame attention.
-
-    Tokens:
-      0: GAME         (stage, global numerics)
-      1: SELF_IDENT   (self port, char, costume)
-      2: SELF_ACTION   (self action, cdir)
-      3: SELF_STATE   (self numeric, flags)
-      4: SELF_INPUT   (self analog, buttons)
-      5: OPP_IDENT    (opp port, char, costume)
-      6: OPP_ACTION    (opp action, cdir)
-      7: OPP_STATE    (opp numeric, flags)
-      8: OPP_INPUT    (opp analog, buttons)
-      9: NANA_SELF_ID  (self nana char, action, cdir)
-      10: NANA_SELF_ST (self nana numeric, analog, buttons, flags)
-      11: NANA_OPP_ID  (opp nana char, action, cdir)
-      12: NANA_OPP_ST  (opp nana numeric, analog, buttons, flags)
-      13-15: PROJ_A/B/C (projectile slots split into 3 groups)
-    """
-
-    def __init__(
-        self,
-        *,
-        d_model: int = 1024,
-        d_intra: int = 256,
-        dropout: float = 0.0,
-        nlayers: int = 2,
-        k_query: int = 1,
-        **kwargs,
-    ) -> None:
-        super().__init__(d_intra=d_intra, dropout=dropout, **kwargs)
-        n_tokens = 16
+        n_tokens = 7 if self._no_opp_inputs else 8
         self.mixers = nn.ModuleList([_CompositeTokenMixer(d_intra, dropout) for _ in range(n_tokens)])
         nhead = max(1, d_intra // 64)
         self.set_attn = _GroupAttention(d_intra=d_intra, nhead=nhead, nlayers=nlayers,
@@ -402,26 +337,131 @@ class HybridFrameEncoder(_BaseFrameEncoder):
 
     def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
         B, T = seq["stage"].shape
-        raw = self._build_raw_tokens(seq)
+        t = self._build_raw_tokens(seq)
+        noi = self._no_opp_inputs
+
+        proj_cats = []
+        for j in range(self.PROJ_SLOTS):
+            proj_cats.extend([t[f"proj{j}_owner"], t[f"proj{j}_type"], t[f"proj{j}_subtype"]])
+
+        opp_state = [t["opp_port"], t["opp_char"], t["opp_action"], t["opp_costume"], t["opp_player_num"], t["flags"]]
+        if not noi:
+            opp_state.insert(4, t["opp_c_dir"])
+
+        nana_opp = [t["opp_nana_char"], t["opp_nana_action"], t["opp_nana_num"], t["nana_buttons"], t["nana_flags"]]
+        if not noi:
+            nana_opp.insert(2, t["opp_nana_c_dir"])
+            nana_opp.insert(-2, t["opp_nana_analog"])
 
         groups = [
-            [raw[0], raw[41]],                      # 0: GAME
-            [raw[1], raw[3], raw[7]],                # 1: SELF_IDENT
-            [raw[5], raw[9]],                        # 2: SELF_ACTION
-            [raw[42], raw[52]],                      # 3: SELF_STATE
-            [raw[46], raw[51]],                      # 4: SELF_INPUT
-            [raw[2], raw[4], raw[8]],                # 5: OPP_IDENT
-            [raw[6], raw[10]],                       # 6: OPP_ACTION
-            [raw[43], raw[52]],                      # 7: OPP_STATE
-            [raw[47], raw[51]],                      # 8: OPP_INPUT
-            [raw[11], raw[13], raw[15]],             # 9: NANA_SELF_ID
-            [raw[44], raw[48], raw[53], raw[54]],    # 10: NANA_SELF_ST
-            [raw[12], raw[14], raw[16]],             # 11: NANA_OPP_ID
-            [raw[45], raw[49], raw[53], raw[54]],    # 12: NANA_OPP_ST
-            raw[17:25] + [raw[50]],                  # 13: PROJ_A (slots 0-2)
-            raw[25:33],                              # 14: PROJ_B (slots 3-5)
-            raw[33:41],                              # 15: PROJ_C (slots 6-7)
+            [t["stage"], t["global_num"]],                                                                  # GAME_STATE
+            [t["self_analog"], t["buttons"]],                                                               # SELF_INPUT
         ]
+        if not noi:
+            groups.append([t["opp_analog"], t["buttons"]])                                                  # OPP_INPUT
+        groups.extend([
+            [t["self_port"], t["self_char"], t["self_action"], t["self_costume"], t["self_c_dir"], t["self_player_num"], t["flags"]],  # SELF_STATE
+            opp_state,                                                                                      # OPP_STATE
+            [t["self_nana_char"], t["self_nana_action"], t["self_nana_c_dir"], t["self_nana_num"], t["self_nana_analog"], t["nana_buttons"], t["nana_flags"]],  # NANA_SELF
+            nana_opp,                                                                                       # NANA_OPP
+            proj_cats + [t["proj_num"]],                                                                    # PROJECTILES
+        ])
+
+        composite = [self.mixers[i](g) for i, g in enumerate(groups)]
+        stack = torch.stack(composite, dim=2)
+        flat = self._collapse(stack)
+        pooled = self.set_attn(flat)
+        pooled = pooled.view(B, T, self._d_intra)
+        return self.to_model(pooled)
+
+
+# ---------------------------------------------------------------------------
+# Hybrid encoder: 15-16 entity-level tokens + intra-frame attention
+# ---------------------------------------------------------------------------
+
+class HybridFrameEncoder(_BaseFrameEncoder):
+    """15-16 tokens (entity x feature-type) + intra-frame attention.
+
+    When no_opp_inputs=False (default, 16 tokens):
+      0: GAME         (stage, global numerics)
+      1: SELF_IDENT   (self port, char, costume)
+      2: SELF_ACTION  (self action, cdir)
+      3: SELF_STATE   (self numeric, flags)
+      4: SELF_INPUT   (self analog, buttons)
+      5: OPP_IDENT    (opp port, char, costume)
+      6: OPP_ACTION   (opp action, cdir)
+      7: OPP_STATE    (opp numeric, flags)
+      8: OPP_INPUT    (opp analog, buttons)
+      9: NANA_SELF_ID  (self nana char, action, cdir)
+      10: NANA_SELF_ST (self nana numeric, analog, buttons, flags)
+      11: NANA_OPP_ID  (opp nana char, action, cdir)
+      12: NANA_OPP_ST  (opp nana numeric, analog, buttons, flags)
+      13-15: PROJ_A/B/C (projectile slots split into 3 groups)
+
+    When no_opp_inputs=True (15 tokens): OPP_INPUT removed, OPP_ACTION/
+    NANA_OPP_ID/NANA_OPP_ST lose opp controller input tokens.
+    """
+
+    def __init__(
+        self,
+        *,
+        d_model: int = 1024,
+        d_intra: int = 256,
+        dropout: float = 0.0,
+        nlayers: int = 2,
+        k_query: int = 1,
+        **kwargs,
+    ) -> None:
+        super().__init__(d_intra=d_intra, dropout=dropout, **kwargs)
+        n_tokens = 15 if self._no_opp_inputs else 16
+        self.mixers = nn.ModuleList([_CompositeTokenMixer(d_intra, dropout) for _ in range(n_tokens)])
+        nhead = max(1, d_intra // 64)
+        self.set_attn = _GroupAttention(d_intra=d_intra, nhead=nhead, nlayers=nlayers,
+                                        k_query=k_query, dropout=dropout)
+        self.to_model = nn.Sequential(
+            nn.LayerNorm(d_intra),
+            nn.Linear(d_intra, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self._d_model = d_model
+
+    def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
+        B, T = seq["stage"].shape
+        t = self._build_raw_tokens(seq)
+        noi = self._no_opp_inputs
+
+        opp_action_group = [t["opp_action"]] if noi else [t["opp_action"], t["opp_c_dir"]]
+        nana_opp_id = [t["opp_nana_char"], t["opp_nana_action"]] if noi else [t["opp_nana_char"], t["opp_nana_action"], t["opp_nana_c_dir"]]
+        nana_opp_st = [t["opp_nana_num"], t["nana_buttons"], t["nana_flags"]]
+        if not noi:
+            nana_opp_st = [t["opp_nana_num"], t["opp_nana_analog"], t["nana_buttons"], t["nana_flags"]]
+
+        proj_a = [t[f"proj{j}_{k}"] for j in range(3) for k in ("owner", "type", "subtype")] + [t["proj_num"]]
+        proj_b = [t[f"proj{j}_{k}"] for j in range(3, 6) for k in ("owner", "type", "subtype")]
+        proj_c = [t[f"proj{j}_{k}"] for j in range(6, 8) for k in ("owner", "type", "subtype")]
+
+        groups = [
+            [t["stage"], t["global_num"]],                                       # GAME
+            [t["self_port"], t["self_char"], t["self_costume"]],                  # SELF_IDENT
+            [t["self_action"], t["self_c_dir"]],                                 # SELF_ACTION
+            [t["self_player_num"], t["flags"]],                                  # SELF_STATE
+            [t["self_analog"], t["buttons"]],                                    # SELF_INPUT
+            [t["opp_port"], t["opp_char"], t["opp_costume"]],                    # OPP_IDENT
+            opp_action_group,                                                    # OPP_ACTION
+            [t["opp_player_num"], t["flags"]],                                   # OPP_STATE
+        ]
+        if not noi:
+            groups.append([t["opp_analog"], t["buttons"]])                       # OPP_INPUT
+        groups.extend([
+            [t["self_nana_char"], t["self_nana_action"], t["self_nana_c_dir"]],  # NANA_SELF_ID
+            [t["self_nana_num"], t["self_nana_analog"], t["nana_buttons"], t["nana_flags"]],  # NANA_SELF_ST
+            nana_opp_id,                                                         # NANA_OPP_ID
+            nana_opp_st,                                                         # NANA_OPP_ST
+            proj_a,                                                              # PROJ_A
+            proj_b,                                                              # PROJ_B
+            proj_c,                                                              # PROJ_C
+        ])
 
         composite = [self.mixers[i](g) for i, g in enumerate(groups)]
         stack = torch.stack(composite, dim=2)
@@ -452,6 +492,7 @@ def build_encoder(
     nlayers: int = 2,
     k_query: int = 1,
     scaled_emb: bool = False,
+    no_opp_inputs: bool = False,
     num_stages: int,
     num_ports: int,
     num_characters: int,
@@ -470,7 +511,7 @@ def build_encoder(
         num_stages=num_stages, num_ports=num_ports, num_characters=num_characters,
         num_actions=num_actions, num_costumes=num_costumes,
         num_proj_types=num_proj_types, num_proj_subtypes=num_proj_subtypes,
-        num_c_dirs=num_c_dirs,
+        num_c_dirs=num_c_dirs, no_opp_inputs=no_opp_inputs,
     )
 
     common = dict(d_model=d_model, d_intra=d_intra, dropout=dropout, scaled_emb=scaled_emb)

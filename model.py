@@ -59,6 +59,7 @@ class ModelConfig:
     stick_bins: int      = 32         # bins per axis for discrete mode
     btn_loss: str        = "bce"      # bce | focal
     delta_targets: bool  = False
+    no_opp_inputs: bool  = False
 
     # fixed categorical vocab sizes
     num_stages: int       = len(STAGE_MAP)
@@ -319,6 +320,7 @@ class FramePredictor(nn.Module):
             num_proj_types=cfg.num_proj_types,
             num_proj_subtypes=cfg.num_proj_subtypes,
             num_c_dirs=cfg.num_c_dirs,
+            no_opp_inputs=cfg.no_opp_inputs,
         )
 
         if cfg.pos_enc == "learned":

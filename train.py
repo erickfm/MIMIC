@@ -217,7 +217,7 @@ def _compute_intervals(max_steps):
     )
 
 
-def get_datasets(data_dir):
+def get_datasets(data_dir, no_opp_inputs=False):
     p = Path(data_dir)
     has_metadata = all((p / f).exists() for f in
                        ("norm_stats.json", "cat_maps.json", "file_index.json"))
@@ -229,12 +229,14 @@ def get_datasets(data_dir):
             sequence_length=SEQUENCE_LENGTH,
             reaction_delay=REACTION_DELAY,
             split="train",
+            no_opp_inputs=no_opp_inputs,
         )
         val_ds = StreamingMeleeDataset(
             data_dir=data_dir,
             sequence_length=SEQUENCE_LENGTH,
             reaction_delay=REACTION_DELAY,
             split="val",
+            no_opp_inputs=no_opp_inputs,
         )
     else:
         print(f"  No metadata found, using raw-parquet dataset (slow startup)", flush=True)
@@ -243,6 +245,7 @@ def get_datasets(data_dir):
             sequence_length=SEQUENCE_LENGTH,
             reaction_delay=REACTION_DELAY,
             split="train",
+            no_opp_inputs=no_opp_inputs,
         )
         val_ds = MeleeFrameDatasetWithDelay(
             parquet_dir=data_dir,
@@ -250,6 +253,7 @@ def get_datasets(data_dir):
             reaction_delay=REACTION_DELAY,
             split="val",
             norm_stats=train_ds.norm_stats,
+            no_opp_inputs=no_opp_inputs,
         )
     return train_ds, val_ds
 
@@ -271,7 +275,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               encoder_type=None, d_intra=None, dropout_override=None,
               k_query=None, intra_layers=None, scaled_emb=False,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
-              stick_loss=None, btn_loss=None, delta_targets=False):
+              stick_loss=None, btn_loss=None, delta_targets=False,
+              no_opp_inputs=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -299,6 +304,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["btn_loss"] = btn_loss
     if delta_targets:
         overrides["delta_targets"] = True
+    if no_opp_inputs:
+        overrides["no_opp_inputs"] = True
     cfg = ModelConfig(max_seq_len=SEQUENCE_LENGTH, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
@@ -338,7 +345,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           intra_layers: int = None, scaled_emb: bool = False,
           pos_enc: str = None, attn_variant: str = None, n_kv_heads: int = None,
           stick_loss: str = None, btn_loss: str = None,
-          delta_targets: bool = False):
+          delta_targets: bool = False, no_opp_inputs: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -349,7 +356,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         BATCH_SIZE = batch_size_override
 
     print(f"Loading dataset from {data_dir} ...", flush=True)
-    ds, val_ds = get_datasets(data_dir)
+    ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
@@ -390,7 +397,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            pos_enc=pos_enc, attn_variant=attn_variant,
                            n_kv_heads=n_kv_heads,
                            stick_loss=stick_loss, btn_loss=btn_loss,
-                           delta_targets=delta_targets)
+                           delta_targets=delta_targets,
+                           no_opp_inputs=no_opp_inputs)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -703,7 +711,18 @@ if __name__ == "__main__":
                         help="Button loss type (default: bce)")
     parser.add_argument("--delta-targets", action="store_true",
                         help="Predict delta (next - current) for stick targets")
+    parser.add_argument("--no-opp-inputs", action="store_true",
+                        help="Remove opponent controller inputs (analog, buttons, c-stick)")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Random seed for reproducibility")
     args = parser.parse_args()
+    if args.seed is not None:
+        import random
+        import numpy as np
+        torch.manual_seed(args.seed)
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.cuda.manual_seed_all(args.seed)
     tags = [t.strip() for t in args.wandb_tags.split(",")] if args.wandb_tags else None
     train(
         epochs=args.epochs,
@@ -733,4 +752,5 @@ if __name__ == "__main__":
         stick_loss=args.stick_loss,
         btn_loss=args.btn_loss,
         delta_targets=args.delta_targets,
+        no_opp_inputs=args.no_opp_inputs,
     )

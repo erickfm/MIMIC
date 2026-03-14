@@ -119,7 +119,7 @@ if not cat_maps:
 ROLL_WIN = cfg.max_seq_len
 
 # ── Feature spec ─────────────────────────────────────────────────────────
-_fg = F.build_feature_groups()
+_fg = F.build_feature_groups(no_opp_inputs=cfg.no_opp_inputs)
 _categorical_cols = F.get_categorical_cols(_fg)
 
 # ── Prediction feedback state ─────────────────────────────────────────────

@@ -36,11 +36,13 @@ class MeleeFrameDatasetWithDelay(Dataset):
         split: str = "train",
         val_frac: float = 0.1,
         norm_stats: Dict[str, Tuple[float, float]] = None,
+        no_opp_inputs: bool = False,
     ) -> None:
         super().__init__()
         self.parquet_dir     = Path(parquet_dir)
         self.sequence_length = sequence_length
         self.reaction_delay  = reaction_delay
+        self._no_opp_inputs  = no_opp_inputs
 
         all_files = sorted(self.parquet_dir.glob("*.parquet"))
         if not all_files:
@@ -69,7 +71,7 @@ class MeleeFrameDatasetWithDelay(Dataset):
         if not self.index_map:
             raise RuntimeError("No valid windows across the dataset.")
 
-        self._fg = F.build_feature_groups()
+        self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs)
         self._categorical_cols = F.get_categorical_cols(self._fg)
         self._norm_cols = F.get_norm_cols(self._fg)
 
@@ -150,12 +152,14 @@ class StreamingMeleeDataset(IterableDataset):
         reaction_delay: int = 1,
         split: str = "train",
         val_frac: float = 0.1,
+        no_opp_inputs: bool = False,
     ) -> None:
         super().__init__()
         self.data_dir        = Path(data_dir)
         self.sequence_length = sequence_length
         self.reaction_delay  = reaction_delay
         self.split           = split
+        self._no_opp_inputs  = no_opp_inputs
 
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
@@ -167,7 +171,7 @@ class StreamingMeleeDataset(IterableDataset):
         with open(self.data_dir / "file_index.json") as fh:
             self.file_index: Dict[str, int] = json.load(fh)
 
-        self._fg = F.build_feature_groups()
+        self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs)
         self._categorical_cols = F.get_categorical_cols(self._fg)
 
         all_names = sorted(self.file_index.keys())

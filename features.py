@@ -88,7 +88,39 @@ def categorical_ids(prefix: str) -> List[str]:
 # ---------------------------------------------------------------------------
 # Feature-group spec + walking
 # ---------------------------------------------------------------------------
-def build_feature_groups() -> Dict[str, Dict]:
+def build_feature_groups(no_opp_inputs: bool = False) -> Dict[str, Dict]:
+    opp_cats = categorical_ids("opp")
+    if not no_opp_inputs:
+        opp_cats = opp_cats + ["opp_c_dir"]
+
+    opp_nana_cats = ["opp_nana_character", "opp_nana_action"]
+    if not no_opp_inputs:
+        opp_nana_cats = opp_nana_cats + ["opp_nana_c_dir"]
+
+    opp_group: Dict[str, Any] = {
+        "categorical": opp_cats,
+        "flags":   flags("opp"),
+        "numeric": numeric_state("opp"),
+        "action_elapsed": ["opp_action_frame"],
+    }
+    if not no_opp_inputs:
+        opp_group["buttons"] = btn_cols("opp")
+        opp_group["analog"]  = analog_cols("opp")
+
+    opp_nana_group: Dict[str, Any] = {
+        "categorical": opp_nana_cats,
+        "flags":   flags("opp_nana") + ["opp_nana_present"],
+        "numeric": numeric_state("opp_nana") + [
+            "opp_nana_stock", "opp_nana_jumps_left",
+            "opp_nana_hitlag_left", "opp_nana_hitstun_left",
+            "opp_nana_invuln_left",
+        ],
+        "action_elapsed": ["opp_nana_action_frame"],
+    }
+    if not no_opp_inputs:
+        opp_nana_group["buttons"] = btn_cols("opp_nana")
+        opp_nana_group["analog"]  = analog_cols("opp_nana")
+
     return {
         "global": {
             "numeric": ["distance", "frame", *STAGE_GEOM_COLS],
@@ -103,14 +135,7 @@ def build_feature_groups() -> Dict[str, Dict]:
                 "numeric": numeric_state("self"),
                 "action_elapsed": ["self_action_frame"],
             },
-            "opp": {
-                "categorical": categorical_ids("opp") + ["opp_c_dir"],
-                "buttons": btn_cols("opp"),
-                "flags":   flags("opp"),
-                "analog":  analog_cols("opp"),
-                "numeric": numeric_state("opp"),
-                "action_elapsed": ["opp_action_frame"],
-            },
+            "opp": opp_group,
             "self_nana": {
                 "categorical": ["self_nana_character", "self_nana_action", "self_nana_c_dir"],
                 "buttons": btn_cols("self_nana"),
@@ -123,18 +148,7 @@ def build_feature_groups() -> Dict[str, Dict]:
                 ],
                 "action_elapsed": ["self_nana_action_frame"],
             },
-            "opp_nana": {
-                "categorical": ["opp_nana_character", "opp_nana_action", "opp_nana_c_dir"],
-                "buttons": btn_cols("opp_nana"),
-                "flags":   flags("opp_nana") + ["opp_nana_present"],
-                "analog":  analog_cols("opp_nana"),
-                "numeric": numeric_state("opp_nana") + [
-                    "opp_nana_stock", "opp_nana_jumps_left",
-                    "opp_nana_hitlag_left", "opp_nana_hitstun_left",
-                    "opp_nana_invuln_left",
-                ],
-                "action_elapsed": ["opp_nana_action_frame"],
-            },
+            "opp_nana": opp_nana_group,
         },
         "projectiles": {
             k: {
