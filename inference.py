@@ -66,7 +66,7 @@ if args.checkpoint:
     if not ckpt_path.exists():
         log.error("Checkpoint not found: %s", ckpt_path); sys.exit(1)
 else:
-    ckpt_patterns = ["step_*.pt", "epoch_*.pt"]
+    ckpt_patterns = ["*_step*.pt", "step_*.pt", "epoch_*.pt"]
     ckpts: list[Path] = []
     for pat in ckpt_patterns:
         ckpts.extend(Path("./checkpoints").glob(pat))

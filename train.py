@@ -632,7 +632,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         # Checkpoint
         if step % ckpt_interval == 0 or step == max_steps:
             os.makedirs("checkpoints", exist_ok=True)
-            ckpt_path = f"checkpoints/step_{step:06d}.pt"
+            ckpt_path = f"checkpoints/{run_name}_step{step:06d}.pt"
             torch.save({
                 "global_step":          step,
                 "model_state_dict":     model.state_dict(),
