@@ -41,6 +41,8 @@ parser.add_argument("--cpu-character", type=str, default="FALCO",
                     help="CPU opponent character")
 parser.add_argument("--stage", type=str, default="FINAL_DESTINATION",
                     help="Stage name (e.g. FINAL_DESTINATION, BATTLEFIELD)")
+parser.add_argument("--checkpoint", type=str, default=None,
+                    help="Path to a specific checkpoint file (overrides auto-discovery)")
 args = parser.parse_args()
 
 BOT_CHARACTER = melee.Character[args.character.upper()]
@@ -59,13 +61,18 @@ torch.set_printoptions(sci_mode=False, precision=4)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 log.info("Device: %s", DEVICE)
 
-ckpt_patterns = ["step_*.pt", "epoch_*.pt"]
-ckpts: list[Path] = []
-for pat in ckpt_patterns:
-    ckpts.extend(Path("./checkpoints").glob(pat))
-if not ckpts:
-    log.error("No checkpoints found."); sys.exit(1)
-ckpt_path = max(ckpts, key=lambda p: p.stat().st_mtime)
+if args.checkpoint:
+    ckpt_path = Path(args.checkpoint)
+    if not ckpt_path.exists():
+        log.error("Checkpoint not found: %s", ckpt_path); sys.exit(1)
+else:
+    ckpt_patterns = ["step_*.pt", "epoch_*.pt"]
+    ckpts: list[Path] = []
+    for pat in ckpt_patterns:
+        ckpts.extend(Path("./checkpoints").glob(pat))
+    if not ckpts:
+        log.error("No checkpoints found."); sys.exit(1)
+    ckpt_path = max(ckpts, key=lambda p: p.stat().st_mtime)
 ckpt      = torch.load(ckpt_path, map_location=DEVICE)
 cfg       = ModelConfig(**ckpt["config"])
 
@@ -274,7 +281,7 @@ if __name__ == "__main__":
     import subprocess, time as _time
     log.info("Killing stale Dolphin processes...")
     _my_pid = str(os.getpid())
-    for pattern in ("Slippi_Online", "dolphin-emu"):
+    for pattern in ("Slippi_Online", "dolphin-emu", "AppRun.wrapped", "libmelee_"):
         try:
             out = subprocess.check_output(["pgrep", "-f", pattern], text=True)
             for line in out.strip().split("\n"):
@@ -304,6 +311,7 @@ if __name__ == "__main__":
 
     rows: deque[Dict[str, Any]] = deque(maxlen=ROLL_WIN)
     _step_ct = 0
+    _was_in_game = False
     while True:
         gs = console.step()
         _step_ct += 1
@@ -315,6 +323,9 @@ if __name__ == "__main__":
             continue
 
         if gs.menu_state not in (melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH):
+            if _was_in_game:
+                log.info("Game ended (menu_state=%s). Shutting down.", gs.menu_state)
+                break
             log.debug("Menu state: %s", gs.menu_state)
             c0, c1 = controllers[ports[0]], controllers[ports[1]]
             menu_helper_bot.menu_helper_simple(
@@ -326,6 +337,8 @@ if __name__ == "__main__":
                 cpu_level=args.cpu_level, autostart=True,
             )
             continue
+
+        _was_in_game = True
 
         # -- build row (matches extract.py schema) --
         row: Dict[str, Any] = {}
@@ -519,3 +532,9 @@ if __name__ == "__main__":
             ctrl.release_all()
             _prev_btns_fired = press_output(ctrl, pred)
             ctrl.flush()
+
+    log.info("Cleaning up...")
+    for c in controllers.values():
+        c.disconnect()
+    console.stop()
+    log.info("Done.")
