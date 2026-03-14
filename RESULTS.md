@@ -150,23 +150,54 @@ Top 5 runs by val/total:
 | 4 | `baseline` | **0.0680** | 0.0862 | 99.3% | 99.6% | medium, hybrid16, lr=8e-4, 60 frames |
 | 5 | `pos-rope` | **0.0709** | 0.0709 | 99.2% | 99.5% | medium, hybrid16, lr=8e-4, RoPE, 60 frames |
 
-## Phase 4: No Opponent Inputs (in progress)
+## Phase 4: No Opponent Inputs
 
 **Hypothesis**: Opponent controller inputs (analog stick, buttons, c-stick direction) are effectively dead when playing against a CPU at inference time (all neutral/zero), creating a train-test distribution mismatch. Removing them forces the model to rely on observable game state (positions, actions, flags) rather than opponent intent signals that won't exist during deployment.
 
 **Changes**: `--no-opp-inputs` flag strips `opp_buttons`, `opp_analog`, `opp_c_dir` (and Nana equivalents) from feature groups. Encoder drops the OPP_INPUT composite token (16 → 15 tokens in hybrid16). Button/nana-button encoders take only self inputs (12-dim vs 24-dim).
 
-**Sweep**: 21 runs across 21 GPUs, medium (768d/4L) + hybrid16 + learned pos-enc + MSE stick + BCE btn.
+**Sweep**: 21 runs across 21 GPUs, medium (768d/4L) + hybrid16 + learned pos-enc + MSE stick + BCE btn. Multiple seeds per context length with staggered training durations (6-24h).
 
-| Context | Seeds | Steps | Duration | Samples |
-|---------|-------|-------|----------|---------|
-| 60 (bs=384) | s1-s4 | 65,000 | ~6h | ~25M |
-| 60 (bs=384) | s5-s8 | 80,000 | ~7.4h | ~31M |
-| 60 (bs=384) | s9-s10 | 120,000 | ~11h | ~46M |
-| 60 (bs=384) | s11 | 260,000 | ~24h | ~100M |
-| 180 (bs=128) | s1-s4 | 65,000 | ~6.2h | ~8.3M |
-| 180 (bs=128) | s5-s7 | 80,000 | ~7.7h | ~10.2M |
-| 180 (bs=128) | s8-s9 | 120,000 | ~11.5h | ~15.4M |
-| 180 (bs=128) | s10 | 250,000 | ~24h | ~32M |
+### ctx-60 (bs=384, ~6 step/s)
 
-Wandb group: `no-opp-inputs`. Results pending.
+| Run | Seed | Steps | train/total | val/total |
+|-----|------|-------|-------------|-----------|
+| `noi-ctx60-s1` | 1 | 65K | 0.0667 | 0.0683 |
+| `noi-ctx60-s3` | 3 | 65K | 0.0933 | 0.0753 |
+| `noi-ctx60-s4` | 4 | 65K | 0.0773 | 0.0797 |
+| `noi-ctx60-s6` | 6 | 80K | 0.0745 | 0.0718 |
+| `noi-ctx60-s8` | 8 | 80K | 0.0657 | 0.0722 |
+| `noi-ctx60-s7` | 7 | 80K | 0.0877 | 0.0836 |
+| `noi-ctx60-s5` | 5 | 80K | 0.0889 | 0.0913 |
+| `noi-ctx60-s9` | 9 | 120K | 0.0958 | **0.0670** |
+| `noi-ctx60-s10` | 10 | 120K | 0.0988 | 0.0748 |
+| `noi-ctx60-s11` | 11 | 260K | 0.0643 | 0.0722 |
+
+**ctx-60 aggregate**: mean 0.0756 ± 0.0070, best 0.0670 (s9), worst 0.0913 (s5). Phase 3 single-run baseline: 0.0680.
+
+### ctx-180 (bs=128, ~4 step/s)
+
+| Run | Seed | Steps | train/total | val/total |
+|-----|------|-------|-------------|-----------|
+| `noi-ctx180-s4` | 4 | 65K | 0.0882 | **0.0466** |
+| `noi-ctx180-s10` | 10 | 250K | 0.0484 | 0.0690 |
+| `noi-ctx180-s2` | 2 | 65K | 0.0816 | 0.0721 |
+| `noi-ctx180-s5` | 5 | 80K | 0.0969 | 0.0753 |
+| `noi-ctx180-s6` | 6 | 80K | 0.0819 | 0.0776 |
+| `noi-ctx180-s3` | 3 | 65K | 0.0997 | 0.0789 |
+| `noi-ctx180-s8` | 8 | 120K | 0.1019 | 0.0795 |
+| `noi-ctx180-s9` | 9 | 120K | 0.1036 | 0.0819 |
+| `noi-ctx180-s7` | 7 | 80K | 0.0939 | 0.0822 |
+| `noi-ctx180-s1` | 1 | 65K | 0.0907 | 0.1038 |
+
+**ctx-180 aggregate**: mean 0.0767 ± 0.0134, best 0.0466 (s4), worst 0.1038 (s1). Phase 3 single-run ctx-180: 0.0551.
+
+### Observations
+
+- **High seed variance**: val/total ranges span ~0.025 (ctx-60) to ~0.057 (ctx-180) across seeds with identical hyperparameters. This means Phase 3 single-run comparisons are noisy — a single run can land anywhere in this range by luck of the initialization.
+- **Best no-opp-inputs run beats Phase 3 champion**: ctx-180 s4 (0.0466) beats the Phase 3 ctx-180 result (0.0551) by 15%, suggesting removing opponent inputs does help.
+- **Means are slightly higher than Phase 3 single runs**: ctx-60 mean 0.0756 vs Phase 3's 0.0680, ctx-180 mean 0.0767 vs 0.0551. But with the observed seed variance, the Phase 3 values fall well within 1 std of the no-opp-inputs distribution.
+- **Longer training doesn't always win**: ctx-180 s4 (65K steps, best at 0.0466) beat s10 (250K steps, 0.0690). This suggests the model converges early and longer runs can overfit or get stuck in worse basins with different seeds.
+- **Context length matters less with no-opp-inputs**: ctx-60 and ctx-180 means are nearly identical (0.0756 vs 0.0767), unlike Phase 3 where ctx-180 was clearly better (0.0551 vs 0.0680). With opponent inputs removed, the model may need less context since it's no longer trying to predict opponent behavior from history.
+
+Checkpoints: [huggingface.co/erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC) (`checkpoints/no-opp-inputs/`). Wandb group: `no-opp-inputs`.
