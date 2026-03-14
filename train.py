@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# train.py  --  FRAME training with BF16 AMP, torch.compile, epoch/step-based loop
+# train.py  --  MIMIC training with BF16 AMP, torch.compile, epoch/step-based loop
 #
 # NOTE: overfit_log*.txt files in this repo are from intentional overfit runs
 # on a small fsmash-only subset.  Near-zero main/l/r/btn losses in those logs
@@ -438,7 +438,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         run_name = _auto_run_name(model_preset, actual_lr, SEQUENCE_LENGTH, extra)
 
     wandb.init(
-        project="FRAME",
+        project="MIMIC",
         entity="erickfm",
         name=run_name,
         group=wandb_group,
@@ -644,7 +644,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     wandb.finish()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="FRAME training")
+    parser = argparse.ArgumentParser(description="MIMIC training")
     parser.add_argument("--epochs",     type=int, default=None,
                         help="Number of epochs (default: 1 if --max-steps not set)")
     parser.add_argument("--max-steps",  type=int, default=None,

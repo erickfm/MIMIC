@@ -1,6 +1,6 @@
-# FRAME: Fixed-step Realtime Action Matrix Estimator
+# MIMIC: Melee Imitation Model for Input Cloning
 
-FRAME is an imitation-learning bot for Super Smash Bros. Melee. Given a
+MIMIC is an imitation-learning bot for Super Smash Bros. Melee. Given a
 window of recent gameplay frames, it predicts the controller inputs a human
 player would enter on the next frame. The model observes both players' full
 game state (positions, actions, speeds, buttons, analog sticks, projectiles,

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# inspect_window.py — Audit FRAME windows for key features and targets
+# inspect_window.py — Audit MIMIC windows for key features and targets
 
 import argparse
 from dataset import MeleeFrameDatasetWithDelay

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# model.py ─ FRAME next-frame predictor
+# model.py ─ MIMIC next-frame predictor
 # ------------------------------------
 # 1. Hyper-parameter bundle
 # 2. Causal self-attention & TransformerBlock

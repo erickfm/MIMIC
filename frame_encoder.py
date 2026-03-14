@@ -1,4 +1,4 @@
-# frame_encoder.py – intra-frame encoder variants for FRAME
+# frame_encoder.py – intra-frame encoder variants for MIMIC
 # -----------------------------------------------------------------------------
 # Converts structured Melee frame dictionaries -> (B, T, d_model) tensor.
 #

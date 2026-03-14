@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# inference.py  –  FRAME bot
+# inference.py  –  MIMIC bot
 #
 # Converts live Slippi frames → model tensors via features.py,
 # runs FramePredictor on a rolling window,
@@ -25,7 +25,7 @@ import features as F
 from model import FramePredictor, ModelConfig
 
 # ── CLI / logging ───────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Realtime FRAME bot")
+parser = argparse.ArgumentParser(description="Realtime MIMIC bot")
 parser.add_argument("--debug", action="store_true", help="Verbose sanity checks")
 parser.add_argument("--dolphin-path", type=str,
                     default=os.getenv("DOLPHIN_PATH", ""),

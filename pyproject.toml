@@ -1,7 +1,7 @@
 [tool.poetry]
-name = "frame"
+name = "mimic"
 version = "0.1.0"
-description = "FRAME: Fixed-step Realtime Action Matrix Estimator"
+description = "MIMIC: Melee Imitation Model for Input Cloning"
 authors = []
 readme = "README.md"
 

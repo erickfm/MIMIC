@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# FRAME - Quick-start setup for a fresh machine with an NVIDIA GPU.
+# MIMIC - Quick-start setup for a fresh machine with an NVIDIA GPU.
 # Usage:
 #   export HF_TOKEN=hf_...
 #   bash setup.sh              # downloads data + installs deps
@@ -22,7 +22,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "=== FRAME setup ==="
+echo "=== MIMIC setup ==="
 echo "  HF repo:  $REPO_ID"
 echo "  Data dir: $DATA_DIR"
 

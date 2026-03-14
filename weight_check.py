@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-weight_check.py  –  Audit a FRAME checkpoint for NaN / Inf weights.
+weight_check.py  –  Audit a MIMIC checkpoint for NaN / Inf weights.
 
 Usage:
     python weight_check.py ./checkpoints/epoch_09.pt

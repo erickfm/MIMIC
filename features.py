@@ -1,6 +1,6 @@
 # features.py
 # ---------------------------------------------------------------------------
-# Single source of truth for FRAME feature engineering.
+# Single source of truth for MIMIC feature engineering.
 # Used by dataset.py, preprocess.py, and inference.py.
 # ---------------------------------------------------------------------------
 

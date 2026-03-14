@@ -323,7 +323,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.remote:
-        fetch_remote_logs(args.remote, f"/root/FRAME/{args.log_dir}", args.log_dir)
+        fetch_remote_logs(args.remote, f"/root/MIMIC/{args.log_dir}", args.log_dir)
 
     if args.phase == 1:
         analyze_lr_sweep(args.log_dir, args.output_dir)

@@ -8,7 +8,7 @@
 #
 # Prerequisites:
 #   - data/full with metadata on each machine (run setup.sh first)
-#   - Latest code pushed: git push && ssh <machine> "cd /root/FRAME && git pull"
+#   - Latest code pushed: git push && ssh <machine> "cd /root/MIMIC && git pull"
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ launch() {
     shift 4
     local extra="$*"
     echo "  GPU $gpu: $name"
-    ssh -p "$port" "$host" "cd /root/FRAME && \
+    ssh -p "$port" "$host" "cd /root/MIMIC && \
         CUDA_VISIBLE_DEVICES=$gpu nohup python3 train.py \
         $COMMON --run-name $name $extra \
         > logs/$name.log 2>&1 &"
@@ -38,7 +38,7 @@ launch() {
 
 launch_machine_a() {
     echo "=== Machine A ($MACHINE_A:$PORT_A) ==="
-    ssh -p $PORT_A $MACHINE_A "cd /root/FRAME && mkdir -p logs"
+    ssh -p $PORT_A $MACHINE_A "cd /root/MIMIC && mkdir -p logs"
 
     # GPU 0: baseline (medium/4L/768d = 32M)
     launch $MACHINE_A $PORT_A 0 baseline \
@@ -75,7 +75,7 @@ launch_machine_a() {
 
 launch_machine_b() {
     echo "=== Machine B ($MACHINE_B:$PORT_B) ==="
-    ssh -p $PORT_B $MACHINE_B "cd /root/FRAME && mkdir -p logs"
+    ssh -p $PORT_B $MACHINE_B "cd /root/MIMIC && mkdir -p logs"
 
     # GPU 0: ctx-30 (half seq = lots of headroom)
     launch $MACHINE_B $PORT_B 0 ctx-30 \
@@ -112,7 +112,7 @@ launch_machine_b() {
 
 launch_machine_c() {
     echo "=== Machine C ($MACHINE_C:$PORT_C) ==="
-    ssh -p $PORT_C $MACHINE_C "cd /root/FRAME && mkdir -p logs"
+    ssh -p $PORT_C $MACHINE_C "cd /root/MIMIC && mkdir -p logs"
 
     # GPU 0: loss-discrete (slightly more head params from 32x32 output)
     launch $MACHINE_C $PORT_C 0 loss-discrete \
@@ -138,5 +138,5 @@ esac
 
 echo ""
 echo "=== Phase 3: 14 runs launched (1 baseline + 13 variants) ==="
-echo "Monitor: wandb.ai/erickfm/FRAME (group: phase3)"
-echo "Logs: ssh <machine> 'tail -f /root/FRAME/logs/<run>.log'"
+echo "Monitor: wandb.ai/erickfm/MIMIC (group: phase3)"
+echo "Logs: ssh <machine> 'tail -f /root/MIMIC/logs/<run>.log'"

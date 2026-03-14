@@ -1,6 +1,6 @@
 # dataset.py
 # ---------------------------------------------------------------------------
-# Slippi frame data -> fixed-length windows for FRAME training.
+# Slippi frame data -> fixed-length windows for MIMIC training.
 #
 # Two dataset classes:
 #   MeleeFrameDatasetWithDelay  - reads raw parquets, preprocesses at init
