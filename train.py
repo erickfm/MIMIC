@@ -190,7 +190,25 @@ def compute_loss(preds, targets, stick_loss_type="mse", stick_bins=32,
 
     cdir_pred = c_logits_flat.argmax(dim=-1)
     cdir_acc  = (cdir_pred == cdir_flat).float().mean().item()
-    btn_acc   = ((torch.sigmoid(btn_pred) > 0.5) == (btn_tgt > 0.5)).float().mean().item()
+
+    btn_prob = torch.sigmoid(btn_pred)
+    btn_hat  = btn_prob > 0.5
+    btn_ref  = btn_tgt > 0.5
+    btn_acc  = (btn_hat == btn_ref).float().mean().item()
+
+    tp = (btn_hat & btn_ref).sum().float()
+    fp = (btn_hat & ~btn_ref).sum().float()
+    fn = (~btn_hat & btn_ref).sum().float()
+    btn_precision = (tp / (tp + fp)).item() if (tp + fp) > 0 else 0.0
+    btn_recall    = (tp / (tp + fn)).item() if (tp + fn) > 0 else 0.0
+    btn_f1 = (2 * btn_precision * btn_recall / (btn_precision + btn_recall)
+              if (btn_precision + btn_recall) > 0 else 0.0)
+
+    cdir_active_mask = cdir_flat != 0
+    if cdir_active_mask.any():
+        cdir_active_acc = (cdir_pred[cdir_active_mask] == cdir_flat[cdir_active_mask]).float().mean().item()
+    else:
+        cdir_active_acc = 0.0
 
     metrics = {
         "loss_main": loss_main.item(),
@@ -200,6 +218,10 @@ def compute_loss(preds, targets, stick_loss_type="mse", stick_bins=32,
         "loss_btn":  loss_btn.item(),
         "cdir_acc":  cdir_acc,
         "btn_acc":   btn_acc,
+        "btn_f1":       btn_f1,
+        "btn_precision": btn_precision,
+        "btn_recall":    btn_recall,
+        "cdir_active_acc": cdir_active_acc,
     }
     task_losses = (loss_main, loss_l, loss_r, loss_cdir, loss_btn)
     return metrics, task_losses
@@ -477,7 +499,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     t0 = time.time()
 
     _AVG_KEYS = ["total", "loss_main", "loss_l", "loss_r", "loss_cdir",
-                 "loss_btn", "cdir_acc", "btn_acc", "grad_norm"]
+                 "loss_btn", "cdir_acc", "btn_acc", "btn_f1",
+                 "btn_precision", "btn_recall", "cdir_active_acc", "grad_norm"]
     _run_sums = {k: 0.0 for k in _AVG_KEYS}
     _run_ct = 0
 
@@ -543,7 +566,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         _run_sums["total"]     += total_loss.item()
         _run_sums["grad_norm"] += grad_norm
         for _mk in ("loss_main", "loss_l", "loss_r", "loss_cdir",
-                     "loss_btn", "cdir_acc", "btn_acc"):
+                     "loss_btn", "cdir_acc", "btn_acc", "btn_f1",
+                     "btn_precision", "btn_recall", "cdir_active_acc"):
             _run_sums[_mk] += metrics[_mk]
         _run_ct += 1
 
@@ -556,6 +580,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             "train/btn":       metrics["loss_btn"],
             "train/cdir_acc":  metrics["cdir_acc"],
             "train/btn_acc":   metrics["btn_acc"],
+            "train/btn_f1":    metrics["btn_f1"],
+            "train/btn_precision": metrics["btn_precision"],
+            "train/btn_recall":    metrics["btn_recall"],
+            "train/cdir_active_acc": metrics["cdir_active_acc"],
             "train/grad_norm": grad_norm,
             "train/lr":        scheduler.get_last_lr()[0],
         }, step=step)
@@ -580,8 +608,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 f"r={metrics['loss_r']:.5f} "
                 f"cdir={metrics['loss_cdir']:.4f} "
                 f"btn={metrics['loss_btn']:.5f} "
-                f"cacc={metrics['cdir_acc']:.1%} "
-                f"bacc={metrics['btn_acc']:.1%} "
+                f"bf1={metrics['btn_f1']:.1%} "
+                f"bP={metrics['btn_precision']:.1%} bR={metrics['btn_recall']:.1%} "
+                f"cact={metrics['cdir_active_acc']:.1%} "
                 f"gnorm={grad_norm:.2f} "
                 f"lr={scheduler.get_last_lr()[0]:.2e} "
                 f"({sps:.1f} step/s)",
@@ -592,7 +621,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         if step % val_interval == 0 or step == max_steps:
             model.eval()
             _VAL_KEYS = ["total", "loss_main", "loss_l", "loss_r",
-                         "loss_cdir", "loss_btn", "cdir_acc", "btn_acc"]
+                         "loss_cdir", "loss_btn", "cdir_acc", "btn_acc",
+                         "btn_f1", "btn_precision", "btn_recall", "cdir_active_acc"]
             val_sums = {k: 0.0 for k in _VAL_KEYS}
             val_ct = 0
             with torch.no_grad():
@@ -613,7 +643,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     if math.isfinite(batch_total):
                         val_sums["total"] += batch_total
                         for _vk in ("loss_main", "loss_l", "loss_r",
-                                     "loss_cdir", "loss_btn", "cdir_acc", "btn_acc"):
+                                     "loss_cdir", "loss_btn", "cdir_acc", "btn_acc",
+                                     "btn_f1", "btn_precision", "btn_recall",
+                                     "cdir_active_acc"):
                             val_sums[_vk] += vm[_vk]
                         val_ct += 1
                     if val_ct >= MAX_VAL_BATCHES:
@@ -623,8 +655,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 val_avg = {f"val/{k}": val_sums[k] / val_ct for k in _VAL_KEYS}
                 wandb.log(val_avg, step=step)
                 print(f"  -- val total={val_avg['val/total']:.4f}  "
-                      f"cdir_acc={val_avg['val/cdir_acc']:.1%}  "
-                      f"btn_acc={val_avg['val/btn_acc']:.1%}  "
+                      f"bf1={val_avg['val/btn_f1']:.1%}  "
+                      f"bP={val_avg['val/btn_precision']:.1%} bR={val_avg['val/btn_recall']:.1%}  "
+                      f"cact={val_avg['val/cdir_active_acc']:.1%}  "
                       f"(batches={val_ct})", flush=True)
             else:
                 print("  -- val: no valid batches", flush=True)
