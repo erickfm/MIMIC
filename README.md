@@ -344,10 +344,3 @@ of total steps (~0.5% log, ~5% val/checkpoint, ~1% warmup).
 ```bash
 python3 inference.py --dolphin-path /path/to/dolphin --iso-path /path/to/melee.iso [--debug]
 ```
-
-## Notes
-
-The `overfit_log*.txt` files in this repo are from intentional overfit
-experiments on a small fsmash-only subset. Near-zero main/l/r/btn losses
-in those logs are expected -- the model learned the dominant neutral/no-press
-pattern on that narrow data.

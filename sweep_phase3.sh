@@ -42,32 +42,32 @@ launch_machine_a() {
 
     # GPU 0: baseline (medium/4L/768d = 32M)
     launch $MACHINE_A $PORT_A 0 baseline \
-        --model medium --lr 8e-4 --batch-size 128 \
+        --model medium --lr 8e-4 --batch-size 384 \
         --wandb-tags "phase3,baseline,depth,width,context,posenc,loss"
 
-    # GPU 1: depth-2L
+    # GPU 1: depth-2L (18M, more headroom)
     launch $MACHINE_A $PORT_A 1 depth-2L \
-        --model medium --lr 8e-4 --batch-size 128 --num-layers 2 \
+        --model medium --lr 8e-4 --batch-size 512 --num-layers 2 \
         --wandb-tags "phase3,depth"
 
-    # GPU 2: depth-6L
+    # GPU 2: depth-6L (47M)
     launch $MACHINE_A $PORT_A 2 depth-6L \
-        --model medium --lr 8e-4 --batch-size 128 --num-layers 6 \
+        --model medium --lr 8e-4 --batch-size 256 --num-layers 6 \
         --wandb-tags "phase3,depth"
 
-    # GPU 3: depth-8L
+    # GPU 3: depth-8L (61M)
     launch $MACHINE_A $PORT_A 3 depth-8L \
-        --model medium --lr 8e-4 --batch-size 128 --num-layers 8 \
+        --model medium --lr 8e-4 --batch-size 192 --num-layers 8 \
         --wandb-tags "phase3,depth"
 
-    # GPU 4: width-512
+    # GPU 4: width-512 (16M, lots of headroom)
     launch $MACHINE_A $PORT_A 4 width-512 \
-        --model small --lr 8e-4 --batch-size 128 \
+        --model small --lr 8e-4 --batch-size 512 \
         --wandb-tags "phase3,width"
 
-    # GPU 5: width-1024
+    # GPU 5: width-1024 (55M)
     launch $MACHINE_A $PORT_A 5 width-1024 \
-        --model base --lr 8e-4 --batch-size 128 \
+        --model base --lr 8e-4 --batch-size 256 \
         --wandb-tags "phase3,width"
 
     echo "  Machine A: 6 runs launched"
@@ -77,34 +77,34 @@ launch_machine_b() {
     echo "=== Machine B ($MACHINE_B:$PORT_B) ==="
     ssh -p $PORT_B $MACHINE_B "cd /root/FRAME && mkdir -p logs"
 
-    # GPU 0: ctx-30 (shorter context → can fit bigger batch)
+    # GPU 0: ctx-30 (half seq = lots of headroom)
     launch $MACHINE_B $PORT_B 0 ctx-30 \
-        --model medium --lr 8e-4 --seq-len 30 --batch-size 256 \
+        --model medium --lr 8e-4 --seq-len 30 --batch-size 768 \
         --wandb-tags "phase3,context"
 
     # GPU 1: ctx-90
     launch $MACHINE_B $PORT_B 1 ctx-90 \
-        --model medium --lr 8e-4 --seq-len 90 --batch-size 96 \
+        --model medium --lr 8e-4 --seq-len 90 --batch-size 256 \
         --wandb-tags "phase3,context"
 
     # GPU 2: ctx-120
     launch $MACHINE_B $PORT_B 2 ctx-120 \
-        --model medium --lr 8e-4 --seq-len 120 --batch-size 64 \
+        --model medium --lr 8e-4 --seq-len 120 --batch-size 192 \
         --wandb-tags "phase3,context"
 
     # GPU 3: ctx-180
     launch $MACHINE_B $PORT_B 3 ctx-180 \
-        --model medium --lr 8e-4 --seq-len 180 --batch-size 48 \
+        --model medium --lr 8e-4 --seq-len 180 --batch-size 128 \
         --wandb-tags "phase3,context"
 
     # GPU 4: pos-rope
     launch $MACHINE_B $PORT_B 4 pos-rope \
-        --model medium --lr 8e-4 --batch-size 128 --pos-enc rope \
+        --model medium --lr 8e-4 --batch-size 384 --pos-enc rope \
         --wandb-tags "phase3,posenc"
 
     # GPU 5: loss-huber
     launch $MACHINE_B $PORT_B 5 loss-huber \
-        --model medium --lr 8e-4 --batch-size 128 --stick-loss huber \
+        --model medium --lr 8e-4 --batch-size 384 --stick-loss huber \
         --wandb-tags "phase3,loss"
 
     echo "  Machine B: 6 runs launched"
@@ -114,14 +114,14 @@ launch_machine_c() {
     echo "=== Machine C ($MACHINE_C:$PORT_C) ==="
     ssh -p $PORT_C $MACHINE_C "cd /root/FRAME && mkdir -p logs"
 
-    # GPU 0: loss-discrete
+    # GPU 0: loss-discrete (slightly more head params from 32x32 output)
     launch $MACHINE_C $PORT_C 0 loss-discrete \
-        --model medium --lr 8e-4 --batch-size 128 --stick-loss discrete \
+        --model medium --lr 8e-4 --batch-size 384 --stick-loss discrete \
         --wandb-tags "phase3,loss"
 
     # GPU 1: loss-focal-btn
     launch $MACHINE_C $PORT_C 1 loss-focal-btn \
-        --model medium --lr 8e-4 --batch-size 128 --btn-loss focal \
+        --model medium --lr 8e-4 --batch-size 384 --btn-loss focal \
         --wandb-tags "phase3,loss"
 
     echo "  Machine C: 2 runs launched"
