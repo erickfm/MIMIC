@@ -8,7 +8,7 @@
 #
 # Prerequisites:
 #   - data/full with metadata on each machine
-#   - Latest code pushed: git push && ssh <machine> "cd /root/MIMIC && git pull"
+#   - Latest code pushed: git push && ssh <machine> "cd /root/FRAME && git pull"
 
 set -euo pipefail
 
@@ -30,7 +30,7 @@ launch() {
     shift 4
     local extra="$*"
     echo "  GPU $gpu: $name"
-    ssh -p "$port" "$host" "cd /root/MIMIC && \
+    ssh -p "$port" "$host" "cd /root/FRAME && \
         CUDA_VISIBLE_DEVICES=$gpu nohup python3 train.py \
         $COMMON --run-name $name $extra \
         > logs/$name.log 2>&1 &"
@@ -38,7 +38,7 @@ launch() {
 
 launch_machine_a() {
     echo "=== Machine A ($MACHINE_A:$PORT_A) — 6 GPUs: ctx-60 s1-s6 ==="
-    ssh -p $PORT_A $MACHINE_A "cd /root/MIMIC && mkdir -p logs"
+    ssh -p $PORT_A $MACHINE_A "cd /root/FRAME && mkdir -p logs"
 
     # ctx-60 s1-s4: 65,000 steps (~6h)
     launch $MACHINE_A $PORT_A 0 noi-ctx60-s1 \
@@ -65,7 +65,7 @@ launch_machine_a() {
 
 launch_machine_b() {
     echo "=== Machine B ($MACHINE_B:$PORT_B) — 7 GPUs: ctx-60 s7-s11 + ctx-180 s1-s2 ==="
-    ssh -p $PORT_B $MACHINE_B "cd /root/MIMIC && mkdir -p logs"
+    ssh -p $PORT_B $MACHINE_B "cd /root/FRAME && mkdir -p logs"
 
     # ctx-60 s7-s8: 80,000 steps (~7.4h)
     launch $MACHINE_B $PORT_B 0 noi-ctx60-s7 \
@@ -97,7 +97,7 @@ launch_machine_b() {
 
 launch_machine_c() {
     echo "=== Machine C ($MACHINE_C:$PORT_C) — 8 GPUs: ctx-180 s3-s10 ==="
-    ssh -p $PORT_C $MACHINE_C "cd /root/MIMIC && mkdir -p logs"
+    ssh -p $PORT_C $MACHINE_C "cd /root/FRAME && mkdir -p logs"
 
     # ctx-180 s3-s4: 65,000 steps (~6.2h)
     launch $MACHINE_C $PORT_C 0 noi-ctx180-s3 \
@@ -142,4 +142,4 @@ esac
 echo ""
 echo "=== No-Opp-Inputs Sweep: 21 runs launched (11 ctx-60 + 10 ctx-180) ==="
 echo "Monitor: wandb.ai/erickfm/MIMIC (group: no-opp-inputs)"
-echo "Logs: ssh <machine> 'tail -f /root/MIMIC/logs/<run>.log'"
+echo "Logs: ssh <machine> 'tail -f /root/FRAME/logs/<run>.log'"
