@@ -368,6 +368,15 @@ export ISO_PATH="$HOME/Downloads/Super Smash Bros. Melee (USA) (En,Ja) (Rev 2).i
 python3 inference.py --checkpoint checkpoints/noi_ctx180_65k_machC.pt
 ```
 
+**Stopping:** Press `Ctrl+C` to stop inference. You will need to **close
+Dolphin manually** after the script exits -- the Slippi AppImage runs in its
+own process group so the script cannot kill it automatically. You can close
+the Dolphin window normally, or run:
+
+```bash
+pkill -f AppRun.wrapped
+```
+
 Options:
 
 | Flag | Description |

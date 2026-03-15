@@ -278,20 +278,6 @@ if __name__ == "__main__":
         log.error("Must provide --dolphin-path and --iso-path (or set DOLPHIN_PATH / ISO_PATH env vars)")
         sys.exit(1)
 
-    import subprocess, time as _time
-    log.info("Killing stale Dolphin processes...")
-    _my_pid = str(os.getpid())
-    for pattern in ("Slippi_Online", "dolphin-emu", "AppRun.wrapped", "libmelee_"):
-        try:
-            out = subprocess.check_output(["pgrep", "-f", pattern], text=True)
-            for line in out.strip().split("\n"):
-                pid = line.strip()
-                if pid and pid != _my_pid:
-                    subprocess.run(["kill", "-9", pid], capture_output=True)
-        except subprocess.CalledProcessError:
-            pass
-    _time.sleep(2)
-
     console = melee.Console(path=DOLPHIN_APP, slippi_address="127.0.0.1", fullscreen=False)
     ports = [1, 4]
     controllers = {p: melee.Controller(console, p) for p in ports}
