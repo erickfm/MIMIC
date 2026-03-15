@@ -398,14 +398,40 @@ def df_to_state_tensors(
     return state
 
 
+def assign_stick_clusters(main_x: np.ndarray, main_y: np.ndarray,
+                          centers: np.ndarray) -> np.ndarray:
+    """Vectorized nearest-cluster assignment for (N,) arrays.
+
+    Returns int64 array of cluster indices.
+    """
+    xy = np.stack([main_x, main_y], axis=-1)          # (N, 2)
+    dists = np.sum((xy[:, None, :] - centers[None, :, :]) ** 2, axis=-1)
+    return dists.argmin(axis=-1).astype(np.int64)
+
+
+def assign_shoulder_bins(vals: np.ndarray,
+                         centers: np.ndarray) -> np.ndarray:
+    """Nearest-bin assignment for 1D shoulder values.
+
+    Returns int64 array of bin indices.
+    """
+    dists = np.abs(vals[:, None] - centers[None, :])
+    return dists.argmin(axis=-1).astype(np.int64)
+
+
 def build_targets_batch(
     df: pd.DataFrame,
     norm_stats: Dict[str, Tuple[float, float]],
+    stick_centers: np.ndarray | None = None,
+    shoulder_centers: np.ndarray | None = None,
 ) -> Dict[str, torch.Tensor]:
     """Build target tensors for an entire DataFrame (vectorized).
 
     Analog targets are denormalized back to original [0,1] space so that
     the model's Sigmoid heads and MSE loss operate on natural values.
+
+    When stick_centers / shoulder_centers are provided, also produces
+    discrete cluster/bin index targets for cross-entropy training.
     """
     def _denorm_col(col: str) -> torch.Tensor:
         vals = df[col].astype("float32").values.copy()
@@ -420,6 +446,18 @@ def build_targets_batch(
         "l_shldr": _denorm_col("self_l_shldr"),
         "r_shldr": _denorm_col("self_r_shldr"),
     }
+
+    if stick_centers is not None:
+        mx = targets["main_x"].numpy()
+        my = targets["main_y"].numpy()
+        targets["main_cluster"] = torch.from_numpy(
+            assign_stick_clusters(mx, my, stick_centers))
+
+    if shoulder_centers is not None:
+        targets["l_bin"] = torch.from_numpy(
+            assign_shoulder_bins(targets["l_shldr"].numpy(), shoulder_centers))
+        targets["r_bin"] = torch.from_numpy(
+            assign_shoulder_bins(targets["r_shldr"].numpy(), shoulder_centers))
 
     c_dir = torch.from_numpy(df["self_c_dir"].values.astype("int64"))
     c_dir_onehot = torch.zeros(len(df), 5, dtype=torch.float32)

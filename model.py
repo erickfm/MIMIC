@@ -55,11 +55,14 @@ class ModelConfig:
     n_kv_heads: int      = 0
 
     # loss / output configuration
-    stick_loss: str      = "mse"      # mse | huber | quantile | discrete
-    stick_bins: int      = 32         # bins per axis for discrete mode
+    stick_loss: str      = "mse"      # mse | huber | clusters
     btn_loss: str        = "bce"      # bce | focal
-    delta_targets: bool  = False
-    no_opp_inputs: bool  = False
+    no_opp_inputs: bool  = True
+
+    # cluster output configuration
+    n_stick_clusters: int       = 63
+    n_shoulder_bins: int        = 4
+    autoregressive_heads: bool  = False
 
     # fixed categorical vocab sizes
     num_stages: int       = len(STAGE_MAP)
@@ -244,45 +247,78 @@ class PredictionHeads(nn.Module):
 
     stick_loss modes:
       - mse/huber:   2-d regression for main_xy, 1-d for L/R
-      - quantile:    3 quantiles (0.1, 0.5, 0.9) per output dim → 6 for main, 3 for L/R
-      - discrete:    bins^2 logits for main_xy, bins logits for L/R
+      - clusters:    n_stick_clusters logits for main, n_shoulder_bins for L/R
+
+    When autoregressive=True, heads are chained:
+      L(h) -> R(h,L) -> cdir(h,L,R) -> main(h,L,R,cdir) -> btn(h,L,R,cdir,main)
+    with .detach() on conditioning to prevent gradient cascade.
     """
 
     def __init__(self, d_model: int, hidden: int = 256, btn_threshold: float = 0.5,
-                 stick_loss: str = "mse", stick_bins: int = 32):
+                 stick_loss: str = "mse",
+                 n_stick_clusters: int = 63, n_shoulder_bins: int = 4,
+                 autoregressive: bool = False):
         super().__init__()
         self.btn_threshold = btn_threshold
         self.stick_loss = stick_loss
-        self.stick_bins = stick_bins
+        self.autoregressive = autoregressive
+        self.n_stick_clusters = n_stick_clusters
+        self.n_shoulder_bins = n_shoulder_bins
 
-        def build(out_dim: int):
+        if stick_loss == "clusters":
+            main_out = n_stick_clusters
+            lr_out = n_shoulder_bins
+        else:
+            main_out = 2
+            lr_out = 1
+
+        def _head(in_dim: int, out_dim: int):
             return nn.Sequential(
-                nn.Linear(d_model, hidden), nn.GELU(), nn.Linear(hidden, out_dim),
+                nn.Linear(in_dim, hidden), nn.GELU(), nn.Linear(hidden, out_dim),
             )
 
-        if stick_loss == "quantile":
-            self.main_head = build(2 * 3)
-            self.L_head = build(3)
-            self.R_head = build(3)
-        elif stick_loss == "discrete":
-            self.main_head = build(stick_bins * stick_bins)
-            self.L_head = build(stick_bins)
-            self.R_head = build(stick_bins)
-        else:
-            self.main_head = build(2)
-            self.L_head = build(1)
-            self.R_head = build(1)
+        if autoregressive:
+            ctx_after_L    = lr_out
+            ctx_after_R    = ctx_after_L + lr_out
+            ctx_after_cdir = ctx_after_R + 5
+            ctx_after_main = ctx_after_cdir + main_out
 
-        self.cdir_head = build(5)
-        self.btn_head = build(12)
+            self.L_head    = _head(d_model,                    lr_out)
+            self.R_head    = _head(d_model + ctx_after_L,      lr_out)
+            self.cdir_head = _head(d_model + ctx_after_R,      5)
+            self.main_head = _head(d_model + ctx_after_cdir,   main_out)
+            self.btn_head  = _head(d_model + ctx_after_main,   12)
+        else:
+            self.L_head    = _head(d_model, lr_out)
+            self.R_head    = _head(d_model, lr_out)
+            self.cdir_head = _head(d_model, 5)
+            self.main_head = _head(d_model, main_out)
+            self.btn_head  = _head(d_model, 12)
 
     def forward(self, h: torch.Tensor) -> Dict[str, torch.Tensor]:
+        if self.autoregressive:
+            L = self.L_head(h)
+            ctx = L.detach()
+            R = self.R_head(torch.cat([h, ctx], dim=-1))
+            ctx = torch.cat([ctx, R.detach()], dim=-1)
+            cdir = self.cdir_head(torch.cat([h, ctx], dim=-1))
+            ctx = torch.cat([ctx, cdir.detach()], dim=-1)
+            main = self.main_head(torch.cat([h, ctx], dim=-1))
+            ctx = torch.cat([ctx, main.detach()], dim=-1)
+            btn = self.btn_head(torch.cat([h, ctx], dim=-1))
+        else:
+            L = self.L_head(h)
+            R = self.R_head(h)
+            cdir = self.cdir_head(h)
+            main = self.main_head(h)
+            btn = self.btn_head(h)
+
         return dict(
-            main_xy=self.main_head(h),
-            L_val=self.L_head(h),
-            R_val=self.R_head(h),
-            c_dir_logits=self.cdir_head(h),
-            btn_logits=self.btn_head(h),
+            main_xy=main,
+            L_val=L,
+            R_val=R,
+            c_dir_logits=cdir,
+            btn_logits=btn,
         )
 
     def threshold_buttons(self, btn_logits: torch.Tensor) -> torch.Tensor:
@@ -332,7 +368,13 @@ class FramePredictor(nn.Module):
 
         self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
         self.final_norm = nn.LayerNorm(cfg.d_model)
-        self.heads = PredictionHeads(cfg.d_model, stick_loss=cfg.stick_loss, stick_bins=cfg.stick_bins)
+        self.heads = PredictionHeads(
+            cfg.d_model,
+            stick_loss=cfg.stick_loss,
+            n_stick_clusters=cfg.n_stick_clusters,
+            n_shoulder_bins=cfg.n_shoulder_bins,
+            autoregressive=cfg.autoregressive_heads,
+        )
 
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * cfg.num_layers)

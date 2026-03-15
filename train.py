@@ -79,8 +79,6 @@ _mse = nn.MSELoss()
 _huber = nn.HuberLoss()
 _bce = nn.BCEWithLogitsLoss()
 
-_QUANTILES = torch.tensor([0.1, 0.5, 0.9])
-
 def focal_loss(logits, targets, gamma=FOCAL_GAMMA, label_smoothing=LABEL_SMOOTHING):
     n_classes = logits.shape[-1]
     with torch.no_grad():
@@ -97,21 +95,6 @@ def focal_loss(logits, targets, gamma=FOCAL_GAMMA, label_smoothing=LABEL_SMOOTHI
     ce = -(targets_smooth * log_p).sum(dim=-1)
     loss = focal_weight * ce
     return loss.mean()
-
-
-def _quantile_loss(pred, target, quantiles):
-    """Pinball loss for quantile regression. pred: (..., n_quantiles), target: (...)"""
-    target = target.unsqueeze(-1)
-    errors = target - pred
-    q = quantiles.to(pred.device)
-    losses = torch.max(q * errors, (q - 1) * errors)
-    return losses.mean()
-
-
-def _discrete_loss(logits, target, n_bins):
-    """Cross-entropy for discretized continuous targets in [0,1]."""
-    bins = (target * (n_bins - 1)).long().clamp(0, n_bins - 1)
-    return F.cross_entropy(logits.reshape(-1, n_bins), bins.reshape(-1))
 
 
 def _stick_regression_loss(pred, target, stick_loss_type):
@@ -133,48 +116,42 @@ def focal_bce(pred, target, gamma=FOCAL_GAMMA):
     return ((1 - pt).pow(gamma) * bce).mean()
 
 
-def compute_loss(preds, targets, stick_loss_type="mse", stick_bins=32,
-                 btn_loss_type="bce", delta_targets=False, state=None):
+def compute_loss(preds, targets, stick_loss_type="mse",
+                 btn_loss_type="bce"):
     c_logits = preds["c_dir_logits"].float()
     btn_pred = preds["btn_logits"].float()
-
-    main_tgt = torch.stack([targets["main_x"], targets["main_y"]], dim=-1)
-    l_tgt    = targets["l_shldr"]
-    r_tgt    = targets["r_shldr"]
-
-    if delta_targets and state is not None:
-        cur_analog = state.get("self_analog")
-        if cur_analog is not None:
-            main_tgt = main_tgt - cur_analog[..., :2]
-            l_tgt = l_tgt - cur_analog[..., 2]
-            r_tgt = r_tgt - cur_analog[..., 3]
 
     cdir_tgt = targets["c_dir"].long()
     btn_tgt  = targets.get("btns", targets.get("btns_float")).float()
 
-    if stick_loss_type == "quantile":
+    if stick_loss_type == "clusters":
         main_pred = preds["main_xy"].float()
-        q = _QUANTILES
-        loss_main = (_quantile_loss(main_pred[:, :, :3], main_tgt[:, :, 0], q) +
-                     _quantile_loss(main_pred[:, :, 3:], main_tgt[:, :, 1], q)) / 2
         l_pred = preds["L_val"].float()
         r_pred = preds["R_val"].float()
-        loss_l = _quantile_loss(l_pred, l_tgt, q)
-        loss_r = _quantile_loss(r_pred, r_tgt, q)
-    elif stick_loss_type == "discrete":
-        main_logits = preds["main_xy"].float()
-        B, T, _ = main_logits.shape
-        main_logits_2d = main_logits.reshape(B * T, stick_bins, stick_bins)
-        main_tgt_flat = main_tgt.reshape(B * T, 2)
-        x_bins = (main_tgt_flat[:, 0] * (stick_bins - 1)).long().clamp(0, stick_bins - 1)
-        y_bins = (main_tgt_flat[:, 1] * (stick_bins - 1)).long().clamp(0, stick_bins - 1)
-        bin_idx = x_bins * stick_bins + y_bins
-        loss_main = F.cross_entropy(main_logits.reshape(B * T, -1), bin_idx)
-        l_pred = preds["L_val"].float()
-        r_pred = preds["R_val"].float()
-        loss_l = _discrete_loss(l_pred, l_tgt, stick_bins)
-        loss_r = _discrete_loss(r_pred, r_tgt, stick_bins)
+        n_main = main_pred.size(-1)
+        n_shldr = l_pred.size(-1)
+
+        main_cluster_tgt = targets["main_cluster"].long()
+        l_bin_tgt = targets["l_bin"].long()
+        r_bin_tgt = targets["r_bin"].long()
+
+        loss_main = F.cross_entropy(main_pred.reshape(-1, n_main),
+                                    main_cluster_tgt.reshape(-1))
+        loss_l = F.cross_entropy(l_pred.reshape(-1, n_shldr),
+                                 l_bin_tgt.reshape(-1))
+        loss_r = F.cross_entropy(r_pred.reshape(-1, n_shldr),
+                                 r_bin_tgt.reshape(-1))
+
+        main_top1 = (main_pred.reshape(-1, n_main).argmax(-1) == main_cluster_tgt.reshape(-1)).float().mean().item()
+        l_top1 = (l_pred.reshape(-1, n_shldr).argmax(-1) == l_bin_tgt.reshape(-1)).float().mean().item()
+        r_top1 = (r_pred.reshape(-1, n_shldr).argmax(-1) == r_bin_tgt.reshape(-1)).float().mean().item()
     else:
+        main_tgt = torch.stack([targets["main_x"], targets["main_y"]], dim=-1)
+        l_tgt    = targets["l_shldr"]
+        r_tgt    = targets["r_shldr"]
+
+        main_top1, l_top1, r_top1 = 0.0, 0.0, 0.0
+
         main_pred = preds["main_xy"].float()
         l_pred    = preds["L_val"].squeeze(-1).float()
         r_pred    = preds["R_val"].squeeze(-1).float()
@@ -222,6 +199,8 @@ def compute_loss(preds, targets, stick_loss_type="mse", stick_bins=32,
         "btn_precision": btn_precision,
         "btn_recall":    btn_recall,
         "cdir_active_acc": cdir_active_acc,
+        "main_top1_acc":    main_top1,
+        "shoulder_top1_acc": (l_top1 + r_top1) / 2,
     }
     task_losses = (loss_main, loss_l, loss_r, loss_cdir, loss_btn)
     return metrics, task_losses
@@ -297,8 +276,10 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               encoder_type=None, d_intra=None, dropout_override=None,
               k_query=None, intra_layers=None, scaled_emb=False,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
-              stick_loss=None, btn_loss=None, delta_targets=False,
-              no_opp_inputs=False):
+              stick_loss=None, btn_loss=None,
+              no_opp_inputs=True,
+              n_stick_clusters=None, n_shoulder_bins=None,
+              autoregressive_heads=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -324,10 +305,14 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["stick_loss"] = stick_loss
     if btn_loss:
         overrides["btn_loss"] = btn_loss
-    if delta_targets:
-        overrides["delta_targets"] = True
     if no_opp_inputs:
         overrides["no_opp_inputs"] = True
+    if n_stick_clusters is not None:
+        overrides["n_stick_clusters"] = n_stick_clusters
+    if n_shoulder_bins is not None:
+        overrides["n_shoulder_bins"] = n_shoulder_bins
+    if autoregressive_heads:
+        overrides["autoregressive_heads"] = True
     cfg = ModelConfig(max_seq_len=SEQUENCE_LENGTH, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
@@ -367,7 +352,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           intra_layers: int = None, scaled_emb: bool = False,
           pos_enc: str = None, attn_variant: str = None, n_kv_heads: int = None,
           stick_loss: str = None, btn_loss: str = None,
-          delta_targets: bool = False, no_opp_inputs: bool = False):
+          no_opp_inputs: bool = True,
+          autoregressive_heads: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -411,6 +397,18 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     actual_lr = lr or LEARNING_RATE
 
     print(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}", flush=True)
+    stick_centers_np, shoulder_centers_np = None, None
+    if stick_loss == "clusters":
+        from dataset import _load_cluster_centers
+        stick_centers_np, shoulder_centers_np = _load_cluster_centers(Path(data_dir))
+        if stick_centers_np is None:
+            raise RuntimeError(f"stick_loss='clusters' but no stick_clusters.json in {data_dir}")
+        n_stick_clusters = len(stick_centers_np)
+        n_shoulder_bins = len(shoulder_centers_np)
+        print(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder", flush=True)
+    else:
+        n_stick_clusters, n_shoulder_bins = None, None
+
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
                            num_layers_override=num_layers_override,
                            encoder_type=encoder_type, d_intra=d_intra,
@@ -419,8 +417,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            pos_enc=pos_enc, attn_variant=attn_variant,
                            n_kv_heads=n_kv_heads,
                            stick_loss=stick_loss, btn_loss=btn_loss,
-                           delta_targets=delta_targets,
-                           no_opp_inputs=no_opp_inputs)
+                           no_opp_inputs=no_opp_inputs,
+                           n_stick_clusters=n_stick_clusters,
+                           n_shoulder_bins=n_shoulder_bins,
+                           autoregressive_heads=autoregressive_heads)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -500,7 +500,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     _AVG_KEYS = ["total", "loss_main", "loss_l", "loss_r", "loss_cdir",
                  "loss_btn", "cdir_acc", "btn_acc", "btn_f1",
-                 "btn_precision", "btn_recall", "cdir_active_acc", "grad_norm"]
+                 "btn_precision", "btn_recall", "cdir_active_acc",
+                 "main_top1_acc", "shoulder_top1_acc", "grad_norm"]
     _run_sums = {k: 0.0 for k in _AVG_KEYS}
     _run_ct = 0
 
@@ -525,8 +526,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
             metrics, task_losses = compute_loss(
                 preds, target, stick_loss_type=cfg.stick_loss,
-                stick_bins=cfg.stick_bins, btn_loss_type=cfg.btn_loss,
-                delta_targets=cfg.delta_targets, state=state)
+                btn_loss_type=cfg.btn_loss)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             _oom_retries += 1
@@ -567,7 +567,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         _run_sums["grad_norm"] += grad_norm
         for _mk in ("loss_main", "loss_l", "loss_r", "loss_cdir",
                      "loss_btn", "cdir_acc", "btn_acc", "btn_f1",
-                     "btn_precision", "btn_recall", "cdir_active_acc"):
+                     "btn_precision", "btn_recall", "cdir_active_acc",
+                     "main_top1_acc", "shoulder_top1_acc"):
             _run_sums[_mk] += metrics[_mk]
         _run_ct += 1
 
@@ -584,6 +585,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             "train/btn_precision": metrics["btn_precision"],
             "train/btn_recall":    metrics["btn_recall"],
             "train/cdir_active_acc": metrics["cdir_active_acc"],
+            "train/main_top1_acc":    metrics["main_top1_acc"],
+            "train/shoulder_top1_acc": metrics["shoulder_top1_acc"],
             "train/grad_norm": grad_norm,
             "train/lr":        scheduler.get_last_lr()[0],
         }, step=step)
@@ -622,7 +625,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             model.eval()
             _VAL_KEYS = ["total", "loss_main", "loss_l", "loss_r",
                          "loss_cdir", "loss_btn", "cdir_acc", "btn_acc",
-                         "btn_f1", "btn_precision", "btn_recall", "cdir_active_acc"]
+                         "btn_f1", "btn_precision", "btn_recall", "cdir_active_acc",
+                         "main_top1_acc", "shoulder_top1_acc"]
             val_sums = {k: 0.0 for k in _VAL_KEYS}
             val_ct = 0
             with torch.no_grad():
@@ -635,17 +639,15 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         vpreds = model(vs)
                     vm, vtl = compute_loss(vpreds, vt,
                                            stick_loss_type=cfg.stick_loss,
-                                           stick_bins=cfg.stick_bins,
-                                           btn_loss_type=cfg.btn_loss,
-                                           delta_targets=cfg.delta_targets,
-                                           state=vs)
+                                           btn_loss_type=cfg.btn_loss)
                     batch_total = sum(t.item() for t in vtl)
                     if math.isfinite(batch_total):
                         val_sums["total"] += batch_total
                         for _vk in ("loss_main", "loss_l", "loss_r",
                                      "loss_cdir", "loss_btn", "cdir_acc", "btn_acc",
                                      "btn_f1", "btn_precision", "btn_recall",
-                                     "cdir_active_acc"):
+                                     "cdir_active_acc",
+                                     "main_top1_acc", "shoulder_top1_acc"):
                             val_sums[_vk] += vm[_vk]
                         val_ct += 1
                     if val_ct >= MAX_VAL_BATCHES:
@@ -666,7 +668,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         if step % ckpt_interval == 0 or step == max_steps:
             os.makedirs("checkpoints", exist_ok=True)
             ckpt_path = f"checkpoints/{run_name}_step{step:06d}.pt"
-            torch.save({
+            ckpt_data = {
                 "global_step":          step,
                 "model_state_dict":     model.state_dict(),
                 "optimizer_state_dict": optimiser.state_dict(),
@@ -674,7 +676,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 "loss_weights":         loss_weights.cpu(),
                 "norm_stats":           ds.norm_stats,
                 "config":               cfg.__dict__,
-            }, ckpt_path)
+            }
+            if stick_centers_np is not None:
+                ckpt_data["stick_centers"] = stick_centers_np.tolist()
+            if shoulder_centers_np is not None:
+                ckpt_data["shoulder_centers"] = shoulder_centers_np.tolist()
+            torch.save(ckpt_data, ckpt_path)
             print(f"  -- saved {ckpt_path}", flush=True)
 
     elapsed = time.time() - t0
@@ -737,15 +744,15 @@ if __name__ == "__main__":
     parser.add_argument("--n-kv-heads", type=int, default=None,
                         help="Number of KV heads for GQA (default: nhead)")
     parser.add_argument("--stick-loss", type=str, default=None,
-                        choices=["mse", "huber", "quantile", "discrete"],
-                        help="Stick regression loss type")
+                        choices=["mse", "huber", "clusters"],
+                        help="Stick loss type")
     parser.add_argument("--btn-loss", type=str, default=None,
                         choices=["bce", "focal"],
                         help="Button loss type (default: bce)")
-    parser.add_argument("--delta-targets", action="store_true",
-                        help="Predict delta (next - current) for stick targets")
-    parser.add_argument("--no-opp-inputs", action="store_true",
-                        help="Remove opponent controller inputs (analog, buttons, c-stick)")
+    parser.add_argument("--opp-inputs", action="store_true",
+                        help="Include opponent controller inputs (default: excluded)")
+    parser.add_argument("--autoregressive-heads", action="store_true",
+                        help="Enable autoregressive output heads (each head conditions on previous)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
     args = parser.parse_args()
@@ -784,6 +791,6 @@ if __name__ == "__main__":
         n_kv_heads=args.n_kv_heads,
         stick_loss=args.stick_loss,
         btn_loss=args.btn_loss,
-        delta_targets=args.delta_targets,
-        no_opp_inputs=args.no_opp_inputs,
+        no_opp_inputs=not args.opp_inputs,
+        autoregressive_heads=args.autoregressive_heads,
     )

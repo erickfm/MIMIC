@@ -7,11 +7,13 @@
 # ---------------------------------------------------------------------------
 
 import argparse
+import csv
 import logging
 import math
 import os
 import signal
 import sys
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List
@@ -43,6 +45,8 @@ parser.add_argument("--stage", type=str, default="FINAL_DESTINATION",
                     help="Stage name (e.g. FINAL_DESTINATION, BATTLEFIELD)")
 parser.add_argument("--checkpoint", type=str, default=None,
                     help="Path to a specific checkpoint file (overrides auto-discovery)")
+parser.add_argument("--log-dir", type=str, default=None,
+                    help="Directory for inference CSV logs (default: logs/)")
 args = parser.parse_args()
 
 BOT_CHARACTER = melee.Character[args.character.upper()]
@@ -66,23 +70,46 @@ if args.checkpoint:
     if not ckpt_path.exists():
         log.error("Checkpoint not found: %s", ckpt_path); sys.exit(1)
 else:
-    ckpt_patterns = ["*_step*.pt", "step_*.pt", "epoch_*.pt"]
-    ckpts: list[Path] = []
-    for pat in ckpt_patterns:
-        ckpts.extend(Path("./checkpoints").glob(pat))
+    ckpts: list[Path] = list(Path("./checkpoints").glob("*.pt"))
     if not ckpts:
-        log.error("No checkpoints found."); sys.exit(1)
+        log.error("No checkpoints found in ./checkpoints/"); sys.exit(1)
     ckpt_path = max(ckpts, key=lambda p: p.stat().st_mtime)
+    log.info("Auto-discovered %d checkpoints, using newest: %s", len(ckpts), ckpt_path.name)
 ckpt      = torch.load(ckpt_path, map_location=DEVICE)
 cfg       = ModelConfig(**ckpt["config"])
 
 model = FramePredictor(cfg).to(DEVICE)
 state_dict = ckpt["model_state_dict"]
-# Strip _orig_mod. prefix added by torch.compile
 state_dict = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
 model.load_state_dict(state_dict)
 model.eval()
 log.info("Loaded checkpoint %s", ckpt_path)
+
+# ── Cluster centers (for discrete stick_loss="clusters" mode) ────────────
+_stick_centers: np.ndarray | None = None
+_shoulder_centers: np.ndarray | None = None
+
+if cfg.stick_loss == "clusters":
+    if "stick_centers" in ckpt:
+        _stick_centers = np.array(ckpt["stick_centers"], dtype=np.float32)
+        _shoulder_centers = np.array(ckpt["shoulder_centers"], dtype=np.float32)
+        log.info("Loaded cluster centers from checkpoint: %d stick, %d shoulder",
+                 len(_stick_centers), len(_shoulder_centers))
+    else:
+        import json as _json
+        for _sd in [Path("./data/full"), Path("./data"), Path("./data/subset")]:
+            _sc_path = _sd / "stick_clusters.json"
+            if _sc_path.exists():
+                with open(_sc_path) as _fh:
+                    _sc_raw = _json.load(_fh)
+                _stick_centers = np.array(_sc_raw["stick_centers"], dtype=np.float32)
+                _shoulder_centers = np.array(_sc_raw["shoulder_centers"], dtype=np.float32)
+                log.info("Loaded cluster centers from %s: %d stick, %d shoulder",
+                         _sc_path, len(_stick_centers), len(_shoulder_centers))
+                break
+        if _stick_centers is None:
+            log.error("stick_loss='clusters' but no cluster centers in checkpoint or data dir")
+            sys.exit(1)
 
 # ── Normalization stats + categorical maps ───────────────────────────────
 import json
@@ -126,6 +153,112 @@ _categorical_cols = F.get_categorical_cols(_fg)
 from typing import Optional
 _prev_pred: Optional[Dict[str, torch.Tensor]] = None
 _prev_btns_fired: Optional[List[bool]] = None
+
+# ── Inference logger ──────────────────────────────────────────────────────
+class InferenceLogger:
+    """Per-frame CSV logger capturing game state, raw model outputs, and
+    the controller commands actually sent to Dolphin."""
+
+    _HEADER = [
+        "frame", "wall_ms",
+        # game state
+        "self_pos_x", "self_pos_y", "self_action", "self_action_frame",
+        "self_percent", "self_stock", "self_facing", "self_on_ground", "self_off_stage",
+        "opp_pos_x", "opp_pos_y", "opp_action", "opp_percent", "opp_stock",
+        "distance",
+        # raw model predictions
+        "pred_main_x", "pred_main_y",
+        "pred_c_dir", "pred_c_dir_probs",
+        "pred_L", "pred_R",
+        "pred_btn_probs",
+        # actual controller output
+        "sent_main_x", "sent_main_y",
+        "sent_c_dir",
+        "sent_L", "sent_R",
+        "sent_btns",
+    ]
+
+    def __init__(self, log_dir: str | Path | None = None):
+        log_dir = Path(log_dir or "logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        self._path = log_dir / f"inference_{stamp}.csv"
+        self._fh = open(self._path, "w", newline="")
+        self._writer = csv.DictWriter(self._fh, fieldnames=self._HEADER,
+                                      extrasaction="ignore")
+        self._writer.writeheader()
+        self._t0 = time.monotonic()
+        log.info("Inference log → %s", self._path)
+
+    def log_frame(
+        self,
+        row: Dict[str, Any],
+        pred: Dict[str, torch.Tensor] | None,
+        sent_main: tuple[float, float] | None,
+        sent_c_dir: int | None,
+        sent_L: float | None,
+        sent_R: float | None,
+        sent_btns: List[bool] | None,
+    ) -> None:
+        rec: Dict[str, Any] = {
+            "frame": row.get("frame", -1),
+            "wall_ms": f"{(time.monotonic() - self._t0) * 1000:.1f}",
+            "self_pos_x":      f"{row.get('self_pos_x', 0):.2f}",
+            "self_pos_y":      f"{row.get('self_pos_y', 0):.2f}",
+            "self_action":     row.get("self_action", ""),
+            "self_action_frame": row.get("self_action_frame", ""),
+            "self_percent":    row.get("self_percent", ""),
+            "self_stock":      row.get("self_stock", ""),
+            "self_facing":     row.get("self_facing", ""),
+            "self_on_ground":  row.get("self_on_ground", ""),
+            "self_off_stage":  row.get("self_off_stage", ""),
+            "opp_pos_x":      f"{row.get('opp_pos_x', 0):.2f}",
+            "opp_pos_y":      f"{row.get('opp_pos_y', 0):.2f}",
+            "opp_action":     row.get("opp_action", ""),
+            "opp_percent":    row.get("opp_percent", ""),
+            "opp_stock":      row.get("opp_stock", ""),
+            "distance":       f"{row.get('distance', 0):.2f}",
+        }
+        if pred is not None:
+            if cfg.stick_loss == "clusters":
+                _lg_mx, _lg_my, _lg_l, _lg_r = _decode_clusters(pred)
+                rec["pred_main_x"] = f"{_lg_mx:.4f}"
+                rec["pred_main_y"] = f"{_lg_my:.4f}"
+                rec["pred_L"] = f"{_lg_l:.4f}"
+                rec["pred_R"] = f"{_lg_r:.4f}"
+            else:
+                main = torch.clamp(pred["main_xy"], 0, 1)
+                rec["pred_main_x"] = f"{main[0].item():.4f}"
+                rec["pred_main_y"] = f"{main[1].item():.4f}"
+                rec["pred_L"] = f"{torch.clamp(pred['L_val'], 0, 1).item():.4f}"
+                rec["pred_R"] = f"{torch.clamp(pred['R_val'], 0, 1).item():.4f}"
+            c_probs = torch.softmax(pred["c_dir_logits"], dim=-1)
+            rec["pred_c_dir"] = int(torch.argmax(c_probs))
+            rec["pred_c_dir_probs"] = " ".join(f"{p:.3f}" for p in c_probs.tolist())
+            btn_p = torch.sigmoid(pred["btn_logits"])
+            rec["pred_btn_probs"] = " ".join(
+                f"{IDX_TO_BUTTON[i].name}={p:.3f}"
+                for i, p in enumerate(btn_p.tolist())
+            )
+        if sent_main is not None:
+            rec["sent_main_x"] = f"{sent_main[0]:.4f}"
+            rec["sent_main_y"] = f"{sent_main[1]:.4f}"
+        if sent_c_dir is not None:
+            rec["sent_c_dir"] = sent_c_dir
+        if sent_L is not None:
+            rec["sent_L"] = f"{sent_L:.4f}"
+        if sent_R is not None:
+            rec["sent_R"] = f"{sent_R:.4f}"
+        if sent_btns is not None:
+            rec["sent_btns"] = " ".join(
+                IDX_TO_BUTTON[i].name
+                for i, fired in enumerate(sent_btns) if fired
+            )
+        self._writer.writerow(rec)
+
+    def close(self) -> None:
+        self._fh.close()
+        log.info("Inference log closed (%s)", self._path)
 
 # ── Debug helpers ────────────────────────────────────────────────────────
 def check_tensor_dict(tdict: Dict[str, torch.Tensor], where: str) -> None:
@@ -221,19 +354,34 @@ def _safe(val: float, default: float = 0.5) -> float:
     return min(max(val, 0.0), 1.0)
 
 
+def _decode_clusters(pred: Dict[str, torch.Tensor]):
+    """For clusters mode: argmax logits -> continuous (mx, my, l, r) via cluster lookup."""
+    main_idx = int(torch.argmax(pred["main_xy"]))
+    mx, my = float(_stick_centers[main_idx][0]), float(_stick_centers[main_idx][1])
+    l_idx = int(torch.argmax(pred["L_val"]))
+    r_idx = int(torch.argmax(pred["R_val"]))
+    l_val = float(_shoulder_centers[l_idx])
+    r_val = float(_shoulder_centers[r_idx])
+    return mx, my, l_val, r_val
+
+
 def press_output(ctrl: melee.Controller,
                  pred: Dict[str, torch.Tensor],
-                 sample: bool = True) -> List[bool]:
-    """Send model predictions to the controller. Returns which buttons fired."""
+                 sample: bool = True) -> tuple[List[bool], tuple[float, float], int, float, float]:
+    """Send model predictions to the controller.
+    Returns (fired_buttons, (mx,my), c_dir_idx, l_val, r_val)."""
     import random
-    clamped_main = torch.clamp(pred["main_xy"], 0.0, 1.0)
-    mx, my = map(float, clamped_main.tolist())
+
+    if cfg.stick_loss == "clusters":
+        mx, my, l_val, r_val = _decode_clusters(pred)
+    else:
+        clamped_main = torch.clamp(pred["main_xy"], 0.0, 1.0)
+        mx, my = map(float, clamped_main.tolist())
+        l_val = _safe(torch.clamp(pred["L_val"], 0.0, 1.0).item(), 0.0)
+        r_val = _safe(torch.clamp(pred["R_val"], 0.0, 1.0).item(), 0.0)
 
     dir_idx = int(torch.argmax(pred["c_dir_logits"]))
     cx, cy  = C_DIR_TO_FLOAT.get(dir_idx, (0.5, 0.5))
-
-    l_val = _safe(torch.clamp(pred["L_val"], 0.0, 1.0).item(), 0.0)
-    r_val = _safe(torch.clamp(pred["R_val"], 0.0, 1.0).item(), 0.0)
 
     ctrl.tilt_analog(melee.enums.Button.BUTTON_MAIN, mx, my)
     ctrl.tilt_analog(melee.enums.Button.BUTTON_C,    cx, cy)
@@ -260,7 +408,7 @@ def press_output(ctrl: melee.Controller,
         "MAIN=(%.2f,%.2f) C=%d L=%.2f R=%.2f BTN=%s  top3=[%s]",
         mx, my, dir_idx, l_val, r_val, pressed, top3_str
     )
-    return fired
+    return fired, (mx, my), dir_idx, l_val, r_val
 
 # ── Dolphin loop ─────────────────────────────────────────────────────────
 def signal_handler(sig, _):
@@ -294,6 +442,8 @@ if __name__ == "__main__":
 
     menu_helper_bot = melee.MenuHelper()
     menu_helper_cpu = melee.MenuHelper()
+
+    inf_logger = InferenceLogger(args.log_dir)
 
     rows: deque[Dict[str, Any]] = deque(maxlen=ROLL_WIN)
     _step_ct = 0
@@ -374,11 +524,18 @@ if __name__ == "__main__":
             row[f"{pref}costume"]       = ps.costume
 
             if pref == "self_" and _prev_pred is not None:
-                _fb_main = torch.clamp(_prev_pred["main_xy"], 0.0, 1.0)
-                row[f"{pref}main_x"] = _fb_main[0].item()
-                row[f"{pref}main_y"] = _fb_main[1].item()
-                row[f"{pref}l_shldr"] = torch.clamp(_prev_pred["L_val"], 0.0, 1.0).item()
-                row[f"{pref}r_shldr"] = torch.clamp(_prev_pred["R_val"], 0.0, 1.0).item()
+                if cfg.stick_loss == "clusters":
+                    _fb_mx, _fb_my, _fb_l, _fb_r = _decode_clusters(_prev_pred)
+                    row[f"{pref}main_x"] = _fb_mx
+                    row[f"{pref}main_y"] = _fb_my
+                    row[f"{pref}l_shldr"] = _fb_l
+                    row[f"{pref}r_shldr"] = _fb_r
+                else:
+                    _fb_main = torch.clamp(_prev_pred["main_xy"], 0.0, 1.0)
+                    row[f"{pref}main_x"] = _fb_main[0].item()
+                    row[f"{pref}main_y"] = _fb_main[1].item()
+                    row[f"{pref}l_shldr"] = torch.clamp(_prev_pred["L_val"], 0.0, 1.0).item()
+                    row[f"{pref}r_shldr"] = torch.clamp(_prev_pred["R_val"], 0.0, 1.0).item()
                 _fb_cdir = int(torch.argmax(_prev_pred["c_dir_logits"]))
                 row[f"{pref}c_x"], row[f"{pref}c_y"] = C_DIR_TO_FLOAT.get(_fb_cdir, (0.5, 0.5))
                 if _prev_btns_fired is not None:
@@ -503,11 +660,16 @@ if __name__ == "__main__":
             bot_ps = gs.players.get(ports[0])
             if bot_ps and _step_ct % 60 == 0:
                 gm = bot_ps.controller_state.main_stick
-                pm = torch.clamp(pred["main_xy"], 0, 1).tolist()
+                if cfg.stick_loss == "clusters":
+                    _dbg_mx, _dbg_my, _dbg_l, _dbg_r = _decode_clusters(pred)
+                    pm = [_dbg_mx, _dbg_my]
+                    pl, pr = _dbg_l, _dbg_r
+                else:
+                    pm = torch.clamp(pred["main_xy"], 0, 1).tolist()
+                    pl = torch.clamp(pred["L_val"], 0, 1).item()
+                    pr = torch.clamp(pred["R_val"], 0, 1).item()
                 gl = bot_ps.controller_state.l_shoulder
                 gr = bot_ps.controller_state.r_shoulder
-                pl = torch.clamp(pred["L_val"], 0, 1).item()
-                pr = torch.clamp(pred["R_val"], 0, 1).item()
                 log.info(
                     "FEEDBACK: game_stick=(%.3f,%.3f) pred_stick=(%.3f,%.3f) "
                     "game_shldr=(%.3f,%.3f) pred_shldr=(%.3f,%.3f)",
@@ -516,10 +678,24 @@ if __name__ == "__main__":
 
             ctrl = controllers[ports[0]]
             ctrl.release_all()
-            _prev_btns_fired = press_output(ctrl, pred)
+            _prev_btns_fired, sent_main, sent_cdir, sent_L, sent_R = press_output(ctrl, pred)
             ctrl.flush()
 
+            inf_logger.log_frame(
+                row, pred,
+                sent_main=sent_main, sent_c_dir=sent_cdir,
+                sent_L=sent_L, sent_R=sent_R,
+                sent_btns=_prev_btns_fired,
+            )
+        else:
+            inf_logger.log_frame(
+                row, pred=None,
+                sent_main=None, sent_c_dir=None,
+                sent_L=None, sent_R=None, sent_btns=None,
+            )
+
     log.info("Cleaning up...")
+    inf_logger.close()
     for c in controllers.values():
         c.disconnect()
     console.stop()

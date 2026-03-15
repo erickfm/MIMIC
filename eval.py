@@ -34,7 +34,7 @@ def load_checkpoint(ckpt_path: str):
 
     cfg_fields = {f.name for f in ModelConfig.__dataclass_fields__.values()}
     filtered = {k: v for k, v in raw_cfg.items() if k in cfg_fields}
-    filtered.setdefault("no_opp_inputs", False)
+    filtered.setdefault("no_opp_inputs", True)
     filtered.setdefault("btn_loss", "bce")
     cfg = ModelConfig(**filtered)
 
@@ -80,10 +80,7 @@ def evaluate(model, cfg, val_dl, max_batches=200):
             metrics, task_losses = compute_loss(
                 preds, vt,
                 stick_loss_type=cfg.stick_loss,
-                stick_bins=cfg.stick_bins,
                 btn_loss_type=cfg.btn_loss,
-                delta_targets=cfg.delta_targets,
-                state=vs,
             )
             batch_total = sum(t.item() for t in task_losses)
             if math.isfinite(batch_total):

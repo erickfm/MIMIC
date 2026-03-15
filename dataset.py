@@ -25,6 +25,18 @@ import features as F
 # ---------------------------------------------------------------------------
 # Raw-parquet dataset (preprocesses at init -- slow but self-contained)
 # ---------------------------------------------------------------------------
+def _load_cluster_centers(data_dir: Path):
+    """Load stick_clusters.json if present, returning (stick_centers, shoulder_centers) or (None, None)."""
+    path = data_dir / "stick_clusters.json"
+    if not path.exists():
+        return None, None
+    with open(path) as fh:
+        raw = json.load(fh)
+    stick = np.array(raw["stick_centers"], dtype=np.float32) if "stick_centers" in raw else None
+    shoulder = np.array(raw["shoulder_centers"], dtype=np.float32) if "shoulder_centers" in raw else None
+    return stick, shoulder
+
+
 class MeleeFrameDatasetWithDelay(Dataset):
     """Fixed-length windows over Slippi frame data with a reaction delay."""
 
@@ -106,9 +118,14 @@ class MeleeFrameDatasetWithDelay(Dataset):
             if drop:
                 self._df_cache[f] = df.drop(columns=drop)
 
+        self._stick_centers, self._shoulder_centers = _load_cluster_centers(self.parquet_dir)
+
         self._target_cache: Dict[Path, Dict[str, torch.Tensor]] = {}
         for f, df in self._df_cache.items():
-            self._target_cache[f] = F.build_targets_batch(df, self.norm_stats)
+            self._target_cache[f] = F.build_targets_batch(
+                df, self.norm_stats,
+                stick_centers=self._stick_centers,
+                shoulder_centers=self._shoulder_centers)
 
     def __len__(self):
         return len(self.index_map)
@@ -171,6 +188,8 @@ class StreamingMeleeDataset(IterableDataset):
         with open(self.data_dir / "file_index.json") as fh:
             self.file_index: Dict[str, int] = json.load(fh)
 
+        self._stick_centers, self._shoulder_centers = _load_cluster_centers(self.data_dir)
+
         self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs)
         self._categorical_cols = F.get_categorical_cols(self._fg)
 
@@ -207,7 +226,10 @@ class StreamingMeleeDataset(IterableDataset):
         F.apply_normalization(df, self.norm_stats)
 
         state   = F.df_to_state_tensors(df, self._fg)
-        targets = F.build_targets_batch(df, self.norm_stats)
+        targets = F.build_targets_batch(
+            df, self.norm_stats,
+            stick_centers=self._stick_centers,
+            shoulder_centers=self._shoulder_centers)
         return state, targets, len(df)
 
     def __iter__(self):
