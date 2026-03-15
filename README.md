@@ -155,17 +155,21 @@ wastes a small amount of head capacity.
 
 ## Future Improvements
 
+- **Combine Huber + no-opp-inputs + ctx-180**: The best stick loss (Huber)
+  hasn't been tested with the best feature config (no-opp-inputs) at the
+  best context length (180 frames). This combination should push metrics
+  further.
+- **More data**: All experiments used 2M samples. Scaling to the full
+  dataset (~100M+ frames) should help with the cdir_active ceiling.
+- **Better c-stick modeling**: cdir_active_acc at 71.7% is the weakest
+  link. Consider focal loss for c-stick (rare active frames), or a
+  hierarchical predict-then-direction approach.
 - **Loss reweighting**: Task losses have different magnitudes (MSE on
   near-zero L/R is tiny vs Focal CE on c-stick). Normalizing gradient
   contributions across heads could improve joint learning.
 - **Main stick zone-aware loss**: Discretize into Melee-relevant zones or
   use a mixture distribution that captures the multi-modal nature of stick
   positions (center cluster, cardinal extremes).
-- **Dead button masking**: Zero out loss for BUTTON_START and D-pad to
-  reduce gradient noise.
-- **Longer context windows**: 60 frames covers immediate interactions;
-  120-180 frames would capture more strategic context (edge-guarding
-  sequences, respawn patterns).
 - **Multi-step prediction**: Predicting frames T+1 through T+K
   simultaneously could help the model learn action planning and committal
   sequences.
@@ -341,6 +345,35 @@ of total steps (~0.5% log, ~5% val/checkpoint, ~1% warmup).
 
 ## Inference
 
+Run the bot against a CPU in Dolphin:
+
 ```bash
-python3 inference.py --dolphin-path /path/to/dolphin --iso-path /path/to/melee.iso [--debug]
+python3 inference.py \
+  --checkpoint checkpoints/noi_ctx180_65k_machC.pt \
+  --dolphin-path ~/.config/Slippi\ Launcher/netplay/Slippi_Online-x86_64.AppImage \
+  --iso-path ~/Downloads/Super\ Smash\ Bros.\ Melee\ \(USA\)\ \(En,Ja\)\ \(Rev\ 2\).iso
 ```
+
+If you installed [Slippi Launcher](https://slippi.gg/) normally, the Dolphin executable lives at:
+
+```
+~/.config/Slippi Launcher/netplay/Slippi_Online-x86_64.AppImage
+```
+
+You can also set environment variables to avoid passing paths every time:
+
+```bash
+export DOLPHIN_PATH="$HOME/.config/Slippi Launcher/netplay/Slippi_Online-x86_64.AppImage"
+export ISO_PATH="$HOME/Downloads/Super Smash Bros. Melee (USA) (En,Ja) (Rev 2).iso"
+python3 inference.py --checkpoint checkpoints/noi_ctx180_65k_machC.pt
+```
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--checkpoint` | Path to a `.pt` checkpoint (auto-discovers latest if omitted) |
+| `--dolphin-path` | Path to Slippi Dolphin AppImage (or set `DOLPHIN_PATH`) |
+| `--iso-path` | Path to Melee ISO (or set `ISO_PATH`) |
+| `--cpu-level` | CPU opponent level, 1-9 (default: 7) |
+| `--debug` | Verbose frame-by-frame logging |
