@@ -30,8 +30,8 @@ from model   import FramePredictor, ModelConfig, MODEL_PRESETS
 # -----------------------------------------------------------------------------
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-BATCH_SIZE      = 128
-LEARNING_RATE   = 8e-4
+BATCH_SIZE      = 256
+LEARNING_RATE   = 5e-5
 WEIGHT_DECAY    = 1e-2
 NUM_WORKERS     = 8
 SEQUENCE_LENGTH = 60
@@ -54,7 +54,7 @@ AMP_DTYPE = torch.bfloat16
 MAX_VAL_BATCHES    = 100
 
 # Intervals derived from max_steps at runtime (see _compute_intervals)
-WARMUP_FRAC        = 0.01     # 1% warmup
+WARMUP_FRAC        = 0.05     # 5% warmup
 LOG_FRAC           = 0.005    # log every ~0.5%
 VAL_FRAC           = 0.05     # validate every ~5%
 CKPT_FRAC          = 0.05     # checkpoint every ~5%
@@ -364,7 +364,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           clusters_path: str = None,
           target_val_f1: float = None,
           max_wall_time: float = None,
-          val_frac_override: float = None):
+          val_frac_override: float = None,
+          warmup_steps_override: int = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -406,6 +407,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     val_interval  = intervals["val_interval"]
     ckpt_interval = intervals["ckpt_interval"]
     warmup_steps  = intervals["warmup_steps"]
+    if warmup_steps_override is not None:
+        warmup_steps = warmup_steps_override
 
     actual_lr = lr or LEARNING_RATE
 
@@ -820,6 +823,8 @@ if __name__ == "__main__":
                         help="Hard wall-time limit in seconds; stop if exceeded")
     parser.add_argument("--val-frac", type=float, default=None,
                         help="Override validation frequency as fraction of max_steps (default: 0.05)")
+    parser.add_argument("--warmup-steps", type=int, default=None,
+                        help="Override warmup steps (default: 1%% of max_steps)")
     args = parser.parse_args()
 
     import train as _self_module
@@ -868,4 +873,5 @@ if __name__ == "__main__":
         target_val_f1=args.target_val_f1,
         max_wall_time=args.max_wall_time,
         val_frac_override=args.val_frac,
+        warmup_steps_override=args.warmup_steps,
     )

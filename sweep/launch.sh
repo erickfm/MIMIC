@@ -21,11 +21,12 @@ PORT_B=28750
 MACHINE_C="root@38.65.239.56"
 PORT_C=45107
 
-COMMON="--data-dir data/wavedash_v2 --model medium --stick-loss clusters \
-  --clusters-path data/full/stick_clusters.json --label-smoothing 0.0 \
-  --autoregressive-heads --seq-len 30 --max-steps 20000 \
-  --target-val-f1 0.985 --val-frac 0.01 \
-  --wandb-group wavedash-speed"
+COMMON="--data-dir data/wavedash_v2 --model shallow --pos-enc rope \
+  --stick-loss clusters --clusters-path data/full/stick_clusters.json \
+  --label-smoothing 0.0 --autoregressive-heads --seq-len 30 \
+  --lr 5e-5 --max-steps 20000 \
+  --target-val-f1 0.985 --max-wall-time 10000 --val-frac 0.01 \
+  --wandb-group wavedash-speed2"
 
 MACHINE="${1:?Usage: launch.sh MACHINE GPU RUN_NAME [EXTRA_ARGS]}"
 GPU="${2:?Usage: launch.sh MACHINE GPU RUN_NAME [EXTRA_ARGS]}"
@@ -39,12 +40,13 @@ case "$MACHINE" in
     *) echo "Error: MACHINE must be A, B, or C"; exit 1 ;;
 esac
 
-echo "[launch] $RUN_NAME → $HOST:$PORT GPU $GPU"
-echo "  extra: $EXTRA"
+echo "[launch] $RUN_NAME → $HOST:$PORT GPU $GPU  extra: $EXTRA"
 
-ssh -p "$PORT" "$HOST" "cd /root/FRAME && mkdir -p logs/sweep && \
-    CUDA_VISIBLE_DEVICES=$GPU nohup python3 train.py \
-    $COMMON --run-name $RUN_NAME $EXTRA \
-    > logs/sweep/$RUN_NAME.log 2>&1 </dev/null &"
+ssh -o ConnectTimeout=10 -p "$PORT" "$HOST" \
+    "cd /root/FRAME && mkdir -p logs/sweep && \
+     nohup env CUDA_VISIBLE_DEVICES=$GPU python3 train.py \
+     $COMMON --run-name $RUN_NAME $EXTRA \
+     > logs/sweep/$RUN_NAME.log 2>&1 &
+     echo started-\$!"
 
-echo "[launch] $RUN_NAME started (log: logs/sweep/$RUN_NAME.log)"
+echo "[launch] $RUN_NAME done"

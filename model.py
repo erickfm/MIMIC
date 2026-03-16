@@ -48,7 +48,7 @@ class ModelConfig:
     max_seq_len: int     = 60
 
     # positional encoding
-    pos_enc: str         = "learned"
+    pos_enc: str         = "rope"
 
     # attention variant
     attn_variant: str    = "standard"
