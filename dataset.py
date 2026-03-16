@@ -25,16 +25,33 @@ import features as F
 # ---------------------------------------------------------------------------
 # Raw-parquet dataset (preprocesses at init -- slow but self-contained)
 # ---------------------------------------------------------------------------
-def _load_cluster_centers(data_dir: Path):
-    """Load stick_clusters.json if present, returning (stick_centers, shoulder_centers) or (None, None)."""
-    path = data_dir / "stick_clusters.json"
-    if not path.exists():
-        return None, None
-    with open(path) as fh:
-        raw = json.load(fh)
-    stick = np.array(raw["stick_centers"], dtype=np.float32) if "stick_centers" in raw else None
-    shoulder = np.array(raw["shoulder_centers"], dtype=np.float32) if "shoulder_centers" in raw else None
-    return stick, shoulder
+_DEFAULT_CLUSTERS_PATH = Path("data/full/stick_clusters.json")
+
+
+def _load_cluster_centers(data_dir: Path = None, clusters_path: Path = None):
+    """Load stick_clusters.json, returning (stick_centers, shoulder_centers) or (None, None).
+
+    Resolution order:
+      1. Explicit *clusters_path* if given
+      2. ``data_dir / stick_clusters.json``
+      3. ``data/full/stick_clusters.json`` (canonical default)
+    """
+    candidates = []
+    if clusters_path is not None:
+        candidates.append(Path(clusters_path))
+    if data_dir is not None:
+        candidates.append(Path(data_dir) / "stick_clusters.json")
+    candidates.append(_DEFAULT_CLUSTERS_PATH)
+
+    for path in candidates:
+        if path.exists():
+            with open(path) as fh:
+                raw = json.load(fh)
+            stick = np.array(raw["stick_centers"], dtype=np.float32) if "stick_centers" in raw else None
+            shoulder = np.array(raw["shoulder_centers"], dtype=np.float32) if "shoulder_centers" in raw else None
+            print(f"  Loaded clusters from {path}", flush=True)
+            return stick, shoulder
+    return None, None
 
 
 class MeleeFrameDatasetWithDelay(Dataset):

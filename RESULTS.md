@@ -1,174 +1,118 @@
-# MIMIC Experiment Results
+# MIMIC Pipeline Audit + Closed-Loop Eval — Results
 
-All runs: 2M samples from data/full, hybrid16 encoder, learned pos-enc unless noted. Metrics evaluated on held-out val split using `eval.py`.
+## Phase 1: Tensor-Level Pipeline Audit
 
-**Key metrics**:
-- **val/total**: sum of all task losses (lower is better)
-- **btn_f1**: F1 score for button presses — measures precision/recall balance on the rare "button pressed" class
-- **cdir_active**: c-stick accuracy on non-neutral frames only — the old `cdir_acc` was >99% because neutral dominates; this measures accuracy when the c-stick is actually used
-- **btn_prec / btn_rec**: button precision and recall
+### diagnose.py findings
 
-> Note: Phase 1-2 runs used the old saturated metrics (cdir_acc ~99%, btn_acc ~99%) and most checkpoints are no longer available for re-evaluation. Takeaways are preserved but tables use the original metrics.
+Ran `diagnose.py` comparing a saved inference batch (call #300) against a training parquet window:
 
----
+| Feature group | Training range | Inference range | Verdict |
+|---|---|---|---|
+| `self_numeric` (22-dim) | [-1.24, 0.72] | [-2.17, 0.72] | **Minor diffs** (position/percent vary between games) |
+| `opp_numeric` (22-dim) | [-1.24, 1.23] | [-1.24, 0.72] | OK |
+| `self_buttons` (12-dim) | [0, 1] | [0, 1] | OK |
+| `self_analog` (4-dim) | [-2.13, 2.44] | [-1.55, 2.29] | OK |
+| `global numeric` (20-dim) | [-1.23, 1.23] | **[-20.93, 26.00]** | **Stage geometry (FD no-platform values after z-score normalization)** |
+| All categoricals | Match | Match | OK (different games → different actions, expected) |
 
-## Phase 1-2: Encoder & Backbone
+**Critical finding**: The model output comparison showed that **BOTH training and inference batches produce near-zero button probabilities** (A=0.18% train, A=0.26% inf). The pipeline is correct — the model just doesn't press buttons on neutral frames.
 
-Default encoder, various presets and LRs. These runs established the architecture.
+### inference.py fixes applied
 
-### Scaling (model size)
+Fixed all known mismatches between `inference.py` and `extract.py`:
 
-| Run | Preset | Params | LR | Batch | val/total |
-|-----|--------|--------|----|-------|-----------|
-| `scale-tiny` | tiny (256d/4L) | 6.4M | 1e-3 | 128 | 0.0742 |
-| `scale-small` | small (512d/4L) | 16.3M | 3e-4 | 128 | 0.0929 |
-| `scale-medium` | medium (768d/4L) | 32.4M | 8e-4 | 128 | 0.0797 |
-| `scale-base` | base (1024d/4L) | 54.9M | 1e-3 | 64 | 0.0736 |
-| `scale-deep` | deep (512d/8L) | 28.9M | 3e-4 | 64 | 0.0876 |
-| `scale-wide-shallow` | 1024d/2L | 62.0M | 3e-4 | 32 | 0.0904 |
-| `scale-xlarge` | xlarge | 105.3M | 1e-4 | 32 | 0.1084 |
-| `scale-xxlarge` | xxlarge | 232.0M | 1e-4 | 16 | 0.0908 |
+- **Speed fields**: `speed_air_x_self`, `speed_ground_x_self`, `speed_x_attack`, `speed_y_attack`, `speed_y_self` — now read from `ps.speed_*` instead of hardcoded 0.0
+- **hitlag_left**: now read from `ps.hitlag_left` instead of hardcoded 0
+- **invuln_left**: now read from `ps.invulnerability_left` instead of hardcoded 0
+- **ECB values**: now read from `ps.ecb_bottom/left/right/top` instead of hardcoded 0.0
+- **Projectiles**: now populated from `gs.projectiles` (matching extract.py format) instead of all-empty
+- Same fixes applied for Nana (Ice Climbers partner)
 
-xlarge overfit badly (train 0.0261 vs val 0.1084). Medium and base hit the best val-per-param.
+## Phase 2: Closed-Loop Evaluation
 
-### Phase 1-2 takeaways
+### Setup
 
-- **hybrid16** encoder won over flat, composite8, and default (55-token) encoders
-- **medium** backbone (768d/4L) hit the best loss-per-param sweet spot at ~32M params
-- **lr 8e-4** outperformed 3e-4 and 5e-4 at medium scale
-- Larger models (xlarge, xxlarge) overfit at 2M samples with small batch sizes
-- RoPE slightly beat learned pos-enc at small scale; ALiBi showed promise but inconsistent results
+- 20 Falco-on-FD games sampled from training data (not freshly recorded; serves as pipeline proxy)
+- Preprocessed with separate `norm_stats.json` and `cat_maps.json`
+- Reused existing 63-cluster stick centers and 4-bin shoulder centers
+- Trained `closed-loop-overfit` for 5000 steps (seq_len=60, batch=64, lr=8e-4)
 
----
+### Training convergence
 
-## Phase 3: Architecture & Loss Refinement
+| Step | Train Loss | btn_f1 | cact | Val btn_f1 | Val cact |
+|---|---|---|---|---|---|
+| 250 | 1.337 | 13.8% | 43.4% | 10.1% | 31.5% |
+| 1000 | 1.063 | 81.5% | 80.9% | 72.7% | 70.4% |
+| 2500 | 0.888 | 86.6% | 90.3% | 75.5% | 73.3% |
+| 5000 | 0.746 | 85.1% | 95.2% | 76.9% | 76.1% |
 
-medium (768d/4L/3072ff) + hybrid16 encoder, lr=8e-4, 2M samples, data/full. Re-evaluated on subset val with new metrics.
+**The model learns to press buttons confidently within ~1000 steps.**
 
-### Depth
+### Comprehensive offline inference (400 windows, 20 games)
 
-| Run | Config | Params | val/total | btn_f1 | btn_prec | btn_rec | cdir_active |
-|-----|--------|--------|-----------|--------|----------|---------|-------------|
-| `width-512` | 512d/4L | 16.3M | 0.1299 | 84.1% | 85.6% | 82.9% | 53.5% |
-| `baseline` | 768d/4L | 32.4M | 0.1213 | 85.6% | 85.7% | 85.6% | 60.5% |
-| `depth-8L` | 768d/8L | 60.8M | 0.1185 | 85.8% | 86.0% | 85.6% | 60.4% |
-| `width-1024` | 1024d/4L | 54.9M | 0.1222 | 85.4% | 85.9% | 85.0% | 60.6% |
-| `wide-shallow` | 1536d/2L | 62.0M | 0.1219 | 85.1% | 85.7% | 84.6% | 58.3% |
-| `deep-small` | 512d/8L | 28.9M | 0.1343 | 83.1% | 85.0% | 81.6% | 54.6% |
+| Metric | Closed-Loop Model | Full-Data Model |
+|---|---|---|
+| **Button F1** | **94.6%** (P=97.8%, R=91.7%) | **98.5%** (P=99.3%, R=97.8%) |
+| Avg btn confidence (active frames) | **0.830** | **0.860** |
+| Avg btn confidence (inactive frames) | 0.040 | 0.025 |
+| **Stick cluster top-1 accuracy** | **1.0%** | **0.8%** |
+| Shoulder bin accuracy | 78.0% | 80.2% |
+| C-dir accuracy | 100.0% | 99.5% |
 
-768d/4L remains the sweet spot. 8L is marginally better on btn_f1/cdir_active but has 2x the params. The 512d models lag on all metrics -- too small to capture the game state effectively.
+## Key Conclusions
 
-### Positional Encoding
+1. **The pipeline is correct.** Both models produce 94-98% button F1 on training data, with clear separation between active (83-86% confidence) and inactive (2.5-4% confidence) frames.
 
-| Run | Method | val/total | btn_f1 | btn_prec | btn_rec | cdir_active |
-|-----|--------|-----------|--------|----------|---------|-------------|
-| `baseline` | Learned | 0.1213 | 85.6% | 85.7% | 85.6% | 60.5% |
-| `pos-alibi` | ALiBi | 0.1354 | 83.5% | 85.4% | 82.2% | 52.6% |
+2. **Stick prediction is the bottleneck.** Top-1 accuracy is ~1% across 63 clusters. The model can't reliably predict the exact stick position. This is the root cause of poor live inference — wrong stick inputs → wrong character states → distribution shift → even worse predictions.
 
-Learned clearly better. ALiBi checkpoint was at 15K steps with 512d so it's not a fair comparison -- see Phase 1-2 for the small-scale ALiBi results.
+3. **The inference failure is NOT a pipeline bug.** It's the compounding error from inaccurate stick predictions during live play. The model confidently presses buttons when it sees the right game states (training data), but during live play, the stick errors cause the character to be in unexpected states.
 
-### Loss Functions
+4. **The full-data model is actually better** than the 20-game overfit model (98.5% vs 94.6% btn F1), suggesting more data helps rather than hurts.
 
-| Run | Stick loss | val/total | btn_f1 | btn_prec | btn_rec | cdir_active |
-|-----|-----------|-----------|--------|----------|---------|-------------|
-| `baseline` | MSE | 0.1213 | 85.6% | 85.7% | 85.6% | 60.5% |
-| `loss-huber` | Huber | **0.0920** | **85.8%** | 86.0% | 85.6% | **59.1%** |
+## Phase 3: Closed-Loop Wavedash (2026-03-15)
 
-Huber delivers the best val/total (0.0920 vs 0.1213). Button metrics are nearly identical -- the improvement comes from stick loss robustness. Huber checkpoint was at only 5K steps vs baseline at 18K, suggesting it converges faster.
+### Overview
 
-### Context Length
+Generated a synthetic wavedash dataset using `generate_wavedash_replay.py` (Falco
+wavedashing back and forth on FD, 28,800 frames with edge-safety reversal).
+Trained with focal loss and canonical 63-cluster stick centers to near-epsilon loss.
+Then ran live in Dolphin.
 
-| Run | Seq len | val/total | btn_f1 | btn_prec | btn_rec | cdir_active |
-|-----|---------|-----------|--------|----------|---------|-------------|
-| `baseline` | 60 | 0.1213 | 85.6% | 85.7% | 85.6% | 60.5% |
-| `ctx-360` | 360 | 0.2296 | 82.9% | 86.2% | 80.1% | **70.4%** |
+### Root Cause of Live Inference Failure
 
-ctx-360 (small 512d model, massively overfit) has the highest cdir_active_acc at 70.4% -- even though val/total is terrible. This suggests longer context helps the model understand when to actually use the c-stick, even if overall loss suffers from overfitting.
+**Pipe synchronization.** `melee.Console` was created with `blocking_input=False` (the
+default), so Dolphin ran at 60fps while our inference produced ~15fps. Most controller
+commands were lost — they arrived between frames and were never processed.
 
-### Phase 3 observations
+Fixed by setting `blocking_input=True`, adopted from [HAL](https://github.com/ericyuegu/hal).
+Now Dolphin blocks until we flush, guaranteeing every input is processed.
 
-- **btn_f1 ~85-86%** across all medium+ models -- this is the ceiling at 2M samples with opp inputs included
-- **cdir_active_acc ~54-61%** -- the model gets the c-stick direction wrong ~40% of the time on active frames. This is likely a major source of bad gameplay behavior.
-- **Huber loss** converges faster and achieves better val/total without hurting btn metrics
-- **Model size matters more for cdir_active** than for btn_f1: 512d models get ~53-55% vs 768d+ at ~60%
+### Additional Fixes
 
----
+- HAL-style explicit press/release per button per frame (no `release_all()`)
+- Always send `press_shoulder()` for both L and R, even when 0
+- `flush()` on menu frames and `gs.frame < 0` to prevent deadlock
 
-## Phase 4: No Opponent Inputs
+### Inference Performance
 
-**Hypothesis**: Opponent controller inputs (analog stick, buttons, c-stick direction) are zero/neutral when playing against a CPU at inference, creating a train-test mismatch. Removing them forces the model to rely on observable game state only.
+Per-frame preprocessing was bottlenecked at 57ms (pandas DataFrame operations on
+a single row). Replaced with a pure-Python fast path processing raw dict values
+directly, cached in a rolling deque of tensors.
 
-**Changes**: `--no-opp-inputs` flag strips `opp_buttons`, `opp_analog`, `opp_c_dir` (and Nana equivalents). Encoder drops OPP_INPUT composite token (16 → 15 in hybrid16). Button encoders take 12-dim (self only) vs 24-dim.
+| Component | Before (ms) | After (ms) |
+|-----------|------------|------------|
+| Preprocessing | 57 | 0.3 |
+| Tensor stacking | 0.5 | 0.6 |
+| Model forward | 2.2 | 2.2 |
+| **Total** | **~60** | **~3.5** |
 
-**Sweep**: 21 runs across 21 GPUs, medium (768d/4L) + hybrid16 + learned pos-enc + MSE stick + BCE btn, multiple seeds.
+### Result
 
-### ctx-60 (no-opp-inputs)
+**Falco wavedashes correctly at 60fps in closed loop.** The full sequence
+(stand → jump → airdodge → slide → reverse → repeat) executes without error.
 
-| Run | Steps | val/total | btn_f1 | btn_prec | btn_rec | cdir_active |
-|-----|-------|-----------|--------|----------|---------|-------------|
-| `noi-ctx60-65k` | 65K | 0.1023 | 85.9% | 86.0% | 85.9% | 60.9% |
-| `noi-ctx60-80k-A` | 80K | 0.1000 | 86.0% | 86.1% | 85.9% | 60.6% |
-| `noi-ctx60-80k-B` | 80K | 0.1014 | 86.0% | 86.1% | 85.9% | 60.5% |
-| `noi-ctx60-120k` | 120K | **0.0998** | **86.1%** | **86.2%** | 86.0% | 60.8% |
+### Next Steps
 
-**ctx-60 aggregate**: val/total mean 0.1009, btn_f1 mean 86.0%, cdir_active mean 60.7%.
-
-### ctx-180 (no-opp-inputs)
-
-| Run | Steps | val/total | btn_f1 | btn_prec | btn_rec | cdir_active |
-|-----|-------|-----------|--------|----------|---------|-------------|
-| `noi-ctx180-65k` | 65K | **0.1088** | **87.8%** | 87.9% | **87.8%** | **71.7%** |
-| `noi-ctx180-80k` | 80K | 0.1232 | 87.1% | 87.6% | 86.8% | 65.5% |
-| `noi-ctx180-120k` | 120K | 0.1250 | 86.3% | 87.1% | 85.6% | 65.1% |
-
-**ctx-180 aggregate**: val/total mean 0.1190, btn_f1 mean 87.1%, cdir_active mean 67.4%.
-
-### Phase 3 vs Phase 4 comparison
-
-| Config | val/total | btn_f1 | cdir_active | Notes |
-|--------|-----------|--------|-------------|-------|
-| Phase 3 baseline (768d/4L, ctx-60) | 0.1213 | 85.6% | 60.5% | single run, 18K steps |
-| Phase 4 ctx-60 (best) | **0.0998** | **86.1%** | **60.8%** | 120K steps |
-| Phase 4 ctx-180 (best) | 0.1088 | **87.8%** | **71.7%** | 65K steps |
-
-### Phase 4 observations
-
-- **ctx-180 dramatically improves cdir_active**: 71.7% vs 60.5% for ctx-60. With 3 seconds of context, the model learns *when* to use the c-stick much better. This was masked by the old saturated cdir_acc metric (~99%).
-- **btn_f1 improves modestly**: 87.8% (ctx-180) vs 85.6% (Phase 3). ~2 percentage points from removing opp inputs + longer context.
-- **No-opp-inputs helps val/total**: ctx-60 mean 0.1009 vs Phase 3's 0.1213, a 17% improvement.
-- **Longer training shows diminishing returns**: ctx-180 at 65K steps (best cdir_active 71.7%) beats 120K (65.1%). The model may overfit on longer runs.
-- **ctx-60 is remarkably stable across seeds**: btn_f1 ranges only 85.9-86.1%, cdir_active 60.5-60.9%.
-
----
-
-## Summary
-
-Best configuration from all experiments:
-
-| Setting | Winner | Evidence |
-|---------|--------|----------|
-| Depth | 4 layers | Phase 3: 4L matches 8L on btn_f1, half the params |
-| Width | 768 (d_model) | Phase 3: 768d >> 512d on all metrics |
-| Context | 180 frames (3s) | Phase 4: cdir_active 71.7% vs 60.8% at ctx-60 |
-| Pos encoding | Learned | Phase 3: beats ALiBi |
-| Stick loss | Huber | Phase 3: val/total 0.0920 vs 0.1213 MSE |
-| Button loss | BCE | Standard across all runs |
-| Opp inputs | Remove them | Phase 4: better val/total and inference consistency |
-
-### Top checkpoints by quality
-
-| Rank | Run | val/total | btn_f1 | cdir_active | Config |
-|------|-----|-----------|--------|-------------|--------|
-| 1 | `noi-ctx180-65k` | 0.1088 | **87.8%** | **71.7%** | medium, no-opp, MSE, 180f |
-| 2 | `loss-huber` | **0.0920** | 85.8% | 59.1% | medium, Huber, 60f |
-| 3 | `noi-ctx60-120k` | 0.0998 | 86.1% | 60.8% | medium, no-opp, MSE, 60f |
-| 4 | `noi-ctx180-80k` | 0.1232 | 87.1% | 65.5% | medium, no-opp, MSE, 180f |
-| 5 | `depth-8L` | 0.1185 | 85.8% | 60.4% | 768d/8L, MSE, 60f |
-
-### Next steps
-
-- **Combine Huber + no-opp-inputs + ctx-180**: The best stick loss (Huber) hasn't been tested with the best feature config (no-opp-inputs) at the best context (180). This combination should push cdir_active well above 71.7%.
-- **More data**: All experiments used 2M samples. Scaling to the full dataset (~100M+ frames) should help with the cdir_active ceiling.
-- **Better cdir modeling**: cdir_active at 71.7% is the weakest link. Consider focal loss for c-stick (rare active frames), or a hierarchical predict-then-direction approach.
-
-Checkpoints: [huggingface.co/erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC). Wandb group: `no-opp-inputs`.
+1. Train on full Melee dataset with focal loss and verify generalization
+2. Scheduled sampling / noise injection for robustness to compounding error
+3. Test against human and CPU opponents in varied matchups

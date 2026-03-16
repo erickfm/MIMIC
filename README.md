@@ -217,11 +217,15 @@ Pass `--model <preset>` to `train.py` for scaling experiments:
 ├── features.py         # Shared feature engineering (columns, preprocessing, tensors)
 ├── dataset.py          # Dataset classes (raw parquet debug + streaming)
 ├── cat_maps.py         # Melee enum → dense index maps
-├── setup.sh            # One-command setup for fresh machines
-├── upload_dataset.py   # Package parquets into tar shards and upload to HuggingFace
-├── checkpoints/        # Saved *.pt files
-└── data/               # Slippi parquet files + source replays
-    └── source_replays/ # Original .slp files for reproduction
+├── setup.sh                     # One-command setup for fresh machines
+├── upload_dataset.py            # Package parquets into tar shards and upload to HF
+├── generate_wavedash_replay.py  # Synthetic wavedash data generator (libmelee)
+├── closedloop_debug.py          # Frame-by-frame tensor comparison (train vs inference)
+├── diagnose.py                  # Offline inference diagnostic tool
+├── checkpoints/                 # Saved *.pt files
+├── docs/                        # Research notes and session logs
+└── data/                        # Slippi parquet files + source replays
+    └── source_replays/          # Original .slp files for reproduction
 ```
 
 ## Quick Start (New Machine)
@@ -384,5 +388,31 @@ Options:
 | `--checkpoint` | Path to a `.pt` checkpoint (auto-discovers latest if omitted) |
 | `--dolphin-path` | Path to Slippi Dolphin AppImage (or set `DOLPHIN_PATH`) |
 | `--iso-path` | Path to Melee ISO (or set `ISO_PATH`) |
-| `--cpu-level` | CPU opponent level, 1-9 (default: 7) |
+| `--data-dir` | Directory containing `cat_maps.json`, `norm_stats.json`, `stick_clusters.json` |
+| `--cpu-level` | CPU opponent level, 1-9 (default: 7). Use 0 for human/no opponent |
+| `--character` | Bot character (default: FALCO) |
+| `--cpu-character` | Opponent character (default: FALCO) |
+| `--stage` | Stage (default: FINAL_DESTINATION) |
+| `--deterministic` | Use threshold-based button decisions instead of stochastic sampling |
+| `--btn-threshold` | Sigmoid threshold for button presses (default: 0.2) |
+| `--temperature` | Temperature for stick/shoulder cluster sampling (default: 1.0 = argmax) |
+| `--no-pred-feedback` | Use game controller readback instead of model predictions for self-inputs |
+| `--diag-log-all` | Save every raw row dict to pickle for offline debugging |
 | `--debug` | Verbose frame-by-frame logging |
+
+### Architecture Notes
+
+**Pipe synchronization**: The console is created with `blocking_input=True`, which
+makes Dolphin wait for a pipe FLUSH before advancing each frame. This ensures
+every controller input is processed, at the cost of capping the game's framerate
+to our inference speed. Without this, Dolphin runs at 60fps and most inputs are
+missed because inference takes longer than one frame period.
+
+**Controller protocol**: Following [HAL's pattern](https://github.com/ericyuegu/hal),
+every button is explicitly pressed or released on every frame (no `release_all()`),
+shoulder analogs are always sent, and `flush()` is called exactly once per frame.
+
+**Performance**: Per-frame preprocessing uses a pure-Python fast path (~0.3ms)
+instead of pandas (~57ms). Combined with `torch.compile` and a rolling tensor
+cache, total per-frame inference is ~3.5ms (model: 2.2ms, preprocessing: 0.3ms,
+tensor stacking: 0.6ms), well under the 16.7ms budget for 60fps.

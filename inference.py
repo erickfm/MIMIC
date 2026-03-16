@@ -47,6 +47,18 @@ parser.add_argument("--checkpoint", type=str, default=None,
                     help="Path to a specific checkpoint file (overrides auto-discovery)")
 parser.add_argument("--log-dir", type=str, default=None,
                     help="Directory for inference CSV logs (default: logs/)")
+parser.add_argument("--no-pred-feedback", action="store_true",
+                    help="Use game controller readback instead of model predictions for feedback")
+parser.add_argument("--temperature", type=float, default=1.0,
+                    help="Temperature for stick/shoulder cluster sampling (1.0=argmax, <1=sharper, >1=softer)")
+parser.add_argument("--btn-threshold", type=float, default=0.2,
+                    help="Sigmoid threshold for button presses (default: 0.2)")
+parser.add_argument("--deterministic", action="store_true",
+                    help="Use threshold-based button firing instead of stochastic sampling")
+parser.add_argument("--data-dir", type=str, default=None,
+                    help="Directory for cat_maps.json / norm_stats.json / stick_clusters.json")
+parser.add_argument("--diag-log-all", action="store_true",
+                    help="Save every raw row dict to a pickle for closedloop_debug Phase 2")
 args = parser.parse_args()
 
 BOT_CHARACTER = melee.Character[args.character.upper()]
@@ -85,6 +97,11 @@ model.load_state_dict(state_dict)
 model.eval()
 log.info("Loaded checkpoint %s", ckpt_path)
 
+torch.set_float32_matmul_precision("high")
+log.info("Compiling model with torch.compile ...")
+model = torch.compile(model)
+log.info("Model compiled (first call will trigger actual compilation).")
+
 # ── Cluster centers (for discrete stick_loss="clusters" mode) ────────────
 _stick_centers: np.ndarray | None = None
 _shoulder_centers: np.ndarray | None = None
@@ -97,7 +114,9 @@ if cfg.stick_loss == "clusters":
                  len(_stick_centers), len(_shoulder_centers))
     else:
         import json as _json
-        for _sd in [Path("./data/full"), Path("./data"), Path("./data/subset")]:
+        _cluster_dirs = [Path(args.data_dir)] if args.data_dir else []
+        _cluster_dirs += [Path("./data/full"), Path("./data"), Path("./data/subset")]
+        for _sd in _cluster_dirs:
             _sc_path = _sd / "stick_clusters.json"
             if _sc_path.exists():
                 with open(_sc_path) as _fh:
@@ -114,9 +133,8 @@ if cfg.stick_loss == "clusters":
 # ── Normalization stats + categorical maps ───────────────────────────────
 import json
 
-_SEARCH_DIRS = [
-    Path("./data"), Path("./data/subset"), Path("./data/full"),
-]
+_SEARCH_DIRS = [Path(args.data_dir)] if args.data_dir else []
+_SEARCH_DIRS += [Path("./data"), Path("./data/subset"), Path("./data/full")]
 
 norm_stats: Dict[str, tuple] = ckpt.get("norm_stats", {})
 if not norm_stats:
@@ -270,65 +288,148 @@ def check_tensor_dict(tdict: Dict[str, torch.Tensor], where: str) -> None:
 
 # ── DataFrame conversion ────────────────────────────────────────────────
 def rows_to_state_seq(rows: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
-    """Convert rolling list of row dicts -> tensor batch (B=1)."""
+    """Convert rolling list of row dicts -> tensor batch (B=1). Slow path (full rebuild)."""
     df = pd.DataFrame(rows)
-
     df = F.preprocess_df(df, _categorical_cols, cat_maps)
-
     F.apply_normalization(df, norm_stats)
-
-    missing_cats = [c for c in _categorical_cols if c not in df.columns]
-    if missing_cats:
-        df = pd.concat([df, pd.DataFrame({c: 0 for c in missing_cats},
-                                         index=df.index)], axis=1)
-
-    numeric_missing = {}
+    for c in _categorical_cols:
+        if c not in df.columns:
+            df[c] = 0
     for _, meta in F.walk_groups(_fg, return_meta=True):
         if meta["ftype"] != "categorical":
             for col in meta["cols"]:
                 if col not in df.columns:
-                    numeric_missing[col] = 0.0
-    if numeric_missing:
-        df = pd.concat([df, pd.DataFrame(numeric_missing, index=df.index)], axis=1)
-
-    if DEBUG and df.isna().any().any():
-        bad = df.columns[df.isna().any()].tolist()
-        log.warning("DataFrame still has NaNs in cols: %s", bad)
-
+                    df[col] = 0.0
     state_seq = F.df_to_state_tensors(df, _fg)
     state_seq = {k: v.unsqueeze(0) for k, v in state_seq.items()}
-
-    if DEBUG:
-        check_tensor_dict(state_seq, "state_seq")
     return state_seq
+
+
+# ── Fast single-row preprocessing + tensor cache ─────────────────────────
+_frame_cache: deque[Dict[str, torch.Tensor]] = deque(maxlen=ROLL_WIN)
+_cache_keys: List[str] | None = None
+
+# ── Pre-compute the tensor layout from the feature spec (once at startup) ──
+_tensor_layout: List[tuple] = []  # [(key, ftype, cols), ...]
+for _, _meta in F.walk_groups(_fg, return_meta=True):
+    _key = f"{_meta['entity']}_{_meta['ftype']}" if _meta['entity'] != "global" else _meta['ftype']
+    _tensor_layout.append((_key, _meta["ftype"], _meta["cols"]))
+
+_enum_maps: Dict[str, Dict] = {}
+for _col in _categorical_cols:
+    _enum_maps[_col] = F.get_enum_map(_col, cat_maps)
+
+
+def _encode_cdir_scalar(cx: float, cy: float, dead_zone: float = 0.15) -> int:
+    dx = cx - 0.5
+    dy = cy - 0.5
+    mag = math.hypot(dx, dy)
+    if mag <= dead_zone:
+        return 0
+    if abs(dx) >= abs(dy):
+        return 4 if dx > 0 else 3
+    return 1 if dy > 0 else 2
+
+
+def _process_one_row(row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    """Preprocess a single row into tensors — pure Python, no pandas."""
+    r = dict(row)
+
+    for p in ("self", "opp", "self_nana", "opp_nana"):
+        cx = float(r.get(f"{p}_c_x", 0.5) or 0.5)
+        cy = float(r.get(f"{p}_c_y", 0.5) or 0.5)
+        r[f"{p}_c_dir"] = _encode_cdir_scalar(cx, cy)
+
+    r.pop("startAt", None)
+
+    sx, sy = float(r.get("self_pos_x", 0)), float(r.get("self_pos_y", 0))
+    ox, oy = float(r.get("opp_pos_x", 0)), float(r.get("opp_pos_y", 0))
+    r["distance"] = math.hypot(sx - ox, sy - oy)
+
+    r["self_nana_present"] = 1.0 if r.get("self_nana_character", 0) and r["self_nana_character"] > 0 else 0.0
+    r["opp_nana_present"] = 1.0 if r.get("opp_nana_character", 0) and r["opp_nana_character"] > 0 else 0.0
+
+    for col, m in _enum_maps.items():
+        raw = r.get(col, 0)
+        if raw is None or (isinstance(raw, float) and not math.isfinite(raw)):
+            raw = 0
+        r[col] = m.get(raw, m.get(int(raw), 0))
+
+    for col, (mean, std) in norm_stats.items():
+        if col in r:
+            v = r[col]
+            if v is None or (isinstance(v, float) and not math.isfinite(v)):
+                v = 0.0
+            r[col] = (float(v) - mean) / std
+
+    state: Dict[str, torch.Tensor] = {}
+    for key, ftype, cols in _tensor_layout:
+        if ftype == "categorical":
+            for col in cols:
+                v = r.get(col, 0)
+                if v is None or (isinstance(v, float) and not math.isfinite(v)):
+                    v = 0
+                state[col] = torch.tensor([int(v)], dtype=torch.long)
+        else:
+            vals = []
+            for col in cols:
+                v = r.get(col, 0.0)
+                if v is None or (isinstance(v, float) and not math.isfinite(v)):
+                    v = 0.0
+                vals.append(float(v))
+            if len(vals) == 1:
+                state[key] = torch.tensor(vals, dtype=torch.float32)
+            else:
+                state[key] = torch.tensor([vals], dtype=torch.float32)
+    return state
+
+
+def _cached_state_seq() -> Dict[str, torch.Tensor]:
+    """Stack cached single-frame tensors into a (1, T, ...) batch."""
+    global _cache_keys
+    if _cache_keys is None:
+        _cache_keys = list(_frame_cache[0].keys())
+    return {k: torch.cat([c[k] for c in _frame_cache], dim=0).unsqueeze(0)
+            for k in _cache_keys}
 
 # ── Inference wrapper ────────────────────────────────────────────────────
 _inf_call_count = 0
 
 @torch.no_grad()
-def run_inference(win_rows: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
+def run_inference(new_row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     global _inf_call_count
     _inf_call_count += 1
 
-    batch = rows_to_state_seq(win_rows)
+    t0 = time.perf_counter()
+    _frame_cache.append(_process_one_row(new_row))
+    t0b = time.perf_counter()
+    batch = _cached_state_seq()
+    t1 = time.perf_counter()
 
     if _inf_call_count <= 3 or _inf_call_count in (300, 600, 1200):
+        _diag_dir = Path(args.log_dir or "logs") / "diag"
+        _diag_dir.mkdir(parents=True, exist_ok=True)
         torch.save({k: v.cpu() for k, v in batch.items()},
-                   f"/tmp/frame_inf_batch_{_inf_call_count}.pt")
-        import pickle
-        with open(f"/tmp/frame_inf_rows_{_inf_call_count}.pkl", "wb") as fh:
-            pickle.dump(win_rows, fh)
-        log.info("Saved inference batch %d to /tmp/", _inf_call_count)
+                   _diag_dir / f"inf_batch_{_inf_call_count}.pt")
+        log.info("Saved inference batch %d to %s", _inf_call_count, _diag_dir)
 
     for k, v in batch.items():
         batch[k] = v.to(DEVICE, non_blocking=True)
+    t2 = time.perf_counter()
 
-    check_tensor_dict(batch, "batch_before_model")
     preds = model(batch)
-    preds = {k: v[:, -1] for k, v in preds.items()}
-    check_tensor_dict(preds, "model_output")
+    torch.cuda.synchronize()
+    t3 = time.perf_counter()
 
-    return {k: v.cpu().squeeze(0) for k, v in preds.items()}
+    preds = {k: v[:, -1] for k, v in preds.items()}
+    result = {k: v.cpu().squeeze(0) for k, v in preds.items()}
+    t4 = time.perf_counter()
+
+    if _inf_call_count % 60 == 0:
+        log.info("TIMING: row=%.1fms  stack=%.1fms  xfer=%.1fms  model=%.1fms  post=%.1fms  total=%.1fms",
+                 (t0b-t0)*1000, (t1-t0b)*1000, (t2-t1)*1000, (t3-t2)*1000, (t4-t3)*1000, (t4-t0)*1000)
+
+    return result
 
 # ── Controller output ────────────────────────────────────────────────────
 C_DIR_TO_FLOAT = {
@@ -354,12 +455,21 @@ def _safe(val: float, default: float = 0.5) -> float:
     return min(max(val, 0.0), 1.0)
 
 
-def _decode_clusters(pred: Dict[str, torch.Tensor]):
-    """For clusters mode: argmax logits -> continuous (mx, my, l, r) via cluster lookup."""
-    main_idx = int(torch.argmax(pred["main_xy"]))
+def _decode_clusters(pred: Dict[str, torch.Tensor], temperature: float = 1.0):
+    """For clusters mode: logits -> continuous (mx, my, l, r) via cluster lookup.
+    temperature=1.0 uses argmax; temperature>1 samples from softened distribution."""
+    if temperature <= 0 or temperature == 1.0:
+        main_idx = int(torch.argmax(pred["main_xy"]))
+        l_idx = int(torch.argmax(pred["L_val"]))
+        r_idx = int(torch.argmax(pred["R_val"]))
+    else:
+        main_probs = torch.softmax(pred["main_xy"] / temperature, dim=-1)
+        main_idx = int(torch.multinomial(main_probs, 1))
+        l_probs = torch.softmax(pred["L_val"] / temperature, dim=-1)
+        l_idx = int(torch.multinomial(l_probs, 1))
+        r_probs = torch.softmax(pred["R_val"] / temperature, dim=-1)
+        r_idx = int(torch.multinomial(r_probs, 1))
     mx, my = float(_stick_centers[main_idx][0]), float(_stick_centers[main_idx][1])
-    l_idx = int(torch.argmax(pred["L_val"]))
-    r_idx = int(torch.argmax(pred["R_val"]))
     l_val = float(_shoulder_centers[l_idx])
     r_val = float(_shoulder_centers[r_idx])
     return mx, my, l_val, r_val
@@ -368,12 +478,12 @@ def _decode_clusters(pred: Dict[str, torch.Tensor]):
 def press_output(ctrl: melee.Controller,
                  pred: Dict[str, torch.Tensor],
                  sample: bool = True) -> tuple[List[bool], tuple[float, float], int, float, float]:
-    """Send model predictions to the controller.
+    """Send model predictions to the controller (HAL-style explicit press/release).
     Returns (fired_buttons, (mx,my), c_dir_idx, l_val, r_val)."""
     import random
 
     if cfg.stick_loss == "clusters":
-        mx, my, l_val, r_val = _decode_clusters(pred)
+        mx, my, l_val, r_val = _decode_clusters(pred, temperature=args.temperature)
     else:
         clamped_main = torch.clamp(pred["main_xy"], 0.0, 1.0)
         mx, my = map(float, clamped_main.tolist())
@@ -385,21 +495,24 @@ def press_output(ctrl: melee.Controller,
 
     ctrl.tilt_analog(melee.enums.Button.BUTTON_MAIN, mx, my)
     ctrl.tilt_analog(melee.enums.Button.BUTTON_C,    cx, cy)
-    ctrl.press_shoulder(melee.enums.Button.BUTTON_L, l_val)
-    ctrl.press_shoulder(melee.enums.Button.BUTTON_R, r_val)
 
     btn_probs = torch.sigmoid(pred["btn_logits"])
     pressed = []
     fired: List[bool] = []
-    for prob, btn in zip(btn_probs, IDX_TO_BUTTON):
+    for i, (prob, btn) in enumerate(zip(btn_probs, IDX_TO_BUTTON)):
         p = prob.item()
-        fire = (random.random() < p) if sample else (p > 0.5)
+        fire = (random.random() < p) if sample else (p > args.btn_threshold)
         fired.append(fire)
         if fire:
             ctrl.press_button(btn)
             pressed.append(btn.name)
         else:
             ctrl.release_button(btn)
+
+    ctrl.press_shoulder(melee.enums.Button.BUTTON_L, l_val)
+    ctrl.press_shoulder(melee.enums.Button.BUTTON_R, r_val)
+
+    ctrl.flush()
 
     top3 = btn_probs.topk(3)
     top3_str = " ".join(f"{IDX_TO_BUTTON[i].name}={v:.3f}"
@@ -426,7 +539,12 @@ if __name__ == "__main__":
         log.error("Must provide --dolphin-path and --iso-path (or set DOLPHIN_PATH / ISO_PATH env vars)")
         sys.exit(1)
 
-    console = melee.Console(path=DOLPHIN_APP, slippi_address="127.0.0.1", fullscreen=False)
+    console = melee.Console(
+        path=DOLPHIN_APP,
+        slippi_address="127.0.0.1",
+        fullscreen=False,
+        blocking_input=True,
+    )
     ports = [1, 4]
     controllers = {p: melee.Controller(console, p) for p in ports}
 
@@ -444,6 +562,14 @@ if __name__ == "__main__":
     menu_helper_cpu = melee.MenuHelper()
 
     inf_logger = InferenceLogger(args.log_dir)
+
+    _diag_all_rows: List[Dict[str, Any]] = []
+    _diag_path: Path | None = None
+    if args.diag_log_all:
+        _diag_dir = Path(args.log_dir or "logs") / "diag"
+        _diag_dir.mkdir(parents=True, exist_ok=True)
+        _diag_path = _diag_dir / f"all_rows_{time.strftime('%Y%m%d_%H%M%S')}.pkl"
+        log.info("Diagnostic row logging enabled → %s", _diag_path)
 
     rows: deque[Dict[str, Any]] = deque(maxlen=ROLL_WIN)
     _step_ct = 0
@@ -472,6 +598,8 @@ if __name__ == "__main__":
                 gs, c1, CPU_CHARACTER, STAGE,
                 cpu_level=args.cpu_level, autostart=True,
             )
+            for c in controllers.values():
+                c.flush()
             continue
 
         _was_in_game = True
@@ -480,7 +608,7 @@ if __name__ == "__main__":
         row: Dict[str, Any] = {}
         row["stage"]    = gs.stage.value if gs.stage else -1
         row["frame"]    = gs.frame
-        row["distance"] = 0.0
+        row["distance"] = gs.distance
         row["startAt"]  = gs.startAt
 
         # Stage geometry (critical — model trained with these)
@@ -523,7 +651,7 @@ if __name__ == "__main__":
             row[f"{pref}action_frame"]  = ps.action_frame
             row[f"{pref}costume"]       = ps.costume
 
-            if pref == "self_" and _prev_pred is not None:
+            if pref == "self_" and _prev_pred is not None and not args.no_pred_feedback:
                 if cfg.stick_loss == "clusters":
                     _fb_mx, _fb_my, _fb_l, _fb_r = _decode_clusters(_prev_pred)
                     row[f"{pref}main_x"] = _fb_mx
@@ -544,7 +672,7 @@ if __name__ == "__main__":
                 else:
                     _fb_btn_probs = torch.sigmoid(_prev_pred["btn_logits"])
                     for _bp, _btn in zip(_fb_btn_probs, IDX_TO_BUTTON):
-                        row[f"{pref}btn_{_btn.name}"] = int(_bp.item() > 0.5)
+                        row[f"{pref}btn_{_btn.name}"] = int(_bp.item() > args.btn_threshold)
             else:
                 for btn, st in ps.controller_state.button.items():
                     row[f"{pref}btn_{btn.name}"] = int(st)
@@ -564,18 +692,23 @@ if __name__ == "__main__":
             row[f"{pref}moonwalkwarning"]      = ps.moonwalkwarning
             row[f"{pref}shield_strength"]      = float(ps.shield_strength)
             row[f"{pref}jumps_left"]           = ps.jumps_left
-            row[f"{pref}hitlag_left"]          = 0
+            row[f"{pref}hitlag_left"]          = ps.hitlag_left
             row[f"{pref}hitstun_left"]         = ps.hitstun_frames_left
-            row[f"{pref}invuln_left"]          = 0
-            row[f"{pref}speed_air_x_self"]     = 0.0
-            row[f"{pref}speed_ground_x_self"]  = 0.0
-            row[f"{pref}speed_x_attack"]       = 0.0
-            row[f"{pref}speed_y_attack"]       = 0.0
-            row[f"{pref}speed_y_self"]         = 0.0
+            row[f"{pref}invuln_left"]          = ps.invulnerability_left
+            row[f"{pref}speed_air_x_self"]     = float(ps.speed_air_x_self)
+            row[f"{pref}speed_ground_x_self"]  = float(ps.speed_ground_x_self)
+            row[f"{pref}speed_x_attack"]       = float(ps.speed_x_attack)
+            row[f"{pref}speed_y_attack"]       = float(ps.speed_y_attack)
+            row[f"{pref}speed_y_self"]         = float(ps.speed_y_self)
 
-            for ecb_axis in ("ecb_bottom_x", "ecb_bottom_y", "ecb_left_x", "ecb_left_y",
-                             "ecb_right_x", "ecb_right_y", "ecb_top_x", "ecb_top_y"):
-                row[f"{pref}{ecb_axis}"] = 0.0
+            row[f"{pref}ecb_bottom_x"] = float(ps.ecb_bottom[0])
+            row[f"{pref}ecb_bottom_y"] = float(ps.ecb_bottom[1])
+            row[f"{pref}ecb_left_x"]   = float(ps.ecb_left[0])
+            row[f"{pref}ecb_left_y"]   = float(ps.ecb_left[1])
+            row[f"{pref}ecb_right_x"]  = float(ps.ecb_right[0])
+            row[f"{pref}ecb_right_y"]  = float(ps.ecb_right[1])
+            row[f"{pref}ecb_top_x"]    = float(ps.ecb_top[0])
+            row[f"{pref}ecb_top_y"]    = float(ps.ecb_top[1])
 
             nana = ps.nana
             npref = f"{pref}nana_"
@@ -600,17 +733,22 @@ if __name__ == "__main__":
                 row[f"{npref}moonwalkwarning"]     = nana.moonwalkwarning
                 row[f"{npref}shield_strength"]     = float(nana.shield_strength)
                 row[f"{npref}jumps_left"]          = nana.jumps_left
-                row[f"{npref}hitlag_left"]         = 0
+                row[f"{npref}hitlag_left"]         = nana.hitlag_left
                 row[f"{npref}hitstun_left"]        = nana.hitstun_frames_left
-                row[f"{npref}invuln_left"]         = 0
-                row[f"{npref}speed_air_x_self"]    = 0.0
-                row[f"{npref}speed_ground_x_self"] = 0.0
-                row[f"{npref}speed_x_attack"]      = 0.0
-                row[f"{npref}speed_y_attack"]      = 0.0
-                row[f"{npref}speed_y_self"]        = 0.0
-                for ecb_axis in ("ecb_bottom_x", "ecb_bottom_y", "ecb_left_x", "ecb_left_y",
-                                 "ecb_right_x", "ecb_right_y", "ecb_top_x", "ecb_top_y"):
-                    row[f"{npref}{ecb_axis}"] = 0.0
+                row[f"{npref}invuln_left"]         = nana.invulnerability_left
+                row[f"{npref}speed_air_x_self"]    = float(nana.speed_air_x_self)
+                row[f"{npref}speed_ground_x_self"] = float(nana.speed_ground_x_self)
+                row[f"{npref}speed_x_attack"]      = float(nana.speed_x_attack)
+                row[f"{npref}speed_y_attack"]      = float(nana.speed_y_attack)
+                row[f"{npref}speed_y_self"]        = float(nana.speed_y_self)
+                row[f"{npref}ecb_bottom_x"] = float(nana.ecb_bottom[0])
+                row[f"{npref}ecb_bottom_y"] = float(nana.ecb_bottom[1])
+                row[f"{npref}ecb_left_x"]   = float(nana.ecb_left[0])
+                row[f"{npref}ecb_left_y"]   = float(nana.ecb_left[1])
+                row[f"{npref}ecb_right_x"]  = float(nana.ecb_right[0])
+                row[f"{npref}ecb_right_y"]  = float(nana.ecb_right[1])
+                row[f"{npref}ecb_top_x"]    = float(nana.ecb_top[0])
+                row[f"{npref}ecb_top_y"]    = float(nana.ecb_top[1])
             else:
                 row[f"{npref}character"]    = -1
                 row[f"{npref}action"]       = -1
@@ -639,22 +777,36 @@ if __name__ == "__main__":
                     for axis in ("x", "y"):
                         row[f"{npref}ecb_{part}_{axis}"] = np.nan
 
+        projectiles = gs.projectiles if gs.projectiles else []
         for j in range(F.PROJ_SLOTS):
             pp = f"proj{j}_"
             row[f"{pp}owner"]   = -1
             row[f"{pp}type"]    = -1
             row[f"{pp}subtype"] = -1
-            row[f"{pp}pos_x"]   = 0.0
-            row[f"{pp}pos_y"]   = 0.0
-            row[f"{pp}speed_x"] = 0.0
-            row[f"{pp}speed_y"] = 0.0
+            row[f"{pp}pos_x"]   = float("nan")
+            row[f"{pp}pos_y"]   = float("nan")
+            row[f"{pp}speed_x"] = float("nan")
+            row[f"{pp}speed_y"] = float("nan")
             row[f"{pp}frame"]   = -1
+            if j < len(projectiles):
+                proj = projectiles[j]
+                row[f"{pp}owner"]   = proj.owner
+                row[f"{pp}type"]    = proj.type.value
+                row[f"{pp}subtype"] = proj.subtype
+                row[f"{pp}pos_x"]   = float(proj.position.x)
+                row[f"{pp}pos_y"]   = float(proj.position.y)
+                row[f"{pp}speed_x"] = float(proj.speed.x)
+                row[f"{pp}speed_y"] = float(proj.speed.y)
+                row[f"{pp}frame"]   = getattr(proj, 'frame', getattr(proj, 'expiration_frames', -1))
 
         if gs.frame < 0:
+            controllers[ports[0]].flush()
             continue
         rows.append(row)
-        if len(rows) == ROLL_WIN:
-            pred = run_inference(list(rows))
+        if args.diag_log_all:
+            _diag_all_rows.append(dict(row))
+        if len(rows) >= 1:
+            pred = run_inference(row)
             _prev_pred = pred
 
             bot_ps = gs.players.get(ports[0])
@@ -677,9 +829,8 @@ if __name__ == "__main__":
                 )
 
             ctrl = controllers[ports[0]]
-            ctrl.release_all()
-            _prev_btns_fired, sent_main, sent_cdir, sent_L, sent_R = press_output(ctrl, pred)
-            ctrl.flush()
+            _prev_btns_fired, sent_main, sent_cdir, sent_L, sent_R = press_output(
+                ctrl, pred, sample=not args.deterministic)
 
             inf_logger.log_frame(
                 row, pred,
@@ -695,6 +846,11 @@ if __name__ == "__main__":
             )
 
     log.info("Cleaning up...")
+    if args.diag_log_all and _diag_all_rows:
+        import pickle as _pkl
+        with open(_diag_path, "wb") as _fh:
+            _pkl.dump(_diag_all_rows, _fh)
+        log.info("Saved %d diagnostic rows → %s", len(_diag_all_rows), _diag_path)
     inf_logger.close()
     for c in controllers.values():
         c.disconnect()

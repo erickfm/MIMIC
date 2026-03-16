@@ -56,7 +56,7 @@ class ModelConfig:
 
     # loss / output configuration
     stick_loss: str      = "mse"      # mse | huber | clusters
-    btn_loss: str        = "bce"      # bce | focal
+    btn_loss: str        = "focal"    # bce | focal
     no_opp_inputs: bool  = True
 
     # cluster output configuration
@@ -254,7 +254,7 @@ class PredictionHeads(nn.Module):
     with .detach() on conditioning to prevent gradient cascade.
     """
 
-    def __init__(self, d_model: int, hidden: int = 256, btn_threshold: float = 0.5,
+    def __init__(self, d_model: int, hidden: int = 256, btn_threshold: float = 0.2,
                  stick_loss: str = "mse",
                  n_stick_clusters: int = 63, n_shoulder_bins: int = 4,
                  autoregressive: bool = False):

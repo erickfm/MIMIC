@@ -45,6 +45,10 @@ TASK_NAMES          = ["main", "l", "r", "cdir", "btn"]
 FOCAL_GAMMA         = 2.0
 LABEL_SMOOTHING     = 0.1
 
+_focal_gamma = FOCAL_GAMMA
+_label_smoothing = LABEL_SMOOTHING
+_btn_focal_gamma = FOCAL_GAMMA
+
 AMP_DTYPE = torch.bfloat16
 
 MAX_VAL_BATCHES    = 100
@@ -79,7 +83,9 @@ _mse = nn.MSELoss()
 _huber = nn.HuberLoss()
 _bce = nn.BCEWithLogitsLoss()
 
-def focal_loss(logits, targets, gamma=FOCAL_GAMMA, label_smoothing=LABEL_SMOOTHING):
+def focal_loss(logits, targets, gamma=None, label_smoothing=None):
+    if gamma is None: gamma = _focal_gamma
+    if label_smoothing is None: label_smoothing = _label_smoothing
     n_classes = logits.shape[-1]
     with torch.no_grad():
         smooth = label_smoothing / n_classes
@@ -104,7 +110,8 @@ def _stick_regression_loss(pred, target, stick_loss_type):
     return _mse(pred, target)
 
 
-def focal_bce(pred, target, gamma=FOCAL_GAMMA):
+def focal_bce(pred, target, gamma=None):
+    if gamma is None: gamma = _btn_focal_gamma
     """Focal binary cross-entropy for multi-label classification.
 
     Downweights easy-to-classify examples (the vast majority of unpressed
@@ -135,12 +142,12 @@ def compute_loss(preds, targets, stick_loss_type="mse",
         l_bin_tgt = targets["l_bin"].long()
         r_bin_tgt = targets["r_bin"].long()
 
-        loss_main = F.cross_entropy(main_pred.reshape(-1, n_main),
-                                    main_cluster_tgt.reshape(-1))
-        loss_l = F.cross_entropy(l_pred.reshape(-1, n_shldr),
-                                 l_bin_tgt.reshape(-1))
-        loss_r = F.cross_entropy(r_pred.reshape(-1, n_shldr),
-                                 r_bin_tgt.reshape(-1))
+        loss_main = focal_loss(main_pred.reshape(-1, n_main),
+                               main_cluster_tgt.reshape(-1))
+        loss_l = focal_loss(l_pred.reshape(-1, n_shldr),
+                            l_bin_tgt.reshape(-1))
+        loss_r = focal_loss(r_pred.reshape(-1, n_shldr),
+                            r_bin_tgt.reshape(-1))
 
         main_top1 = (main_pred.reshape(-1, n_main).argmax(-1) == main_cluster_tgt.reshape(-1)).float().mean().item()
         l_top1 = (l_pred.reshape(-1, n_shldr).argmax(-1) == l_bin_tgt.reshape(-1)).float().mean().item()
@@ -353,7 +360,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           pos_enc: str = None, attn_variant: str = None, n_kv_heads: int = None,
           stick_loss: str = None, btn_loss: str = None,
           no_opp_inputs: bool = True,
-          autoregressive_heads: bool = False):
+          autoregressive_heads: bool = False,
+          clusters_path: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -400,9 +408,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     stick_centers_np, shoulder_centers_np = None, None
     if stick_loss == "clusters":
         from dataset import _load_cluster_centers
-        stick_centers_np, shoulder_centers_np = _load_cluster_centers(Path(data_dir))
+        _cp = Path(clusters_path) if clusters_path else None
+        stick_centers_np, shoulder_centers_np = _load_cluster_centers(
+            data_dir=Path(data_dir), clusters_path=_cp)
         if stick_centers_np is None:
-            raise RuntimeError(f"stick_loss='clusters' but no stick_clusters.json in {data_dir}")
+            raise RuntimeError(
+                f"stick_loss='clusters' but no stick_clusters.json found "
+                f"(checked: {clusters_path}, {data_dir}, data/full/)")
         n_stick_clusters = len(stick_centers_np)
         n_shoulder_bins = len(shoulder_centers_np)
         print(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder", flush=True)
@@ -510,6 +522,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             next(loader)
 
     _oom_retries = 0
+    best_val_f1 = -1.0
     print(f"\n=== Training {max_steps} steps ===", flush=True)
     for step in range(start_step + 1, max_steps + 1):
         model.train()
@@ -661,6 +674,26 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                       f"bP={val_avg['val/btn_precision']:.1%} bR={val_avg['val/btn_recall']:.1%}  "
                       f"cact={val_avg['val/cdir_active_acc']:.1%}  "
                       f"(batches={val_ct})", flush=True)
+                cur_val_f1 = val_avg.get('val/btn_f1', 0.0)
+                if cur_val_f1 > best_val_f1:
+                    best_val_f1 = cur_val_f1
+                    os.makedirs("checkpoints", exist_ok=True)
+                    best_path = f"checkpoints/{run_name}_best.pt"
+                    best_ckpt = {
+                        "global_step":          step,
+                        "model_state_dict":     model.state_dict(),
+                        "optimizer_state_dict": optimiser.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
+                        "loss_weights":         loss_weights.cpu(),
+                        "norm_stats":           ds.norm_stats,
+                        "config":               cfg.__dict__,
+                    }
+                    if stick_centers_np is not None:
+                        best_ckpt["stick_centers"] = stick_centers_np.tolist()
+                    if shoulder_centers_np is not None:
+                        best_ckpt["shoulder_centers"] = shoulder_centers_np.tolist()
+                    torch.save(best_ckpt, best_path)
+                    print(f"  -- new best val f1={cur_val_f1:.1%} → {best_path}", flush=True)
             else:
                 print("  -- val: no valid batches", flush=True)
 
@@ -743,19 +776,33 @@ if __name__ == "__main__":
                         help="Attention variant")
     parser.add_argument("--n-kv-heads", type=int, default=None,
                         help="Number of KV heads for GQA (default: nhead)")
+    parser.add_argument("--clusters-path", type=str, default=None,
+                        help="Path to stick_clusters.json (default: data/full/stick_clusters.json)")
     parser.add_argument("--stick-loss", type=str, default=None,
                         choices=["mse", "huber", "clusters"],
                         help="Stick loss type")
     parser.add_argument("--btn-loss", type=str, default=None,
                         choices=["bce", "focal"],
-                        help="Button loss type (default: bce)")
+                        help="Button loss type (default: focal)")
     parser.add_argument("--opp-inputs", action="store_true",
                         help="Include opponent controller inputs (default: excluded)")
     parser.add_argument("--autoregressive-heads", action="store_true",
                         help="Enable autoregressive output heads (each head conditions on previous)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
+    parser.add_argument("--focal-gamma", type=float, default=FOCAL_GAMMA,
+                        help="Focal CE gamma for sticks/shoulders/cdir (default: 2.0)")
+    parser.add_argument("--btn-focal-gamma", type=float, default=None,
+                        help="Focal BCE gamma for buttons (default: same as --focal-gamma)")
+    parser.add_argument("--label-smoothing", type=float, default=LABEL_SMOOTHING,
+                        help="Label smoothing (default: 0.1, set 0 to disable)")
     args = parser.parse_args()
+
+    import train as _self_module
+    _self_module._focal_gamma = args.focal_gamma
+    _self_module._label_smoothing = args.label_smoothing
+    _self_module._btn_focal_gamma = args.btn_focal_gamma if args.btn_focal_gamma is not None else args.focal_gamma
+
     if args.seed is not None:
         import random
         import numpy as np
@@ -793,4 +840,5 @@ if __name__ == "__main__":
         btn_loss=args.btn_loss,
         no_opp_inputs=not args.opp_inputs,
         autoregressive_heads=args.autoregressive_heads,
+        clusters_path=args.clusters_path,
     )
