@@ -1,0 +1,48 @@
+# Wavedash Speed Sweep -- Backfill Queue
+# Format: RUN_NAME EXTRA_ARGS
+# Pop from top when a GPU frees up. Re-sort as results come in.
+
+# --- Tier 1: LR x model combos (highest expected payoff) ---
+wd-small-lr2e4 --model small --lr 2e-4
+wd-small-lr5e4 --model small --lr 5e-4
+wd-tiny-lr2e4 --model tiny --lr 2e-4
+wd-tiny-lr5e4 --model tiny --lr 5e-4
+wd-tiny-lr8e4 --model tiny --lr 8e-4
+wd-small-lr8e4 --model small --lr 8e-4
+
+# --- Tier 2: Layer count x LR combos ---
+wd-L2-lr1e4 --num-layers 2 --lr 1e-4
+wd-L2-lr2e4 --num-layers 2 --lr 2e-4
+wd-L1-lr2e4 --num-layers 1 --lr 2e-4
+wd-L1-lr5e4 --num-layers 1 --lr 5e-4
+
+# --- Tier 3: Encoder / architecture combos ---
+wd-flat-lr1e4 --encoder flat --lr 1e-4
+wd-flat-tiny --encoder flat --model tiny
+wd-seq15-lr1e4 --seq-len 15 --lr 1e-4
+wd-no-ar-lr1e4 --lr 1e-4
+
+# --- Tier 4: Bigger batch experiments ---
+wd-bs256-lr2e4 --batch-size 256 --lr 2e-4
+wd-bs256-lr5e4 --batch-size 256 --lr 5e-4
+wd-bs64 --batch-size 64
+
+# --- Tier 5: Architectural variants ---
+wd-shallow --model shallow
+wd-sinusoidal --pos-enc sinusoidal
+wd-intra0 --intra-layers 0
+wd-intra1 --intra-layers 1
+wd-kq2 --k-query 2
+wd-kq4 --k-query 4
+
+# --- Tier 6: Wild cards ---
+wd-lr3e3 --lr 3e-3
+wd-lr5e3 --lr 5e-3
+wd-lr1e2 --lr 1e-2
+wd-huber --stick-loss huber
+wd-bce --btn-loss bce
+wd-fg1 --focal-gamma 1.0
+wd-fg3 --focal-gamma 3.0
+wd-deep --model deep
+wd-gqa --attn-variant gqa --n-kv-heads 2
+wd-wide-shallow --model wide-shallow

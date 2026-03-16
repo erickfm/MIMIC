@@ -361,15 +361,20 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           stick_loss: str = None, btn_loss: str = None,
           no_opp_inputs: bool = True,
           autoregressive_heads: bool = False,
-          clusters_path: str = None):
+          clusters_path: str = None,
+          target_val_f1: float = None,
+          max_wall_time: float = None,
+          val_frac_override: float = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
-    global SEQUENCE_LENGTH, BATCH_SIZE
+    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC
     if seq_len_override:
         SEQUENCE_LENGTH = seq_len_override
     if batch_size_override:
         BATCH_SIZE = batch_size_override
+    if val_frac_override is not None:
+        VAL_FRAC = val_frac_override
 
     print(f"Loading dataset from {data_dir} ...", flush=True)
     ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs)
@@ -524,7 +529,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     _oom_retries = 0
     best_val_f1 = -1.0
     print(f"\n=== Training {max_steps} steps ===", flush=True)
+    _target_hit = False
     for step in range(start_step + 1, max_steps + 1):
+        if max_wall_time and (time.time() - t0) > max_wall_time:
+            print(f"WALL TIME LIMIT ({max_wall_time}s) exceeded at step {step}", flush=True)
+            break
+
         model.train()
         state, target = next(loader)
 
@@ -694,6 +704,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         best_ckpt["shoulder_centers"] = shoulder_centers_np.tolist()
                     torch.save(best_ckpt, best_path)
                     print(f"  -- new best val f1={cur_val_f1:.1%} → {best_path}", flush=True)
+                if target_val_f1 and cur_val_f1 >= target_val_f1:
+                    _elapsed = time.time() - t0
+                    print(f"TARGET REACHED: val_f1={cur_val_f1:.4f} at step {step} in {_elapsed:.1f}s", flush=True)
+                    wandb.log({"target_reached_step": step, "target_reached_wall_s": _elapsed}, step=step)
+                    _target_hit = True
+                    break
             else:
                 print("  -- val: no valid batches", flush=True)
 
@@ -719,9 +735,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     elapsed = time.time() - t0
     skip_msg = f"  skipped={skip_ct}" if skip_ct else ""
-    epoch_frac = max_steps / max(est_batches, 1)
-    print(f"\nDone. {max_steps:,} steps ({epoch_frac:.2f} epochs) in {elapsed:.0f}s "
-          f"({max_steps/elapsed:.1f} step/s){skip_msg}", flush=True)
+    epoch_frac = step / max(est_batches, 1)
+    print(f"\nDone. {step:,}/{max_steps:,} steps ({epoch_frac:.2f} epochs) in {elapsed:.0f}s "
+          f"({step/elapsed:.1f} step/s){skip_msg}", flush=True)
+    if target_val_f1 and not _target_hit:
+        print(f"TARGET NOT REACHED: best val_f1={best_val_f1:.4f} (target={target_val_f1:.4f})", flush=True)
     wandb.finish()
 
 if __name__ == "__main__":
@@ -796,6 +814,12 @@ if __name__ == "__main__":
                         help="Focal BCE gamma for buttons (default: same as --focal-gamma)")
     parser.add_argument("--label-smoothing", type=float, default=LABEL_SMOOTHING,
                         help="Label smoothing (default: 0.1, set 0 to disable)")
+    parser.add_argument("--target-val-f1", type=float, default=None,
+                        help="Stop training when val btn_f1 >= this value (e.g. 0.985)")
+    parser.add_argument("--max-wall-time", type=float, default=None,
+                        help="Hard wall-time limit in seconds; stop if exceeded")
+    parser.add_argument("--val-frac", type=float, default=None,
+                        help="Override validation frequency as fraction of max_steps (default: 0.05)")
     args = parser.parse_args()
 
     import train as _self_module
@@ -841,4 +865,7 @@ if __name__ == "__main__":
         no_opp_inputs=not args.opp_inputs,
         autoregressive_heads=args.autoregressive_heads,
         clusters_path=args.clusters_path,
+        target_val_f1=args.target_val_f1,
+        max_wall_time=args.max_wall_time,
+        val_frac_override=args.val_frac,
     )
