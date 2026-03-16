@@ -45,6 +45,6 @@ echo "  extra: $EXTRA"
 ssh -p "$PORT" "$HOST" "cd /root/FRAME && mkdir -p logs/sweep && \
     CUDA_VISIBLE_DEVICES=$GPU nohup python3 train.py \
     $COMMON --run-name $RUN_NAME $EXTRA \
-    > logs/sweep/$RUN_NAME.log 2>&1 &"
+    > logs/sweep/$RUN_NAME.log 2>&1 </dev/null &"
 
 echo "[launch] $RUN_NAME started (log: logs/sweep/$RUN_NAME.log)"
