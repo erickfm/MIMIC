@@ -111,8 +111,35 @@ Architecture (`--model`) is intentionally NOT changed — `shallow` won on waved
 
 ---
 
+## Hardcoded: Cluster Stick Loss + Autoregressive Heads
+
+**Decision**: `stick_loss="clusters"` and `autoregressive_heads=True` are now the only supported configuration. All MSE/huber stick regression code and non-autoregressive head paths have been removed from the codebase.
+
+**Why MSE/huber stick loss was removed**:
+
+MSE/huber regression on raw stick (x, y) values causes base-rate collapse: the model learns to predict neutral (0.5, 0.5) on every frame because that minimizes squared error against the highly peaked distribution of stick positions. The loss gradient provides no useful signal for distinguishing between the ~63 distinct stick positions that actually matter for gameplay. Discrete cluster classification with focal loss solves this by treating each meaningful stick region as a separate class, giving the model proper gradients on rare but critical inputs (smash attacks, wavedash angles, etc.).
+
+**Why non-autoregressive heads were removed**:
+
+Without autoregressive chaining, each output head (L shoulder, R shoulder, c-stick direction, main stick, buttons) predicts independently. This breaks the strong conditional dependencies between outputs -- e.g., a wavedash requires L-shoulder press *and* a specific diagonal stick angle *simultaneously*. With independent heads, the model must independently arrive at the correct joint distribution, which it fails to learn reliably. The autoregressive chain (L → R → cdir → main → buttons) gives each subsequent head access to the previous predictions via `.detach()` conditioning, breaking the joint prediction into tractable conditional steps.
+
+**Code removed**:
+
+- `model.py`: MSE/huber branch in `PredictionHeads.__init__`, non-AR branch in `__init__` and `forward`
+- `train.py`: `_stick_regression_loss()` function, `--stick-loss` and `--autoregressive-heads` CLI args, MSE/huber branch in `compute_loss()`, `_mse`/`_huber` loss modules
+- `inference.py`: All `if cfg.stick_loss == "clusters"` / `else` guards in cluster loading, logging, feedback, and controller output
+
+**Updated defaults**:
+
+- `ModelConfig.stick_loss` = `"clusters"` (was `"mse"`)
+- `ModelConfig.autoregressive_heads` = `True` (was `False`)
+- `ModelConfig.dropout` = `0.1` (was `0.0`, for generalization on full dataset)
+- `--clusters-path` defaults to `data/full/stick_clusters.json`
+
+---
+
 ## Status
 
-Training defaults are now sweep-proven. The configuration `batch=256, lr=5e-5, warmup=5%, RoPE` is the recommended starting point for any new behavior dataset. Architecture depth should scale with task complexity.
+Training defaults are now sweep-proven. The configuration `batch=256, lr=5e-5, warmup=5%, RoPE, clusters, AR-heads, dropout=0.1` is the recommended starting point for any new behavior dataset. Architecture depth should scale with task complexity.
 
 Next steps: train on full Melee dataset with updated defaults, verify generalization beyond single-behavior overfitting.

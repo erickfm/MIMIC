@@ -92,11 +92,13 @@ class _BaseFrameEncoder(nn.Module):
         dropout: float = 0.0,
         scaled_emb: bool = False,
         no_opp_inputs: bool = False,
+        no_self_inputs: bool = False,
     ) -> None:
         super().__init__()
         self._d_intra = d_intra
         self._dropout = dropout
         self._no_opp_inputs = no_opp_inputs
+        self._no_self_inputs = no_self_inputs
 
         def _emb_dim(n_vocab: int) -> int:
             if scaled_emb:
@@ -126,21 +128,37 @@ class _BaseFrameEncoder(nn.Module):
         self.analog_enc    = _mlp(self.ANALOG_DIM, d_intra, dropout)
         self.proj_num_enc  = _mlp(self.PROJ_NUM_PER * self.PROJ_SLOTS, d_intra, dropout)
 
-        btn_in = self.BTN_DIM if no_opp_inputs else self.BTN_DIM * 2
-        self.btn_enc       = _mlp(btn_in, d_intra, dropout)
+        has_self_btn = not no_self_inputs
+        has_opp_btn = not no_opp_inputs
+        btn_parts = int(has_self_btn) + int(has_opp_btn)
+        if btn_parts > 0:
+            self.btn_enc = _mlp(self.BTN_DIM * btn_parts, d_intra, dropout)
+        nana_btn_parts = int(has_self_btn) + int(has_opp_btn)
+        if nana_btn_parts > 0:
+            self.nana_btn_enc = _mlp(self.BTN_DIM * nana_btn_parts, d_intra, dropout)
         self.flag_enc      = _mlp(self.FLAGS_DIM * 2, d_intra, dropout)
-        nana_btn_in = self.BTN_DIM if no_opp_inputs else self.BTN_DIM * 2
-        self.nana_btn_enc  = _mlp(nana_btn_in, d_intra, dropout)
         self.nana_flag_enc = _mlp(self.NANA_FLAGS * 2, d_intra, dropout)
 
     @property
     def n_raw_tokens(self) -> int:
-        return 51 if self._no_opp_inputs else 55
+        # base=55 (all inputs), -4 if no_opp_inputs, -5 if no_self_inputs
+        n = 55
+        if self._no_opp_inputs:
+            n -= 4  # opp_c_dir, opp_analog, opp_nana_c_dir, opp_nana_analog
+        if self._no_self_inputs:
+            n -= 5  # self_c_dir, self_analog, self_nana_c_dir, self_nana_analog, (buttons+nana_buttons counted below)
+        # buttons/nana_buttons exist only if at least one side has inputs
+        has_self_btn = not self._no_self_inputs
+        has_opp_btn = not self._no_opp_inputs
+        if not has_self_btn and not has_opp_btn:
+            n -= 2  # buttons, nana_buttons tokens gone entirely
+        return n
 
     def _build_raw_tokens(self, seq: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Build named feature-group tokens, each (B,T,d_intra)."""
         t: Dict[str, torch.Tensor] = {}
         noi = self._no_opp_inputs
+        nsi = self._no_self_inputs
 
         t["stage"]        = self.stage_emb(seq["stage"])
         t["self_port"]    = self.port_emb(seq["self_port"])
@@ -151,7 +169,8 @@ class _BaseFrameEncoder(nn.Module):
         t["opp_action"]   = self.act_emb(seq["opp_action"])
         t["self_costume"] = self.cost_emb(seq["self_costume"])
         t["opp_costume"]  = self.cost_emb(seq["opp_costume"])
-        t["self_c_dir"]   = self.cdir_emb(seq["self_c_dir"])
+        if not nsi:
+            t["self_c_dir"] = self.cdir_emb(seq["self_c_dir"])
         if not noi:
             t["opp_c_dir"] = self.cdir_emb(seq["opp_c_dir"])
 
@@ -159,7 +178,8 @@ class _BaseFrameEncoder(nn.Module):
         t["opp_nana_char"]    = self.char_emb(seq["opp_nana_character"])
         t["self_nana_action"] = self.act_emb(seq["self_nana_action"])
         t["opp_nana_action"]  = self.act_emb(seq["opp_nana_action"])
-        t["self_nana_c_dir"]  = self.cdir_emb(seq["self_nana_c_dir"])
+        if not nsi:
+            t["self_nana_c_dir"] = self.cdir_emb(seq["self_nana_c_dir"])
         if not noi:
             t["opp_nana_c_dir"] = self.cdir_emb(seq["opp_nana_c_dir"])
 
@@ -174,20 +194,28 @@ class _BaseFrameEncoder(nn.Module):
         t["self_nana_num"]   = self.nana_enc(torch.cat([seq["self_nana_numeric"], seq["self_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
         t["opp_nana_num"]    = self.nana_enc(torch.cat([seq["opp_nana_numeric"], seq["opp_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
 
-        t["self_analog"]      = self.analog_enc(seq["self_analog"])
-        t["self_nana_analog"] = self.analog_enc(seq["self_nana_analog"])
+        if not nsi:
+            t["self_analog"]      = self.analog_enc(seq["self_analog"])
+            t["self_nana_analog"] = self.analog_enc(seq["self_nana_analog"])
         if not noi:
             t["opp_analog"]      = self.analog_enc(seq["opp_analog"])
             t["opp_nana_analog"] = self.analog_enc(seq["opp_nana_analog"])
 
         t["proj_num"] = self.proj_num_enc(torch.cat([seq[f"{k}_numeric"] for k in map(str, range(self.PROJ_SLOTS))], dim=-1))
 
-        if noi:
-            t["buttons"]      = self.btn_enc(seq["self_buttons"].float())
-            t["nana_buttons"] = self.nana_btn_enc(seq["self_nana_buttons"].float())
-        else:
+        # Buttons: combine whichever sides are present
+        has_self_btn = not nsi
+        has_opp_btn = not noi
+        if has_self_btn and has_opp_btn:
             t["buttons"]      = self.btn_enc(torch.cat([seq["self_buttons"].float(), seq["opp_buttons"].float()], dim=-1))
             t["nana_buttons"] = self.nana_btn_enc(torch.cat([seq["self_nana_buttons"].float(), seq["opp_nana_buttons"].float()], dim=-1))
+        elif has_self_btn:
+            t["buttons"]      = self.btn_enc(seq["self_buttons"].float())
+            t["nana_buttons"] = self.nana_btn_enc(seq["self_nana_buttons"].float())
+        elif has_opp_btn:
+            t["buttons"]      = self.btn_enc(seq["opp_buttons"].float())
+            t["nana_buttons"] = self.nana_btn_enc(seq["opp_nana_buttons"].float())
+        # else: no button tokens at all
 
         t["flags"]      = self.flag_enc(torch.cat([seq["self_flags"].float(), seq["opp_flags"].float()], dim=-1))
         t["nana_flags"] = self.nana_flag_enc(torch.cat([seq["self_nana_flags"].float(), seq["opp_nana_flags"].float()], dim=-1))
@@ -309,6 +337,9 @@ class CompositeFrameEncoder(_BaseFrameEncoder):
 
     When no_opp_inputs=True (7 tokens): OPP_INPUT removed, OPP_STATE/NANA_OPP
     lose opp controller input tokens.
+
+    When no_self_inputs=True: SELF_INPUT also removed, SELF_STATE/NANA_SELF
+    lose self controller input tokens.
     """
 
     def __init__(
@@ -322,7 +353,11 @@ class CompositeFrameEncoder(_BaseFrameEncoder):
         **kwargs,
     ) -> None:
         super().__init__(d_intra=d_intra, dropout=dropout, **kwargs)
-        n_tokens = 7 if self._no_opp_inputs else 8
+        n_tokens = 8
+        if self._no_opp_inputs:
+            n_tokens -= 1
+        if self._no_self_inputs:
+            n_tokens -= 1
         self.mixers = nn.ModuleList([_CompositeTokenMixer(d_intra, dropout) for _ in range(n_tokens)])
         nhead = max(1, d_intra // 64)
         self.set_attn = _GroupAttention(d_intra=d_intra, nhead=nhead, nlayers=nlayers,
@@ -339,6 +374,7 @@ class CompositeFrameEncoder(_BaseFrameEncoder):
         B, T = seq["stage"].shape
         t = self._build_raw_tokens(seq)
         noi = self._no_opp_inputs
+        nsi = self._no_self_inputs
 
         proj_cats = []
         for j in range(self.PROJ_SLOTS):
@@ -348,23 +384,41 @@ class CompositeFrameEncoder(_BaseFrameEncoder):
         if not noi:
             opp_state.insert(4, t["opp_c_dir"])
 
-        nana_opp = [t["opp_nana_char"], t["opp_nana_action"], t["opp_nana_num"], t["nana_buttons"], t["nana_flags"]]
+        has_btn_token = "buttons" in t
+        nana_opp = [t["opp_nana_char"], t["opp_nana_action"], t["opp_nana_num"]]
+        if has_btn_token:
+            nana_opp.append(t["nana_buttons"])
+        nana_opp.append(t["nana_flags"])
         if not noi:
             nana_opp.insert(2, t["opp_nana_c_dir"])
-            nana_opp.insert(-2, t["opp_nana_analog"])
+            if "opp_nana_analog" in t:
+                nana_opp.insert(-1, t["opp_nana_analog"])
+
+        self_state = [t["self_port"], t["self_char"], t["self_action"], t["self_costume"], t["self_player_num"], t["flags"]]
+        if not nsi:
+            self_state.insert(4, t["self_c_dir"])
+
+        nana_self = [t["self_nana_char"], t["self_nana_action"], t["self_nana_num"]]
+        if not nsi:
+            nana_self.insert(2, t["self_nana_c_dir"])
+            nana_self.append(t["self_nana_analog"])
+        if has_btn_token:
+            nana_self.append(t["nana_buttons"])
+        nana_self.append(t["nana_flags"])
 
         groups = [
-            [t["stage"], t["global_num"]],                                                                  # GAME_STATE
-            [t["self_analog"], t["buttons"]],                                                               # SELF_INPUT
+            [t["stage"], t["global_num"]],                                       # GAME_STATE
         ]
-        if not noi:
-            groups.append([t["opp_analog"], t["buttons"]])                                                  # OPP_INPUT
+        if not nsi and has_btn_token:
+            groups.append([t["self_analog"], t["buttons"]])                      # SELF_INPUT
+        if not noi and has_btn_token:
+            groups.append([t["opp_analog"], t["buttons"]])                       # OPP_INPUT
         groups.extend([
-            [t["self_port"], t["self_char"], t["self_action"], t["self_costume"], t["self_c_dir"], t["self_player_num"], t["flags"]],  # SELF_STATE
-            opp_state,                                                                                      # OPP_STATE
-            [t["self_nana_char"], t["self_nana_action"], t["self_nana_c_dir"], t["self_nana_num"], t["self_nana_analog"], t["nana_buttons"], t["nana_flags"]],  # NANA_SELF
-            nana_opp,                                                                                       # NANA_OPP
-            proj_cats + [t["proj_num"]],                                                                    # PROJECTILES
+            self_state,                                                          # SELF_STATE
+            opp_state,                                                           # OPP_STATE
+            nana_self,                                                           # NANA_SELF
+            nana_opp,                                                            # NANA_OPP
+            proj_cats + [t["proj_num"]],                                         # PROJECTILES
         ])
 
         composite = [self.mixers[i](g) for i, g in enumerate(groups)]
@@ -400,6 +454,9 @@ class HybridFrameEncoder(_BaseFrameEncoder):
 
     When no_opp_inputs=True (15 tokens): OPP_INPUT removed, OPP_ACTION/
     NANA_OPP_ID/NANA_OPP_ST lose opp controller input tokens.
+
+    When no_self_inputs=True: SELF_INPUT also removed, SELF_ACTION/
+    NANA_SELF_ID/NANA_SELF_ST lose self controller input tokens.
     """
 
     def __init__(
@@ -413,7 +470,11 @@ class HybridFrameEncoder(_BaseFrameEncoder):
         **kwargs,
     ) -> None:
         super().__init__(d_intra=d_intra, dropout=dropout, **kwargs)
-        n_tokens = 15 if self._no_opp_inputs else 16
+        n_tokens = 16
+        if self._no_opp_inputs:
+            n_tokens -= 1
+        if self._no_self_inputs:
+            n_tokens -= 1
         self.mixers = nn.ModuleList([_CompositeTokenMixer(d_intra, dropout) for _ in range(n_tokens)])
         nhead = max(1, d_intra // 64)
         self.set_attn = _GroupAttention(d_intra=d_intra, nhead=nhead, nlayers=nlayers,
@@ -430,12 +491,34 @@ class HybridFrameEncoder(_BaseFrameEncoder):
         B, T = seq["stage"].shape
         t = self._build_raw_tokens(seq)
         noi = self._no_opp_inputs
+        nsi = self._no_self_inputs
+        has_btn_token = "buttons" in t
 
         opp_action_group = [t["opp_action"]] if noi else [t["opp_action"], t["opp_c_dir"]]
-        nana_opp_id = [t["opp_nana_char"], t["opp_nana_action"]] if noi else [t["opp_nana_char"], t["opp_nana_action"], t["opp_nana_c_dir"]]
-        nana_opp_st = [t["opp_nana_num"], t["nana_buttons"], t["nana_flags"]]
+
+        nana_opp_id = [t["opp_nana_char"], t["opp_nana_action"]]
         if not noi:
-            nana_opp_st = [t["opp_nana_num"], t["opp_nana_analog"], t["nana_buttons"], t["nana_flags"]]
+            nana_opp_id.append(t["opp_nana_c_dir"])
+
+        nana_opp_st = [t["opp_nana_num"]]
+        if not noi and "opp_nana_analog" in t:
+            nana_opp_st.append(t["opp_nana_analog"])
+        if has_btn_token:
+            nana_opp_st.append(t["nana_buttons"])
+        nana_opp_st.append(t["nana_flags"])
+
+        self_action_group = [t["self_action"]] if nsi else [t["self_action"], t["self_c_dir"]]
+
+        nana_self_id = [t["self_nana_char"], t["self_nana_action"]]
+        if not nsi:
+            nana_self_id.append(t["self_nana_c_dir"])
+
+        nana_self_st = [t["self_nana_num"]]
+        if not nsi and "self_nana_analog" in t:
+            nana_self_st.append(t["self_nana_analog"])
+        if has_btn_token:
+            nana_self_st.append(t["nana_buttons"])
+        nana_self_st.append(t["nana_flags"])
 
         proj_a = [t[f"proj{j}_{k}"] for j in range(3) for k in ("owner", "type", "subtype")] + [t["proj_num"]]
         proj_b = [t[f"proj{j}_{k}"] for j in range(3, 6) for k in ("owner", "type", "subtype")]
@@ -444,18 +527,21 @@ class HybridFrameEncoder(_BaseFrameEncoder):
         groups = [
             [t["stage"], t["global_num"]],                                       # GAME
             [t["self_port"], t["self_char"], t["self_costume"]],                  # SELF_IDENT
-            [t["self_action"], t["self_c_dir"]],                                 # SELF_ACTION
+            self_action_group,                                                   # SELF_ACTION
             [t["self_player_num"], t["flags"]],                                  # SELF_STATE
-            [t["self_analog"], t["buttons"]],                                    # SELF_INPUT
+        ]
+        if not nsi and has_btn_token:
+            groups.append([t["self_analog"], t["buttons"]])                      # SELF_INPUT
+        groups.extend([
             [t["opp_port"], t["opp_char"], t["opp_costume"]],                    # OPP_IDENT
             opp_action_group,                                                    # OPP_ACTION
             [t["opp_player_num"], t["flags"]],                                   # OPP_STATE
-        ]
-        if not noi:
+        ])
+        if not noi and has_btn_token:
             groups.append([t["opp_analog"], t["buttons"]])                       # OPP_INPUT
         groups.extend([
-            [t["self_nana_char"], t["self_nana_action"], t["self_nana_c_dir"]],  # NANA_SELF_ID
-            [t["self_nana_num"], t["self_nana_analog"], t["nana_buttons"], t["nana_flags"]],  # NANA_SELF_ST
+            nana_self_id,                                                        # NANA_SELF_ID
+            nana_self_st,                                                        # NANA_SELF_ST
             nana_opp_id,                                                         # NANA_OPP_ID
             nana_opp_st,                                                         # NANA_OPP_ST
             proj_a,                                                              # PROJ_A
@@ -493,6 +579,7 @@ def build_encoder(
     k_query: int = 1,
     scaled_emb: bool = False,
     no_opp_inputs: bool = False,
+    no_self_inputs: bool = False,
     num_stages: int,
     num_ports: int,
     num_characters: int,
@@ -512,6 +599,7 @@ def build_encoder(
         num_actions=num_actions, num_costumes=num_costumes,
         num_proj_types=num_proj_types, num_proj_subtypes=num_proj_subtypes,
         num_c_dirs=num_c_dirs, no_opp_inputs=no_opp_inputs,
+        no_self_inputs=no_self_inputs,
     )
 
     common = dict(d_model=d_model, d_intra=d_intra, dropout=dropout, scaled_emb=scaled_emb)

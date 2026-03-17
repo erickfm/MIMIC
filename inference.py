@@ -102,33 +102,32 @@ log.info("Compiling model with torch.compile ...")
 model = torch.compile(model)
 log.info("Model compiled (first call will trigger actual compilation).")
 
-# ── Cluster centers (for discrete stick_loss="clusters" mode) ────────────
+# ── Cluster centers ──────────────────────────────────────────────────────
 _stick_centers: np.ndarray | None = None
 _shoulder_centers: np.ndarray | None = None
 
-if cfg.stick_loss == "clusters":
-    if "stick_centers" in ckpt:
-        _stick_centers = np.array(ckpt["stick_centers"], dtype=np.float32)
-        _shoulder_centers = np.array(ckpt["shoulder_centers"], dtype=np.float32)
-        log.info("Loaded cluster centers from checkpoint: %d stick, %d shoulder",
-                 len(_stick_centers), len(_shoulder_centers))
-    else:
-        import json as _json
-        _cluster_dirs = [Path(args.data_dir)] if args.data_dir else []
-        _cluster_dirs += [Path("./data/full"), Path("./data"), Path("./data/subset")]
-        for _sd in _cluster_dirs:
-            _sc_path = _sd / "stick_clusters.json"
-            if _sc_path.exists():
-                with open(_sc_path) as _fh:
-                    _sc_raw = _json.load(_fh)
-                _stick_centers = np.array(_sc_raw["stick_centers"], dtype=np.float32)
-                _shoulder_centers = np.array(_sc_raw["shoulder_centers"], dtype=np.float32)
-                log.info("Loaded cluster centers from %s: %d stick, %d shoulder",
-                         _sc_path, len(_stick_centers), len(_shoulder_centers))
-                break
-        if _stick_centers is None:
-            log.error("stick_loss='clusters' but no cluster centers in checkpoint or data dir")
-            sys.exit(1)
+if "stick_centers" in ckpt:
+    _stick_centers = np.array(ckpt["stick_centers"], dtype=np.float32)
+    _shoulder_centers = np.array(ckpt["shoulder_centers"], dtype=np.float32)
+    log.info("Loaded cluster centers from checkpoint: %d stick, %d shoulder",
+             len(_stick_centers), len(_shoulder_centers))
+else:
+    import json as _json
+    _cluster_dirs = [Path(args.data_dir)] if args.data_dir else []
+    _cluster_dirs += [Path("./data/full"), Path("./data"), Path("./data/subset")]
+    for _sd in _cluster_dirs:
+        _sc_path = _sd / "stick_clusters.json"
+        if _sc_path.exists():
+            with open(_sc_path) as _fh:
+                _sc_raw = _json.load(_fh)
+            _stick_centers = np.array(_sc_raw["stick_centers"], dtype=np.float32)
+            _shoulder_centers = np.array(_sc_raw["shoulder_centers"], dtype=np.float32)
+            log.info("Loaded cluster centers from %s: %d stick, %d shoulder",
+                     _sc_path, len(_stick_centers), len(_shoulder_centers))
+            break
+    if _stick_centers is None:
+        log.error("No cluster centers found in checkpoint or data dir")
+        sys.exit(1)
 
 # ── Normalization stats + categorical maps ───────────────────────────────
 import json
@@ -164,7 +163,8 @@ if not cat_maps:
 ROLL_WIN = cfg.max_seq_len
 
 # ── Feature spec ─────────────────────────────────────────────────────────
-_fg = F.build_feature_groups(no_opp_inputs=cfg.no_opp_inputs)
+_fg = F.build_feature_groups(no_opp_inputs=cfg.no_opp_inputs,
+                             no_self_inputs=getattr(cfg, 'no_self_inputs', False))
 _categorical_cols = F.get_categorical_cols(_fg)
 
 # ── Prediction feedback state ─────────────────────────────────────────────
@@ -238,18 +238,11 @@ class InferenceLogger:
             "distance":       f"{row.get('distance', 0):.2f}",
         }
         if pred is not None:
-            if cfg.stick_loss == "clusters":
-                _lg_mx, _lg_my, _lg_l, _lg_r = _decode_clusters(pred)
-                rec["pred_main_x"] = f"{_lg_mx:.4f}"
-                rec["pred_main_y"] = f"{_lg_my:.4f}"
-                rec["pred_L"] = f"{_lg_l:.4f}"
-                rec["pred_R"] = f"{_lg_r:.4f}"
-            else:
-                main = torch.clamp(pred["main_xy"], 0, 1)
-                rec["pred_main_x"] = f"{main[0].item():.4f}"
-                rec["pred_main_y"] = f"{main[1].item():.4f}"
-                rec["pred_L"] = f"{torch.clamp(pred['L_val'], 0, 1).item():.4f}"
-                rec["pred_R"] = f"{torch.clamp(pred['R_val'], 0, 1).item():.4f}"
+            _lg_mx, _lg_my, _lg_l, _lg_r = _decode_clusters(pred)
+            rec["pred_main_x"] = f"{_lg_mx:.4f}"
+            rec["pred_main_y"] = f"{_lg_my:.4f}"
+            rec["pred_L"] = f"{_lg_l:.4f}"
+            rec["pred_R"] = f"{_lg_r:.4f}"
             c_probs = torch.softmax(pred["c_dir_logits"], dim=-1)
             rec["pred_c_dir"] = int(torch.argmax(c_probs))
             rec["pred_c_dir_probs"] = " ".join(f"{p:.3f}" for p in c_probs.tolist())
@@ -482,13 +475,7 @@ def press_output(ctrl: melee.Controller,
     Returns (fired_buttons, (mx,my), c_dir_idx, l_val, r_val)."""
     import random
 
-    if cfg.stick_loss == "clusters":
-        mx, my, l_val, r_val = _decode_clusters(pred, temperature=args.temperature)
-    else:
-        clamped_main = torch.clamp(pred["main_xy"], 0.0, 1.0)
-        mx, my = map(float, clamped_main.tolist())
-        l_val = _safe(torch.clamp(pred["L_val"], 0.0, 1.0).item(), 0.0)
-        r_val = _safe(torch.clamp(pred["R_val"], 0.0, 1.0).item(), 0.0)
+    mx, my, l_val, r_val = _decode_clusters(pred, temperature=args.temperature)
 
     dir_idx = int(torch.argmax(pred["c_dir_logits"]))
     cx, cy  = C_DIR_TO_FLOAT.get(dir_idx, (0.5, 0.5))
@@ -499,9 +486,12 @@ def press_output(ctrl: melee.Controller,
     btn_probs = torch.sigmoid(pred["btn_logits"])
     pressed = []
     fired: List[bool] = []
+    BLOCKED_BUTTONS = {melee.enums.Button.BUTTON_START}
     for i, (prob, btn) in enumerate(zip(btn_probs, IDX_TO_BUTTON)):
         p = prob.item()
         fire = (random.random() < p) if sample else (p > args.btn_threshold)
+        if btn in BLOCKED_BUTTONS:
+            fire = False
         fired.append(fire)
         if fire:
             ctrl.press_button(btn)
@@ -651,19 +641,16 @@ if __name__ == "__main__":
             row[f"{pref}action_frame"]  = ps.action_frame
             row[f"{pref}costume"]       = ps.costume
 
-            if pref == "self_" and _prev_pred is not None and not args.no_pred_feedback:
-                if cfg.stick_loss == "clusters":
-                    _fb_mx, _fb_my, _fb_l, _fb_r = _decode_clusters(_prev_pred)
-                    row[f"{pref}main_x"] = _fb_mx
-                    row[f"{pref}main_y"] = _fb_my
-                    row[f"{pref}l_shldr"] = _fb_l
-                    row[f"{pref}r_shldr"] = _fb_r
-                else:
-                    _fb_main = torch.clamp(_prev_pred["main_xy"], 0.0, 1.0)
-                    row[f"{pref}main_x"] = _fb_main[0].item()
-                    row[f"{pref}main_y"] = _fb_main[1].item()
-                    row[f"{pref}l_shldr"] = torch.clamp(_prev_pred["L_val"], 0.0, 1.0).item()
-                    row[f"{pref}r_shldr"] = torch.clamp(_prev_pred["R_val"], 0.0, 1.0).item()
+            _use_feedback = (pref == "self_"
+                            and _prev_pred is not None
+                            and not args.no_pred_feedback
+                            and not getattr(cfg, 'no_self_inputs', False))
+            if _use_feedback:
+                _fb_mx, _fb_my, _fb_l, _fb_r = _decode_clusters(_prev_pred)
+                row[f"{pref}main_x"] = _fb_mx
+                row[f"{pref}main_y"] = _fb_my
+                row[f"{pref}l_shldr"] = _fb_l
+                row[f"{pref}r_shldr"] = _fb_r
                 _fb_cdir = int(torch.argmax(_prev_pred["c_dir_logits"]))
                 row[f"{pref}c_x"], row[f"{pref}c_y"] = C_DIR_TO_FLOAT.get(_fb_cdir, (0.5, 0.5))
                 if _prev_btns_fired is not None:
@@ -812,14 +799,9 @@ if __name__ == "__main__":
             bot_ps = gs.players.get(ports[0])
             if bot_ps and _step_ct % 60 == 0:
                 gm = bot_ps.controller_state.main_stick
-                if cfg.stick_loss == "clusters":
-                    _dbg_mx, _dbg_my, _dbg_l, _dbg_r = _decode_clusters(pred)
-                    pm = [_dbg_mx, _dbg_my]
-                    pl, pr = _dbg_l, _dbg_r
-                else:
-                    pm = torch.clamp(pred["main_xy"], 0, 1).tolist()
-                    pl = torch.clamp(pred["L_val"], 0, 1).item()
-                    pr = torch.clamp(pred["R_val"], 0, 1).item()
+                _dbg_mx, _dbg_my, _dbg_l, _dbg_r = _decode_clusters(pred)
+                pm = [_dbg_mx, _dbg_my]
+                pl, pr = _dbg_l, _dbg_r
                 gl = bot_ps.controller_state.l_shoulder
                 gr = bot_ps.controller_state.r_shoulder
                 log.info(

@@ -66,12 +66,14 @@ class MeleeFrameDatasetWithDelay(Dataset):
         val_frac: float = 0.1,
         norm_stats: Dict[str, Tuple[float, float]] = None,
         no_opp_inputs: bool = False,
+        no_self_inputs: bool = False,
     ) -> None:
         super().__init__()
         self.parquet_dir     = Path(parquet_dir)
         self.sequence_length = sequence_length
         self.reaction_delay  = reaction_delay
         self._no_opp_inputs  = no_opp_inputs
+        self._no_self_inputs = no_self_inputs
 
         all_files = sorted(self.parquet_dir.glob("*.parquet"))
         if not all_files:
@@ -100,7 +102,8 @@ class MeleeFrameDatasetWithDelay(Dataset):
         if not self.index_map:
             raise RuntimeError("No valid windows across the dataset.")
 
-        self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs)
+        self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs,
+                                          no_self_inputs=no_self_inputs)
         self._categorical_cols = F.get_categorical_cols(self._fg)
         self._norm_cols = F.get_norm_cols(self._fg)
 
@@ -187,6 +190,7 @@ class StreamingMeleeDataset(IterableDataset):
         split: str = "train",
         val_frac: float = 0.1,
         no_opp_inputs: bool = False,
+        no_self_inputs: bool = False,
     ) -> None:
         super().__init__()
         self.data_dir        = Path(data_dir)
@@ -194,6 +198,7 @@ class StreamingMeleeDataset(IterableDataset):
         self.reaction_delay  = reaction_delay
         self.split           = split
         self._no_opp_inputs  = no_opp_inputs
+        self._no_self_inputs = no_self_inputs
 
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
@@ -207,7 +212,8 @@ class StreamingMeleeDataset(IterableDataset):
 
         self._stick_centers, self._shoulder_centers = _load_cluster_centers(self.data_dir)
 
-        self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs)
+        self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs,
+                                          no_self_inputs=no_self_inputs)
         self._categorical_cols = F.get_categorical_cols(self._fg)
 
         all_names = sorted(self.file_index.keys())

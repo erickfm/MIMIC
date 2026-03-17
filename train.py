@@ -79,8 +79,6 @@ def collate_fn(batch):
 # -----------------------------------------------------------------------------
 # 3. Loss
 # -----------------------------------------------------------------------------
-_mse = nn.MSELoss()
-_huber = nn.HuberLoss()
 _bce = nn.BCEWithLogitsLoss()
 
 def focal_loss(logits, targets, gamma=None, label_smoothing=None):
@@ -103,13 +101,6 @@ def focal_loss(logits, targets, gamma=None, label_smoothing=None):
     return loss.mean()
 
 
-def _stick_regression_loss(pred, target, stick_loss_type):
-    """Compute regression loss for stick targets based on loss type."""
-    if stick_loss_type == "huber":
-        return _huber(pred, target)
-    return _mse(pred, target)
-
-
 def focal_bce(pred, target, gamma=None):
     if gamma is None: gamma = _btn_focal_gamma
     """Focal binary cross-entropy for multi-label classification.
@@ -123,48 +114,69 @@ def focal_bce(pred, target, gamma=None):
     return ((1 - pt).pow(gamma) * bce).mean()
 
 
-def compute_loss(preds, targets, stick_loss_type="mse",
-                 btn_loss_type="bce"):
+def _multiclass_prf(pred_idx, tgt_idx, n_classes):
+    """Macro-averaged precision, recall, F1 for multiclass predictions."""
+    tp = torch.zeros(n_classes, device=pred_idx.device)
+    fp = torch.zeros(n_classes, device=pred_idx.device)
+    fn = torch.zeros(n_classes, device=pred_idx.device)
+
+    correct = pred_idx == tgt_idx
+    wrong = ~correct
+    tp.scatter_add_(0, tgt_idx[correct], torch.ones_like(tgt_idx[correct], dtype=torch.float))
+    fp.scatter_add_(0, pred_idx[wrong], torch.ones_like(pred_idx[wrong], dtype=torch.float))
+    fn.scatter_add_(0, tgt_idx[wrong], torch.ones_like(tgt_idx[wrong], dtype=torch.float))
+
+    support = (tp + fn) > 0
+    prec = torch.where(tp + fp > 0, tp / (tp + fp), torch.zeros_like(tp))
+    rec = torch.where(support, tp / (tp + fn), torch.zeros_like(tp))
+    f1 = torch.where(prec + rec > 0, 2 * prec * rec / (prec + rec), torch.zeros_like(prec))
+
+    if support.any():
+        return f1[support].mean().item(), prec[support].mean().item(), rec[support].mean().item()
+    return 0.0, 0.0, 0.0
+
+
+def compute_loss(preds, targets, btn_loss_type="focal"):
     c_logits = preds["c_dir_logits"].float()
     btn_pred = preds["btn_logits"].float()
 
     cdir_tgt = targets["c_dir"].long()
     btn_tgt  = targets.get("btns", targets.get("btns_float")).float()
 
-    if stick_loss_type == "clusters":
-        main_pred = preds["main_xy"].float()
-        l_pred = preds["L_val"].float()
-        r_pred = preds["R_val"].float()
-        n_main = main_pred.size(-1)
-        n_shldr = l_pred.size(-1)
+    main_pred = preds["main_xy"].float()
+    l_pred = preds["L_val"].float()
+    r_pred = preds["R_val"].float()
+    n_main = main_pred.size(-1)
+    n_shldr = l_pred.size(-1)
 
-        main_cluster_tgt = targets["main_cluster"].long()
-        l_bin_tgt = targets["l_bin"].long()
-        r_bin_tgt = targets["r_bin"].long()
+    main_cluster_tgt = targets["main_cluster"].long()
+    l_bin_tgt = targets["l_bin"].long()
+    r_bin_tgt = targets["r_bin"].long()
 
-        loss_main = focal_loss(main_pred.reshape(-1, n_main),
-                               main_cluster_tgt.reshape(-1))
-        loss_l = focal_loss(l_pred.reshape(-1, n_shldr),
-                            l_bin_tgt.reshape(-1))
-        loss_r = focal_loss(r_pred.reshape(-1, n_shldr),
-                            r_bin_tgt.reshape(-1))
+    loss_main = focal_loss(main_pred.reshape(-1, n_main),
+                           main_cluster_tgt.reshape(-1))
+    loss_l = focal_loss(l_pred.reshape(-1, n_shldr),
+                        l_bin_tgt.reshape(-1))
+    loss_r = focal_loss(r_pred.reshape(-1, n_shldr),
+                        r_bin_tgt.reshape(-1))
 
-        main_top1 = (main_pred.reshape(-1, n_main).argmax(-1) == main_cluster_tgt.reshape(-1)).float().mean().item()
-        l_top1 = (l_pred.reshape(-1, n_shldr).argmax(-1) == l_bin_tgt.reshape(-1)).float().mean().item()
-        r_top1 = (r_pred.reshape(-1, n_shldr).argmax(-1) == r_bin_tgt.reshape(-1)).float().mean().item()
-    else:
-        main_tgt = torch.stack([targets["main_x"], targets["main_y"]], dim=-1)
-        l_tgt    = targets["l_shldr"]
-        r_tgt    = targets["r_shldr"]
+    main_pred_flat = main_pred.reshape(-1, n_main)
+    main_tgt_flat = main_cluster_tgt.reshape(-1)
+    main_pred_idx = main_pred_flat.argmax(-1)
+    main_top1 = (main_pred_idx == main_tgt_flat).float().mean().item()
+    main_f1, main_prec, main_rec = _multiclass_prf(main_pred_idx, main_tgt_flat, n_main)
 
-        main_top1, l_top1, r_top1 = 0.0, 0.0, 0.0
-
-        main_pred = preds["main_xy"].float()
-        l_pred    = preds["L_val"].squeeze(-1).float()
-        r_pred    = preds["R_val"].squeeze(-1).float()
-        loss_main = _stick_regression_loss(main_pred, main_tgt, stick_loss_type)
-        loss_l    = _stick_regression_loss(l_pred, l_tgt, stick_loss_type)
-        loss_r    = _stick_regression_loss(r_pred, r_tgt, stick_loss_type)
+    l_pred_flat = l_pred.reshape(-1, n_shldr)
+    l_tgt_flat = l_bin_tgt.reshape(-1)
+    r_pred_flat = r_pred.reshape(-1, n_shldr)
+    r_tgt_flat = r_bin_tgt.reshape(-1)
+    l_pred_idx = l_pred_flat.argmax(-1)
+    r_pred_idx = r_pred_flat.argmax(-1)
+    l_top1 = (l_pred_idx == l_tgt_flat).float().mean().item()
+    r_top1 = (r_pred_idx == r_tgt_flat).float().mean().item()
+    shldr_pred_idx = torch.cat([l_pred_idx, r_pred_idx])
+    shldr_tgt_idx = torch.cat([l_tgt_flat, r_tgt_flat])
+    shldr_f1, shldr_prec, shldr_rec = _multiclass_prf(shldr_pred_idx, shldr_tgt_idx, n_shldr)
 
     cdir_classes = cdir_tgt.argmax(dim=-1)
     c_logits_flat = c_logits.reshape(-1, c_logits.size(-1))
@@ -174,6 +186,7 @@ def compute_loss(preds, targets, stick_loss_type="mse",
 
     cdir_pred = c_logits_flat.argmax(dim=-1)
     cdir_acc  = (cdir_pred == cdir_flat).float().mean().item()
+    cdir_f1, cdir_prec, cdir_rec = _multiclass_prf(cdir_pred, cdir_flat, c_logits.size(-1))
 
     btn_prob = torch.sigmoid(btn_pred)
     btn_hat  = btn_prob > 0.5
@@ -205,6 +218,15 @@ def compute_loss(preds, targets, stick_loss_type="mse",
         "btn_f1":       btn_f1,
         "btn_precision": btn_precision,
         "btn_recall":    btn_recall,
+        "main_f1":       main_f1,
+        "main_precision": main_prec,
+        "main_recall":    main_rec,
+        "shldr_f1":       shldr_f1,
+        "shldr_precision": shldr_prec,
+        "shldr_recall":    shldr_rec,
+        "cdir_f1":       cdir_f1,
+        "cdir_precision": cdir_prec,
+        "cdir_recall":    cdir_rec,
         "cdir_active_acc": cdir_active_acc,
         "main_top1_acc":    main_top1,
         "shoulder_top1_acc": (l_top1 + r_top1) / 2,
@@ -225,7 +247,7 @@ def _compute_intervals(max_steps):
     )
 
 
-def get_datasets(data_dir, no_opp_inputs=False):
+def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=False):
     p = Path(data_dir)
     has_metadata = all((p / f).exists() for f in
                        ("norm_stats.json", "cat_maps.json", "file_index.json"))
@@ -238,6 +260,7 @@ def get_datasets(data_dir, no_opp_inputs=False):
             reaction_delay=REACTION_DELAY,
             split="train",
             no_opp_inputs=no_opp_inputs,
+            no_self_inputs=no_self_inputs,
         )
         val_ds = StreamingMeleeDataset(
             data_dir=data_dir,
@@ -245,6 +268,7 @@ def get_datasets(data_dir, no_opp_inputs=False):
             reaction_delay=REACTION_DELAY,
             split="val",
             no_opp_inputs=no_opp_inputs,
+            no_self_inputs=no_self_inputs,
         )
     else:
         print(f"  No metadata found, using raw-parquet dataset (slow startup)", flush=True)
@@ -254,6 +278,7 @@ def get_datasets(data_dir, no_opp_inputs=False):
             reaction_delay=REACTION_DELAY,
             split="train",
             no_opp_inputs=no_opp_inputs,
+            no_self_inputs=no_self_inputs,
         )
         val_ds = MeleeFrameDatasetWithDelay(
             parquet_dir=data_dir,
@@ -262,6 +287,7 @@ def get_datasets(data_dir, no_opp_inputs=False):
             split="val",
             norm_stats=train_ds.norm_stats,
             no_opp_inputs=no_opp_inputs,
+            no_self_inputs=no_self_inputs,
         )
     return train_ds, val_ds
 
@@ -283,10 +309,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               encoder_type=None, d_intra=None, dropout_override=None,
               k_query=None, intra_layers=None, scaled_emb=False,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
-              stick_loss=None, btn_loss=None,
-              no_opp_inputs=True,
-              n_stick_clusters=None, n_shoulder_bins=None,
-              autoregressive_heads=False):
+              btn_loss=None, no_opp_inputs=True, no_self_inputs=False,
+              n_stick_clusters=None, n_shoulder_bins=None):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -308,18 +332,16 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["attn_variant"] = attn_variant
     if n_kv_heads:
         overrides["n_kv_heads"] = n_kv_heads
-    if stick_loss:
-        overrides["stick_loss"] = stick_loss
     if btn_loss:
         overrides["btn_loss"] = btn_loss
     if no_opp_inputs:
         overrides["no_opp_inputs"] = True
+    if no_self_inputs:
+        overrides["no_self_inputs"] = True
     if n_stick_clusters is not None:
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
         overrides["n_shoulder_bins"] = n_shoulder_bins
-    if autoregressive_heads:
-        overrides["autoregressive_heads"] = True
     cfg = ModelConfig(max_seq_len=SEQUENCE_LENGTH, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
@@ -358,27 +380,31 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           dropout_override: float = None, k_query: int = None,
           intra_layers: int = None, scaled_emb: bool = False,
           pos_enc: str = None, attn_variant: str = None, n_kv_heads: int = None,
-          stick_loss: str = None, btn_loss: str = None,
+          btn_loss: str = None,
           no_opp_inputs: bool = True,
-          autoregressive_heads: bool = False,
+          no_self_inputs: bool = False,
           clusters_path: str = None,
           target_val_f1: float = None,
           max_wall_time: float = None,
           val_frac_override: float = None,
-          warmup_steps_override: int = None):
+          warmup_steps_override: int = None,
+          weight_decay_override: float = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
-    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC
+    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC, WEIGHT_DECAY
     if seq_len_override:
         SEQUENCE_LENGTH = seq_len_override
     if batch_size_override:
         BATCH_SIZE = batch_size_override
     if val_frac_override is not None:
         VAL_FRAC = val_frac_override
+    if weight_decay_override is not None:
+        WEIGHT_DECAY = weight_decay_override
 
     print(f"Loading dataset from {data_dir} ...", flush=True)
-    ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs)
+    ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs,
+                              no_self_inputs=no_self_inputs)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
@@ -413,21 +439,17 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     actual_lr = lr or LEARNING_RATE
 
     print(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}", flush=True)
-    stick_centers_np, shoulder_centers_np = None, None
-    if stick_loss == "clusters":
-        from dataset import _load_cluster_centers
-        _cp = Path(clusters_path) if clusters_path else None
-        stick_centers_np, shoulder_centers_np = _load_cluster_centers(
-            data_dir=Path(data_dir), clusters_path=_cp)
-        if stick_centers_np is None:
-            raise RuntimeError(
-                f"stick_loss='clusters' but no stick_clusters.json found "
-                f"(checked: {clusters_path}, {data_dir}, data/full/)")
-        n_stick_clusters = len(stick_centers_np)
-        n_shoulder_bins = len(shoulder_centers_np)
-        print(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder", flush=True)
-    else:
-        n_stick_clusters, n_shoulder_bins = None, None
+    from dataset import _load_cluster_centers
+    _cp = Path(clusters_path) if clusters_path else None
+    stick_centers_np, shoulder_centers_np = _load_cluster_centers(
+        data_dir=Path(data_dir), clusters_path=_cp)
+    if stick_centers_np is None:
+        raise RuntimeError(
+            f"No stick_clusters.json found "
+            f"(checked: {clusters_path}, {data_dir}, data/full/)")
+    n_stick_clusters = len(stick_centers_np)
+    n_shoulder_bins = len(shoulder_centers_np)
+    print(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder", flush=True)
 
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
                            num_layers_override=num_layers_override,
@@ -436,11 +458,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            intra_layers=intra_layers, scaled_emb=scaled_emb,
                            pos_enc=pos_enc, attn_variant=attn_variant,
                            n_kv_heads=n_kv_heads,
-                           stick_loss=stick_loss, btn_loss=btn_loss,
-                           no_opp_inputs=no_opp_inputs,
+                           btn_loss=btn_loss, no_opp_inputs=no_opp_inputs,
+                           no_self_inputs=no_self_inputs,
                            n_stick_clusters=n_stick_clusters,
-                           n_shoulder_bins=n_shoulder_bins,
-                           autoregressive_heads=autoregressive_heads)
+                           n_shoulder_bins=n_shoulder_bins)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})", flush=True)
     print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -520,7 +541,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     _AVG_KEYS = ["total", "loss_main", "loss_l", "loss_r", "loss_cdir",
                  "loss_btn", "cdir_acc", "btn_acc", "btn_f1",
-                 "btn_precision", "btn_recall", "cdir_active_acc",
+                 "btn_precision", "btn_recall",
+                 "main_f1", "main_precision", "main_recall",
+                 "shldr_f1", "shldr_precision", "shldr_recall",
+                 "cdir_f1", "cdir_precision", "cdir_recall",
+                 "cdir_active_acc",
                  "main_top1_acc", "shoulder_top1_acc", "grad_norm"]
     _run_sums = {k: 0.0 for k in _AVG_KEYS}
     _run_ct = 0
@@ -551,8 +576,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 preds = model(state)
 
             metrics, task_losses = compute_loss(
-                preds, target, stick_loss_type=cfg.stick_loss,
-                btn_loss_type=cfg.btn_loss)
+                preds, target, btn_loss_type=cfg.btn_loss)
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
             _oom_retries += 1
@@ -591,11 +615,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
         _run_sums["total"]     += total_loss.item()
         _run_sums["grad_norm"] += grad_norm
-        for _mk in ("loss_main", "loss_l", "loss_r", "loss_cdir",
-                     "loss_btn", "cdir_acc", "btn_acc", "btn_f1",
-                     "btn_precision", "btn_recall", "cdir_active_acc",
-                     "main_top1_acc", "shoulder_top1_acc"):
-            _run_sums[_mk] += metrics[_mk]
+        for _mk in _AVG_KEYS:
+            if _mk not in ("total", "grad_norm"):
+                _run_sums[_mk] += metrics[_mk]
         _run_ct += 1
 
         wandb.log({
@@ -610,6 +632,15 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             "train/btn_f1":    metrics["btn_f1"],
             "train/btn_precision": metrics["btn_precision"],
             "train/btn_recall":    metrics["btn_recall"],
+            "train/main_f1":       metrics["main_f1"],
+            "train/main_precision": metrics["main_precision"],
+            "train/main_recall":    metrics["main_recall"],
+            "train/shldr_f1":       metrics["shldr_f1"],
+            "train/shldr_precision": metrics["shldr_precision"],
+            "train/shldr_recall":    metrics["shldr_recall"],
+            "train/cdir_f1":       metrics["cdir_f1"],
+            "train/cdir_precision": metrics["cdir_precision"],
+            "train/cdir_recall":    metrics["cdir_recall"],
             "train/cdir_active_acc": metrics["cdir_active_acc"],
             "train/main_top1_acc":    metrics["main_top1_acc"],
             "train/shoulder_top1_acc": metrics["shoulder_top1_acc"],
@@ -639,7 +670,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 f"btn={metrics['loss_btn']:.5f} "
                 f"bf1={metrics['btn_f1']:.1%} "
                 f"bP={metrics['btn_precision']:.1%} bR={metrics['btn_recall']:.1%} "
-                f"cact={metrics['cdir_active_acc']:.1%} "
+                f"mf1={metrics['main_f1']:.1%} "
+                f"sf1={metrics['shldr_f1']:.1%} "
+                f"cf1={metrics['cdir_f1']:.1%} "
                 f"gnorm={grad_norm:.2f} "
                 f"lr={scheduler.get_last_lr()[0]:.2e} "
                 f"({sps:.1f} step/s)",
@@ -651,7 +684,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             model.eval()
             _VAL_KEYS = ["total", "loss_main", "loss_l", "loss_r",
                          "loss_cdir", "loss_btn", "cdir_acc", "btn_acc",
-                         "btn_f1", "btn_precision", "btn_recall", "cdir_active_acc",
+                         "btn_f1", "btn_precision", "btn_recall",
+                         "main_f1", "main_precision", "main_recall",
+                         "shldr_f1", "shldr_precision", "shldr_recall",
+                         "cdir_f1", "cdir_precision", "cdir_recall",
+                         "cdir_active_acc",
                          "main_top1_acc", "shoulder_top1_acc"]
             val_sums = {k: 0.0 for k in _VAL_KEYS}
             val_ct = 0
@@ -664,17 +701,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     with autocast("cuda", dtype=AMP_DTYPE):
                         vpreds = model(vs)
                     vm, vtl = compute_loss(vpreds, vt,
-                                           stick_loss_type=cfg.stick_loss,
                                            btn_loss_type=cfg.btn_loss)
                     batch_total = sum(t.item() for t in vtl)
                     if math.isfinite(batch_total):
                         val_sums["total"] += batch_total
-                        for _vk in ("loss_main", "loss_l", "loss_r",
-                                     "loss_cdir", "loss_btn", "cdir_acc", "btn_acc",
-                                     "btn_f1", "btn_precision", "btn_recall",
-                                     "cdir_active_acc",
-                                     "main_top1_acc", "shoulder_top1_acc"):
-                            val_sums[_vk] += vm[_vk]
+                        for _vk in _VAL_KEYS:
+                            if _vk != "total":
+                                val_sums[_vk] += vm[_vk]
                         val_ct += 1
                     if val_ct >= MAX_VAL_BATCHES:
                         break
@@ -683,9 +716,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 val_avg = {f"val/{k}": val_sums[k] / val_ct for k in _VAL_KEYS}
                 wandb.log(val_avg, step=step)
                 print(f"  -- val total={val_avg['val/total']:.4f}  "
-                      f"bf1={val_avg['val/btn_f1']:.1%}  "
+                      f"bf1={val_avg['val/btn_f1']:.1%} "
                       f"bP={val_avg['val/btn_precision']:.1%} bR={val_avg['val/btn_recall']:.1%}  "
-                      f"cact={val_avg['val/cdir_active_acc']:.1%}  "
+                      f"mf1={val_avg['val/main_f1']:.1%} "
+                      f"sf1={val_avg['val/shldr_f1']:.1%} "
+                      f"cf1={val_avg['val/cdir_f1']:.1%}  "
                       f"(batches={val_ct})", flush=True)
                 cur_val_f1 = val_avg.get('val/btn_f1', 0.0)
                 if cur_val_f1 > best_val_f1:
@@ -763,7 +798,7 @@ if __name__ == "__main__":
                         choices=list(MODEL_PRESETS.keys()),
                         help="Model size preset (default: medium ~32M params)")
     parser.add_argument("--lr",         type=float, default=None,
-                        help="Learning rate override (default: 1e-3)")
+                        help="Learning rate override (default: 5e-5)")
     parser.add_argument("--run-name",   type=str, default=None,
                         help="Wandb run name (auto-generated if not set)")
     parser.add_argument("--wandb-tags", type=str, default=None,
@@ -782,7 +817,7 @@ if __name__ == "__main__":
     parser.add_argument("--d-intra",   type=int, default=None,
                         help="Intra-frame encoder width (default: 256)")
     parser.add_argument("--dropout",   type=float, default=None,
-                        help="Dropout rate (default: 0.0)")
+                        help="Dropout rate (default: 0.1)")
     parser.add_argument("--k-query",   type=int, default=None,
                         help="Number of query tokens in intra-frame attention")
     parser.add_argument("--intra-layers", type=int, default=None,
@@ -797,18 +832,17 @@ if __name__ == "__main__":
                         help="Attention variant")
     parser.add_argument("--n-kv-heads", type=int, default=None,
                         help="Number of KV heads for GQA (default: nhead)")
-    parser.add_argument("--clusters-path", type=str, default=None,
-                        help="Path to stick_clusters.json (default: data/full/stick_clusters.json)")
-    parser.add_argument("--stick-loss", type=str, default=None,
-                        choices=["mse", "huber", "clusters"],
-                        help="Stick loss type")
+    parser.add_argument("--clusters-path", type=str, default="data/full/stick_clusters.json",
+                        help="Path to stick_clusters.json")
     parser.add_argument("--btn-loss", type=str, default=None,
                         choices=["bce", "focal"],
                         help="Button loss type (default: focal)")
     parser.add_argument("--opp-inputs", action="store_true",
                         help="Include opponent controller inputs (default: excluded)")
-    parser.add_argument("--autoregressive-heads", action="store_true",
-                        help="Enable autoregressive output heads (each head conditions on previous)")
+    parser.add_argument("--no-self-inputs", action="store_true",
+                        help="Omit self controller inputs; model learns purely from game state")
+    parser.add_argument("--weight-decay", type=float, default=None,
+                        help="Weight decay (default: 1e-2)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
     parser.add_argument("--focal-gamma", type=float, default=FOCAL_GAMMA,
@@ -865,13 +899,13 @@ if __name__ == "__main__":
         pos_enc=args.pos_enc,
         attn_variant=args.attn_variant,
         n_kv_heads=args.n_kv_heads,
-        stick_loss=args.stick_loss,
         btn_loss=args.btn_loss,
         no_opp_inputs=not args.opp_inputs,
-        autoregressive_heads=args.autoregressive_heads,
+        no_self_inputs=args.no_self_inputs,
         clusters_path=args.clusters_path,
         target_val_f1=args.target_val_f1,
         max_wall_time=args.max_wall_time,
         val_frac_override=args.val_frac,
         warmup_steps_override=args.warmup_steps,
+        weight_decay_override=args.weight_decay,
     )

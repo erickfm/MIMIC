@@ -21,12 +21,7 @@ PORT_B=28750
 MACHINE_C="root@38.65.239.56"
 PORT_C=45107
 
-COMMON="--data-dir data/wavedash_v2 --model shallow --pos-enc rope \
-  --stick-loss clusters --clusters-path data/full/stick_clusters.json \
-  --label-smoothing 0.0 --autoregressive-heads --seq-len 30 \
-  --lr 5e-5 --max-steps 20000 \
-  --target-val-f1 0.985 --max-wall-time 10000 --val-frac 0.01 \
-  --wandb-group wavedash-speed2"
+COMMON="--no-compile --wandb-group full-sweep --max-wall-time 120000"
 
 MACHINE="${1:?Usage: launch.sh MACHINE GPU RUN_NAME [EXTRA_ARGS]}"
 GPU="${2:?Usage: launch.sh MACHINE GPU RUN_NAME [EXTRA_ARGS]}"

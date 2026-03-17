@@ -88,7 +88,8 @@ def categorical_ids(prefix: str) -> List[str]:
 # ---------------------------------------------------------------------------
 # Feature-group spec + walking
 # ---------------------------------------------------------------------------
-def build_feature_groups(no_opp_inputs: bool = False) -> Dict[str, Dict]:
+def build_feature_groups(no_opp_inputs: bool = False,
+                         no_self_inputs: bool = False) -> Dict[str, Dict]:
     opp_cats = categorical_ids("opp")
     if not no_opp_inputs:
         opp_cats = opp_cats + ["opp_c_dir"]
@@ -121,33 +122,47 @@ def build_feature_groups(no_opp_inputs: bool = False) -> Dict[str, Dict]:
         opp_nana_group["buttons"] = btn_cols("opp_nana")
         opp_nana_group["analog"]  = analog_cols("opp_nana")
 
+    self_cats = categorical_ids("self")
+    if not no_self_inputs:
+        self_cats = self_cats + ["self_c_dir"]
+
+    self_group: Dict[str, Any] = {
+        "categorical": self_cats,
+        "flags":   flags("self"),
+        "numeric": numeric_state("self"),
+        "action_elapsed": ["self_action_frame"],
+    }
+    if not no_self_inputs:
+        self_group["buttons"] = btn_cols("self")
+        self_group["analog"]  = analog_cols("self")
+
+    self_nana_cats = ["self_nana_character", "self_nana_action"]
+    if not no_self_inputs:
+        self_nana_cats = self_nana_cats + ["self_nana_c_dir"]
+
+    self_nana_group: Dict[str, Any] = {
+        "categorical": self_nana_cats,
+        "flags":   flags("self_nana") + ["self_nana_present"],
+        "numeric": numeric_state("self_nana") + [
+            "self_nana_stock", "self_nana_jumps_left",
+            "self_nana_hitlag_left", "self_nana_hitstun_left",
+            "self_nana_invuln_left",
+        ],
+        "action_elapsed": ["self_nana_action_frame"],
+    }
+    if not no_self_inputs:
+        self_nana_group["buttons"] = btn_cols("self_nana")
+        self_nana_group["analog"]  = analog_cols("self_nana")
+
     return {
         "global": {
             "numeric": ["distance", "frame", *STAGE_GEOM_COLS],
             "categorical": ["stage"],
         },
         "players": {
-            "self": {
-                "categorical": categorical_ids("self") + ["self_c_dir"],
-                "buttons": btn_cols("self"),
-                "flags":   flags("self"),
-                "analog":  analog_cols("self"),
-                "numeric": numeric_state("self"),
-                "action_elapsed": ["self_action_frame"],
-            },
+            "self": self_group,
             "opp": opp_group,
-            "self_nana": {
-                "categorical": ["self_nana_character", "self_nana_action", "self_nana_c_dir"],
-                "buttons": btn_cols("self_nana"),
-                "flags":   flags("self_nana") + ["self_nana_present"],
-                "analog":  analog_cols("self_nana"),
-                "numeric": numeric_state("self_nana") + [
-                    "self_nana_stock", "self_nana_jumps_left",
-                    "self_nana_hitlag_left", "self_nana_hitstun_left",
-                    "self_nana_invuln_left",
-                ],
-                "action_elapsed": ["self_nana_action_frame"],
-            },
+            "self_nana": self_nana_group,
             "opp_nana": opp_nana_group,
         },
         "projectiles": {
