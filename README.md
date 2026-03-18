@@ -18,33 +18,31 @@ Dolphin via libmelee and drives a controller in real time.
 ## Controller Mapping
 
 The GameCube controller has five input groups. Each maps to a dedicated
-prediction head in `model.py`:
+prediction head in `model.py`. Heads are chained autoregressively
+(L → R → cdir → main → buttons) so each head conditions on previous
+predictions:
 
 | Physical Input | Model Head | Dims | Output | Loss | Notes |
 |---|---|---|---|---|---|
-| Main Stick (x, y) | `main_head` | 2 | Raw (clamp at inference) | MSE | Center 0.5; deadzone ~0.28, tilt < 0.65, smash > 0.8 |
-| L Trigger (analog) | `L_head` | 1 | Raw (clamp at inference) | MSE | 0 = released, 1 = full press |
-| R Trigger (analog) | `R_head` | 1 | Raw (clamp at inference) | MSE | 0 = released, 1 = full press |
+| Main Stick (x, y) | `main_head` | 30 clusters | Logits | Focal CE | K-means cluster classification over stick positions |
+| L Trigger (analog) | `L_head` | 4 bins | Logits | Focal CE | Discretized into shoulder bins via k-means |
+| R Trigger (analog) | `R_head` | 4 bins | Logits | Focal CE | Discretized into shoulder bins via k-means |
 | C-Stick | `cdir_head` | 5 | Logits | Focal CE | Neutral / Up / Down / Left / Right |
 | Digital Buttons (12) | `btn_head` | 12 | Logits | BCE | A, B, X, Y, Z, L, R, Start, D-pad x4 |
-
-Regression heads output unbounded values during training (no Sigmoid).
-MSE naturally pushes outputs into [0, 1] since all targets live there.
-At inference, outputs are clamped to [0, 1].
 
 ## Architecture
 
 ```
 Slippi Frame ──► HybridFrameEncoder (16 entity tokens + attention) ──► 768-d per-frame vector
                                                                             │
-60-frame window ──► + Learned Positional Embeddings ────────────────────────┘
+60-frame window ──► + RoPE Positional Encoding ────────────────────────────┘
                          │
                     4× Pre-Norm Causal Transformer Blocks
                          │
-                    All T hidden states (autoregressive)
+                    All T hidden states (autoregressive chain)
                          │
               ┌──────────┼──────────┬───────────┐
-          main_xy    L / R val   c_dir_5way   btn_12way
+          main_cluster  L/R bin   c_dir_5way   btn_12way
 ```
 
 ### Phase 1 -- Frame Understanding (`frame_encoder.py`)
@@ -70,19 +68,19 @@ positions 0..T. This is where the model learns sequential patterns:
 approach sequences, attack commitments, recovery trajectories, combo
 follow-ups. 60 frames captures most neutral interactions and short combos.
 
-The backbone supports multiple positional encoding schemes (`--pos-enc`):
-learned (default), RoPE, sinusoidal, and ALiBi. Flash Attention via
-`F.scaled_dot_product_attention(is_causal=True)` is used for speed;
-`torch.compile` fuses the full forward pass.
+The backbone uses RoPE (Rotary Position Embeddings) by default, encoding
+relative position directly into attention via rotation matrices. Flash
+Attention via `F.scaled_dot_product_attention(is_causal=True)` is used for
+speed; `torch.compile` fuses the full forward pass.
 
 ### Phase 3 -- Action Prediction (`model.py` PredictionHeads)
 
-All T hidden states are fed into five independent prediction heads, each
-with a 256-d hidden layer and GELU activation. Every position in the
-sequence predicts the controller state R frames ahead, providing T×
-more training signal than predicting from only the last position. This is
-autoregressive training analogous to GPT-style next-token prediction
-where the "token" is a full controller state.
+All T hidden states are fed through an autoregressive chain of prediction
+heads. The chain order is L → R → cdir → main → buttons, where each
+subsequent head receives the previous head's predictions (detached) as
+conditioning input. Every position in the sequence predicts the controller
+state R frames ahead, providing T× more training signal than predicting
+from only the last position.
 
 ### Weight Initialization
 
@@ -130,22 +128,15 @@ down, left, right). `features.encode_cstick_dir` uses a deadzone and
 cardinal-dominance rule that matches the game engine's behavior. Diagonal
 inputs are rare and resolve to one cardinal direction.
 
-### Main Stick 2D Regression
+### Main Stick Cluster Classification
 
-Raw MSE over [0,1] targets is the simplest approach. Melee has
-discontinuous stick zones (deadzone ~0.28, tilt ~0.3-0.65, smash > 0.8)
-so MSE treats all positional errors equally regardless of zone boundaries.
-This is adequate for initial R&D; a zone-aware loss or discretization is
-a future improvement.
-
-### No Sigmoid on Regression Heads
-
-Trigger and stick targets are overwhelmingly bimodal (0.0 or 1.0) with
-rare intermediate values. With Sigmoid, predicting 0.0 requires logits
-at -inf and 1.0 requires +inf -- exactly the most common targets sit
-where gradients vanish. Without Sigmoid, the model outputs 0.0 or 1.0
-directly with clean, proportional MSE gradients. Under BF16, raw values
-near 0 and 1 are perfectly representable.
+Raw MSE regression on stick (x, y) causes base-rate collapse: the model
+learns to predict neutral (0.5, 0.5) on every frame because that minimizes
+squared error against the peaked distribution of stick positions. Discrete
+cluster classification with focal loss treats each meaningful stick region
+as a separate class, giving the model proper gradients on rare but critical
+inputs (smash attacks, wavedash angles, etc.). 30 clusters are determined
+via k-means++ on the training data.
 
 ### Dead Button Dimensions
 
@@ -155,24 +146,16 @@ wastes a small amount of head capacity.
 
 ## Future Improvements
 
-- **Combine Huber + no-opp-inputs + ctx-180**: The best stick loss (Huber)
-  hasn't been tested with the best feature config (no-opp-inputs) at the
-  best context length (180 frames). This combination should push metrics
-  further.
-- **More data**: All experiments used 2M samples. Scaling to the full
-  dataset (~100M+ frames) should help with the cdir_active ceiling.
-- **Better c-stick modeling**: cdir_active_acc at 71.7% is the weakest
-  link. Consider focal loss for c-stick (rare active frames), or a
-  hierarchical predict-then-direction approach.
-- **Loss reweighting**: Task losses have different magnitudes (MSE on
-  near-zero L/R is tiny vs Focal CE on c-stick). Normalizing gradient
-  contributions across heads could improve joint learning.
-- **Main stick zone-aware loss**: Discretize into Melee-relevant zones or
-  use a mixture distribution that captures the multi-modal nature of stick
-  positions (center cluster, cardinal extremes).
+- **More data**: Scaling to the full dataset (~100M+ frames) should improve
+  generalization beyond single-behavior tasks.
+- **Better c-stick modeling**: cdir_active_acc has room to improve.
+  Hierarchical predict-then-direction or sampling-based approaches may help.
 - **Multi-step prediction**: Predicting frames T+1 through T+K
   simultaneously could help the model learn action planning and committal
   sequences.
+- **Opponent modeling**: Currently `no_opp_inputs=True` drops opponent
+  controller inputs from the feature set. Re-introducing them with a
+  better conditioning mechanism could improve reactive play.
 
 ## Model Presets
 
@@ -198,9 +181,11 @@ Pass `--model <preset>` to `train.py` for scaling experiments:
 | Feedforward dim | 3072 (4x expansion) |
 | Frame encoder | hybrid16 (16 entity tokens) |
 | Intra-frame width | 256 |
-| Batch size | 128 |
-| Learning rate | 8e-4 |
-| Training samples | 2M (~1 hr on 4090) |
+| Positional encoding | RoPE |
+| Batch size | 256 |
+| Learning rate | 5e-5 |
+| Warmup | 5% of total steps |
+| Dropout | 0.1 |
 | AMP dtype | bfloat16 |
 | Parameters | ~32M (medium + hybrid16) |
 | GPU tested | RTX 4090 24 GB |
@@ -210,22 +195,23 @@ Pass `--model <preset>` to `train.py` for scaling experiments:
 ```
 .
 ├── train.py            # Training loop & checkpointing
-├── preprocess.py       # Compute metadata (norm stats, categorical maps, file index)
 ├── inference.py        # Real-time single-window inference via libmelee
 ├── model.py            # FramePredictor + Transformer heads
 ├── frame_encoder.py    # Intra-frame cross-attention encoder
 ├── features.py         # Shared feature engineering (columns, preprocessing, tensors)
-├── dataset.py          # Dataset classes (raw parquet debug + streaming)
+├── dataset.py          # Streaming tensor shard dataset for training
 ├── cat_maps.py         # Melee enum → dense index maps
 ├── setup.sh                     # One-command setup for fresh machines
-├── upload_dataset.py            # Package parquets into tar shards and upload to HF
+├── upload_dataset.py            # Pretokenize parquets → tensor shards + upload to HF
+├── tensorize.py                 # Optional: pre-window shards for max local throughput
+├── build_clusters.py            # K-means stick/shoulder cluster centers
 ├── generate_wavedash_replay.py  # Synthetic wavedash data generator (libmelee)
+├── eval.py                      # Validation metrics on a checkpoint
 ├── closedloop_debug.py          # Frame-by-frame tensor comparison (train vs inference)
 ├── diagnose.py                  # Offline inference diagnostic tool
 ├── checkpoints/                 # Saved *.pt files
 ├── docs/                        # Research notes and session logs
-└── data/                        # Slippi parquet files + source replays
-    └── source_replays/          # Original .slp files for reproduction
+└── data/                        # Pretokenized tensor shards + metadata
 ```
 
 ## Quick Start (New Machine)
@@ -236,8 +222,9 @@ Spin up any machine with an NVIDIA GPU, clone the repo, and run:
 bash setup.sh --run
 ```
 
-This installs deps, downloads the dataset from HuggingFace, runs
-preprocessing if needed, and starts a 1-epoch training run.
+This installs deps, downloads pretokenized tensor shards from HuggingFace,
+and starts a training run. Data is ready to train immediately -- no
+preprocessing steps needed.
 
 For scaling experiments:
 
@@ -246,8 +233,8 @@ bash setup.sh --run --model small     # 14M param model
 bash setup.sh --run --model tiny      # 3.5M param model
 ```
 
-The full dataset is hosted at [erickfm/frame-melee](https://huggingface.co/datasets/erickfm/frame-melee) (~94k replays, 86 GB as tar shards).
-A smaller 2k-replay subset is at [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) for quick experiments.
+The full dataset is hosted at [erickfm/frame-melee](https://huggingface.co/datasets/erickfm/frame-melee) (~94k replays, pretokenized tensor shards).
+A smaller subset is at [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) for quick experiments.
 
 ## Manual Setup
 
@@ -259,24 +246,23 @@ pip install torch numpy pandas pyarrow wandb huggingface_hub melee==0.45.1 typin
 
 ## Data
 
-Two datasets are hosted on HuggingFace:
+Two datasets are hosted on HuggingFace as pretokenized tensor shards:
 
-| Dataset | Replays | Parquets | Size | Use |
-|---|---|---|---|---|
-| [erickfm/frame-melee](https://huggingface.co/datasets/erickfm/frame-melee) | ~94k | 188k | ~86 GB (tar shards) | Full training |
-| [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) | ~1k | 2k | ~780 MB | Quick experiments |
+| Dataset | Replays | Size | Use |
+|---|---|---|---|
+| [erickfm/frame-melee](https://huggingface.co/datasets/erickfm/frame-melee) | ~94k | ~86 GB | Full training |
+| [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) | ~1k | ~780 MB | Quick experiments |
 
-The full dataset is stored as tar shards (`shard_000.tar` ... `shard_NNN.tar`) for efficient
-download. `setup.sh` automatically extracts them. Both datasets include precomputed metadata:
+Each dataset contains `.pt` shard files with pretokenized game data (all
+preprocessing, normalization, and target building done ahead of time),
+plus metadata:
 
 | File | Description |
 |---|---|
-| `cat_maps.json` | Dynamic categorical mappings (ports, costumes, projectile subtypes) |
+| `tensor_manifest.json` | Shard list, game counts, train/val split |
 | `norm_stats.json` | Per-column mean/std for feature normalization |
-| `file_index.json` | Frame counts per file (train/val split + length estimation) |
-
-Parquet files are generated from Slippi `.slp` replays using
-[slippi-frame-extractor](https://github.com/erickfm/slippi-frame-extractor).
+| `cat_maps.json` | Dynamic categorical mappings (ports, costumes, projectile subtypes) |
+| `stick_clusters.json` | Stick position and shoulder trigger cluster centers |
 
 Download the full dataset:
 
@@ -291,8 +277,6 @@ python3 -c "
 from huggingface_hub import snapshot_download
 snapshot_download('erickfm/frame-melee', repo_type='dataset', local_dir='data/full')
 "
-# Extract tar shards
-for f in data/full/shard_*.tar; do tar xf "$f" -C data/full && rm "$f"; done
 ```
 
 For the smaller subset:
@@ -301,19 +285,16 @@ For the smaller subset:
 bash setup.sh --repo erickfm/frame-melee-subset --data-dir data/subset
 ```
 
-To regenerate metadata from raw parquets:
-
-```bash
-python3 preprocess.py --data-dir data/full
-```
+Source parquet files are generated from Slippi `.slp` replays using
+[slippi-frame-extractor](https://github.com/erickfm/slippi-frame-extractor).
 
 ## Training
 
-Point `--data-dir` at a parquet directory (auto-detects metadata for
-streaming, falls back to slow in-memory loading):
+Point `--data-dir` at a directory containing tensor shards
+(`tensor_manifest.json` or `tensor_meta.json`):
 
 ```bash
-# Default: medium model ~32M params, hybrid16 encoder, 2M samples (~1 hr)
+# Default: medium model ~32M params, hybrid16 encoder
 python3 train.py
 
 # Full epoch on the full dataset
@@ -326,26 +307,21 @@ python3 train.py --max-steps 80000
 python3 train.py --model small
 python3 train.py --model base
 
-# Quick experiment on the 2k subset
+# Quick experiment on the subset
 python3 train.py --data-dir data/subset --model tiny --max-samples 0 --epochs 1
 
 # Resume from checkpoint
 python3 train.py --resume checkpoints/step_XXXXXX.pt
 
-# Experiment with loss functions
-python3 train.py --stick-loss huber            # Robust stick regression
-python3 train.py --stick-loss discrete         # Discretised stick (32x32 bins)
-python3 train.py --btn-loss focal              # Focal BCE for buttons
-
 # Positional encoding variants
-python3 train.py --pos-enc rope                # Rotary position embeddings
+python3 train.py --pos-enc learned        # Learned positional embeddings
 
 # Disable torch.compile for debugging
 python3 train.py --no-compile --debug
 ```
 
 Logging, validation, and checkpoint intervals auto-scale as a percentage
-of total steps (~0.5% log, ~5% val/checkpoint, ~1% warmup).
+of total steps (~0.5% log, ~5% val/checkpoint, ~5% warmup).
 
 ## Inference
 

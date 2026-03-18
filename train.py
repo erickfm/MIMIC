@@ -25,7 +25,7 @@ from pathlib import Path
 
 import wandb
 
-from dataset import MeleeFrameDatasetWithDelay, StreamingMeleeDataset
+from dataset import StreamingMeleeDataset
 from model   import FramePredictor, ModelConfig, MODEL_PRESETS
 
 # ---------------------------------------------------------------------------
@@ -263,51 +263,23 @@ def _compute_intervals(max_steps):
 
 def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=False,
                   rank=0, world_size=1):
-    p = Path(data_dir)
-    has_metadata = all((p / f).exists() for f in
-                       ("norm_stats.json", "cat_maps.json", "file_index.json"))
-
-    if has_metadata:
-        _log(f"  Using streaming dataset from {data_dir}")
-        train_ds = StreamingMeleeDataset(
-            data_dir=data_dir,
-            sequence_length=SEQUENCE_LENGTH,
-            reaction_delay=REACTION_DELAY,
-            split="train",
-            no_opp_inputs=no_opp_inputs,
-            no_self_inputs=no_self_inputs,
-            rank=rank,
-            world_size=world_size,
-        )
-        val_ds = StreamingMeleeDataset(
-            data_dir=data_dir,
-            sequence_length=SEQUENCE_LENGTH,
-            reaction_delay=REACTION_DELAY,
-            split="val",
-            no_opp_inputs=no_opp_inputs,
-            no_self_inputs=no_self_inputs,
-            rank=rank,
-            world_size=world_size,
-        )
-    else:
-        _log(f"  No metadata found, using raw-parquet dataset (slow startup)")
-        train_ds = MeleeFrameDatasetWithDelay(
-            parquet_dir=data_dir,
-            sequence_length=SEQUENCE_LENGTH,
-            reaction_delay=REACTION_DELAY,
-            split="train",
-            no_opp_inputs=no_opp_inputs,
-            no_self_inputs=no_self_inputs,
-        )
-        val_ds = MeleeFrameDatasetWithDelay(
-            parquet_dir=data_dir,
-            sequence_length=SEQUENCE_LENGTH,
-            reaction_delay=REACTION_DELAY,
-            split="val",
-            norm_stats=train_ds.norm_stats,
-            no_opp_inputs=no_opp_inputs,
-            no_self_inputs=no_self_inputs,
-        )
+    _log(f"  Using streaming dataset from {data_dir}")
+    train_ds = StreamingMeleeDataset(
+        data_dir=data_dir,
+        sequence_length=SEQUENCE_LENGTH,
+        reaction_delay=REACTION_DELAY,
+        split="train",
+        rank=rank,
+        world_size=world_size,
+    )
+    val_ds = StreamingMeleeDataset(
+        data_dir=data_dir,
+        sequence_length=SEQUENCE_LENGTH,
+        reaction_delay=REACTION_DELAY,
+        split="val",
+        rank=rank,
+        world_size=world_size,
+    )
     return train_ds, val_ds
 
 def get_dataloader(ds, shuffle=True, persistent=True, sampler=None):
@@ -494,9 +466,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         _log(f"  LR scaled by {world_size}x: {lr or LEARNING_RATE} → {actual_lr}")
 
     _log(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}")
-    from dataset import _load_cluster_centers
+    from features import load_cluster_centers
     _cp = Path(clusters_path) if clusters_path else None
-    stick_centers_np, shoulder_centers_np = _load_cluster_centers(
+    stick_centers_np, shoulder_centers_np = load_cluster_centers(
         data_dir=Path(data_dir), clusters_path=_cp)
     if stick_centers_np is None:
         raise RuntimeError(

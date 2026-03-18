@@ -35,7 +35,7 @@ import pandas as pd
 import torch
 
 import features as F
-from dataset import MeleeFrameDatasetWithDelay, _load_cluster_centers
+from features import load_cluster_centers
 
 
 def parse_args():

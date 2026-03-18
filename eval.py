@@ -20,7 +20,8 @@ import torch.nn.functional as F
 from torch.amp import autocast
 from torch.utils.data import DataLoader
 
-from dataset import StreamingMeleeDataset, MeleeFrameDatasetWithDelay, _load_cluster_centers
+from dataset import StreamingMeleeDataset
+from features import load_cluster_centers
 from model import FramePredictor, ModelConfig
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -216,7 +217,7 @@ def evaluate(checkpoint_path: str, data_dir: str, max_batches: int = 500,
     stick_centers = np.array(ckpt.get("stick_centers", []), dtype=np.float32)
     if len(stick_centers) == 0:
         cp = Path(data_dir) / "stick_clusters.json"
-        sc_np, _ = _load_cluster_centers(data_dir=Path(data_dir), clusters_path=cp)
+        sc_np, _ = load_cluster_centers(data_dir=Path(data_dir), clusters_path=cp)
         stick_centers = sc_np
 
     step = ckpt.get("global_step", "?")
@@ -227,21 +228,9 @@ def evaluate(checkpoint_path: str, data_dir: str, max_batches: int = 500,
     _train_mod.SEQUENCE_LENGTH = seq_len
     _train_mod.BATCH_SIZE = batch_size
 
-    p = Path(data_dir)
-    has_metadata = all((p / f).exists() for f in
-                       ("norm_stats.json", "cat_maps.json", "file_index.json"))
-    nsi = getattr(cfg, 'no_self_inputs', False)
-    if has_metadata:
-        val_ds = StreamingMeleeDataset(
-            data_dir=data_dir, sequence_length=seq_len,
-            reaction_delay=1, split="val", no_opp_inputs=cfg.no_opp_inputs,
-            no_self_inputs=nsi)
-    else:
-        from dataset import MeleeFrameDatasetWithDelay
-        val_ds = MeleeFrameDatasetWithDelay(
-            parquet_dir=data_dir, sequence_length=seq_len,
-            reaction_delay=1, split="val", no_opp_inputs=cfg.no_opp_inputs,
-            no_self_inputs=nsi)
+    val_ds = StreamingMeleeDataset(
+        data_dir=data_dir, sequence_length=seq_len,
+        reaction_delay=1, split="val")
 
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, collate_fn=collate_fn,

@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 
 import features as F
-from dataset import _load_cluster_centers
+from features import load_cluster_centers
 
 
 def tensorize(
@@ -37,7 +37,7 @@ def tensorize(
     with open(data_dir / "file_index.json") as f:
         file_index = json.load(f)
 
-    stick_centers, shoulder_centers = _load_cluster_centers(data_dir)
+    stick_centers, shoulder_centers = load_cluster_centers(data_dir)
     fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs, no_self_inputs=no_self_inputs)
     categorical_cols = F.get_categorical_cols(fg)
 

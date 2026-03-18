@@ -40,7 +40,7 @@ pip install torch numpy pandas pyarrow wandb huggingface_hub melee==0.45.1 \
   || pip install torch numpy pandas pyarrow wandb huggingface_hub melee==0.45.1 \
     typing-extensions --quiet --break-system-packages
 
-# ── 3. Download dataset from HuggingFace ─────────────────────────────────────
+# ── 3. Download pretokenized tensor shards from HuggingFace ──────────────────
 echo ""
 echo "── Downloading dataset ──"
 if [[ -z "${HF_TOKEN:-}" ]]; then
@@ -59,46 +59,27 @@ snapshot_download(
 print(f'Dataset downloaded to ${DATA_DIR}')
 "
 
-# ── 4. Extract tar shards if present ──────────────────────────────────────────
-TARS=("${DATA_DIR}"/*.tar)
-if [[ -e "${TARS[0]}" ]]; then
-    echo ""
-    echo "── Extracting tar shards ──"
-    for tf in "${TARS[@]}"; do
-        echo "  Extracting $(basename "$tf") ..."
-        tar xf "$tf" -C "$DATA_DIR"
-        rm "$tf"
-    done
-    N_EXTRACTED=$(ls "${DATA_DIR}"/*.parquet 2>/dev/null | wc -l)
-    echo "  Done. ${N_EXTRACTED} parquet files extracted."
-fi
-
-# ── 5. Run preprocessing if metadata missing ─────────────────────────────────
-if [[ ! -f "${DATA_DIR}/norm_stats.json" ]] || [[ ! -f "${DATA_DIR}/cat_maps.json" ]] || [[ ! -f "${DATA_DIR}/file_index.json" ]]; then
-    echo ""
-    echo "── Running preprocessing (metadata only) ──"
-    python3 preprocess.py --data-dir "$DATA_DIR"
-fi
-
-# ── 6. Verify GPU ────────────────────────────────────────────────────────────
+# ── 4. Verify GPU ────────────────────────────────────────────────────────────
 echo ""
 echo "── GPU check ──"
 python3 -c "
-import torch
+import torch, json, pathlib
 if torch.cuda.is_available():
     name = torch.cuda.get_device_name(0)
     mem = torch.cuda.get_device_properties(0).total_memory / 1e9
     print(f'  GPU: {name} ({mem:.0f} GB)')
 else:
     print('  WARNING: No CUDA GPU detected. Training will be very slow.')
+mf = pathlib.Path('${DATA_DIR}') / 'tensor_manifest.json'
+if mf.exists():
+    m = json.loads(mf.read_text())
+    n_shards = len(m.get('train_shards', [])) + len(m.get('val_shards', []))
+    print(f'  Data: {n_shards} tensor shards in ${DATA_DIR}')
 "
-
-N_FILES=$(ls "${DATA_DIR}"/*.parquet 2>/dev/null | wc -l)
-echo "  Data: ${N_FILES} parquet files in ${DATA_DIR}"
 echo ""
 echo "=== Setup complete ==="
 
-# ── 7. Optionally start training ─────────────────────────────────────────────
+# ── 5. Optionally start training ─────────────────────────────────────────────
 if $RUN_AFTER; then
     echo ""
     echo "── Starting training ──"

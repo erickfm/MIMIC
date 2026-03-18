@@ -1,11 +1,13 @@
 # features.py
 # ---------------------------------------------------------------------------
 # Single source of truth for MIMIC feature engineering.
-# Used by dataset.py, preprocess.py, and inference.py.
+# Used by dataset.py, upload_dataset.py, tensorize.py, and inference.py.
 # ---------------------------------------------------------------------------
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -249,21 +251,36 @@ def _finalize_dynamic_maps(
     return maps
 
 
-def build_categorical_mappings_streaming(
-    parquet_files: List[Any],
-    categorical_cols: List[str],
-) -> Dict[str, Dict[int, int]]:
-    """Build dense-ID maps by streaming parquet files one at a time."""
-    need = _cols_needing_dynamic_map(categorical_cols)
-    raw_unique: Dict[str, set] = {c: set() for c in need}
-    for f in parquet_files:
-        df = pd.read_parquet(f)
-        df = df[df["frame"] >= 0]
-        for c in need:
-            if c in df.columns:
-                vals = df[c].dropna().astype("int64")
-                raw_unique[c].update(int(v) for v in vals)
-    return _finalize_dynamic_maps(raw_unique)
+# ---------------------------------------------------------------------------
+# Cluster centers
+# ---------------------------------------------------------------------------
+_DEFAULT_CLUSTERS_PATH = Path("data/full/stick_clusters.json")
+
+
+def load_cluster_centers(data_dir: Path = None, clusters_path: Path = None):
+    """Load stick_clusters.json, returning (stick_centers, shoulder_centers) or (None, None).
+
+    Resolution order:
+      1. Explicit *clusters_path* if given
+      2. ``data_dir / stick_clusters.json``
+      3. ``data/full/stick_clusters.json`` (canonical default)
+    """
+    candidates = []
+    if clusters_path is not None:
+        candidates.append(Path(clusters_path))
+    if data_dir is not None:
+        candidates.append(Path(data_dir) / "stick_clusters.json")
+    candidates.append(_DEFAULT_CLUSTERS_PATH)
+
+    for path in candidates:
+        if path.exists():
+            with open(path) as fh:
+                raw = json.load(fh)
+            stick = np.array(raw["stick_centers"], dtype=np.float32) if "stick_centers" in raw else None
+            shoulder = np.array(raw["shoulder_centers"], dtype=np.float32) if "shoulder_centers" in raw else None
+            print(f"  Loaded clusters from {path}", flush=True)
+            return stick, shoulder
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -338,48 +355,8 @@ def preprocess_df(
 
 
 # ---------------------------------------------------------------------------
-# Normalization stats (streaming — one df at a time)
+# Normalization
 # ---------------------------------------------------------------------------
-def update_norm_accumulators(
-    df: pd.DataFrame,
-    norm_cols: List[str],
-    col_sum: Dict[str, float],
-    col_sq: Dict[str, float],
-    col_n: Dict[str, int],
-) -> None:
-    """Accumulate running sum / sum-of-squares / count for Welford-style stats."""
-    for c in norm_cols:
-        if c not in df.columns:
-            continue
-        vals = df[c].astype(np.float64).values
-        valid = np.isfinite(vals)
-        v = vals[valid]
-        col_sum[c] = col_sum.get(c, 0.0) + v.sum()
-        col_sq[c]  = col_sq.get(c, 0.0) + (v ** 2).sum()
-        col_n[c]   = col_n.get(c, 0) + len(v)
-
-
-def finalize_norm_stats(
-    norm_cols: List[str],
-    col_sum: Dict[str, float],
-    col_sq: Dict[str, float],
-    col_n: Dict[str, int],
-) -> Dict[str, Tuple[float, float]]:
-    stats: Dict[str, Tuple[float, float]] = {}
-    for c in norm_cols:
-        n = col_n.get(c, 0)
-        if n > 1:
-            mean = col_sum[c] / n
-            var  = col_sq[c] / n - mean ** 2
-            std  = float(np.sqrt(max(var, 0.0)))
-            if std < 1e-6:
-                std = 1.0
-            stats[c] = (float(mean), std)
-        else:
-            stats[c] = (0.0, 1.0)
-    return stats
-
-
 def apply_normalization(
     df: pd.DataFrame,
     norm_stats: Dict[str, Tuple[float, float]],
