@@ -22,6 +22,10 @@ Usage:
     python3 upload_dataset.py --staging-dir data/full_upload --repo erickfm/frame-melee --upload-only
 """
 
+import sys as _sys
+from pathlib import Path as _Path
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
+
 import os as _os
 _os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 _os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -50,8 +54,8 @@ import torch
 
 from huggingface_hub import HfApi, upload_large_folder
 
-import features as F
-from features import load_cluster_centers
+import mimic.features as F
+from mimic.features import load_cluster_centers
 
 METADATA_FILES = ["norm_stats.json", "cat_maps.json", "stick_clusters.json"]
 

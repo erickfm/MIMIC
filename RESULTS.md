@@ -4,7 +4,7 @@
 
 ### diagnose.py findings
 
-Ran `diagnose.py` comparing a saved inference batch (call #300) against a training parquet window:
+Ran `tools/diagnose.py` comparing a saved inference batch (call #300) against a training parquet window:
 
 | Feature group | Training range | Inference range | Verdict |
 |---|---|---|---|
@@ -73,7 +73,7 @@ Fixed all known mismatches between `inference.py` and `extract.py`:
 
 ### Overview
 
-Generated a synthetic wavedash dataset using `generate_wavedash_replay.py` (Falco
+Generated a synthetic wavedash dataset using `tools/generate_wavedash_replay.py` (Falco
 wavedashing back and forth on FD, 28,800 frames with edge-safety reversal).
 Trained with focal loss and canonical 63-cluster stick centers to near-epsilon loss.
 Then ran live in Dolphin.

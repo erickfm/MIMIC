@@ -196,12 +196,14 @@ Added `--no-self-inputs` flag following the same pattern as `--no-opp-inputs`:
 
 | File | Change |
 |------|--------|
-| `features.py` | `build_feature_groups(no_self_inputs=...)` removes `buttons`, `analog`, and `c_dir` from self/self_nana groups |
-| `frame_encoder.py` | All 3 encoder types skip self-controller tokens, update token counts |
-| `model.py` | `ModelConfig.no_self_inputs` field, wired to encoder construction |
+| `mimic/features.py` | `build_feature_groups(no_self_inputs=...)` removes `buttons`, `analog`, and `c_dir` from self/self_nana groups |
+| `mimic/frame_encoder.py` | All 3 encoder types skip self-controller tokens, update token counts |
+| `mimic/model.py` | `ModelConfig.no_self_inputs` field, wired to encoder construction |
 | `train.py` | `--no-self-inputs` CLI argument |
 | `inference.py` | Skip `_prev_pred` feedback when `no_self_inputs=True` |
 | `eval.py` | Pass `no_self_inputs` from checkpoint config |
+
+**Update (2026-03-18):** `no_self_inputs` is now the default (`True` in `ModelConfig`, `get_model`, `get_datasets`). The CLI flag was flipped to `--self-inputs` (opt-in) to match the `--opp-inputs` pattern. All new runs exclude self-controller inputs unless explicitly requested.
 
 ---
 
@@ -209,21 +211,21 @@ Added `--no-self-inputs` flag following the same pattern as `--no-opp-inputs`:
 
 ### DDP Implementation
 
-Integrated PyTorch Distributed Data Parallel into `train.py` and `dataset.py` to enable multi-GPU training of a single model. Created `parallel.sh` as a launcher wrapping `torchrun` over SSH.
+Integrated PyTorch Distributed Data Parallel into `train.py` and `mimic/dataset.py` to enable multi-GPU training of a single model. Created `parallel.sh` as a launcher wrapping `torchrun` over SSH.
 
 | File | Change |
 |------|--------|
 | `train.py` | Auto-detect `torchrun` via `RANK` env var, `DDP` wrapping, rank-0 logging/checkpointing, `dist.barrier()` sync, `--scale-lr` flag |
-| `dataset.py` | `rank`/`world_size` params for file-level DDP sharding across ranks + worker-level sharding within each rank |
+| `mimic/dataset.py` | `rank`/`world_size` params for file-level DDP sharding across ranks + worker-level sharding within each rank |
 | `parallel.sh` | New bash launcher: machine registry (A/B/C/D), SSH-based `torchrun` dispatch, foreground/background modes, `DRY=1` |
 
 ### Pre-Tensorized Dataset Pipeline
 
-Parquet-based streaming was bottlenecked by `pd.read_parquet()` + pandas preprocessing on every epoch. Created `tensorize.py` to pre-convert datasets into `.pt` shard files.
+Parquet-based streaming was bottlenecked by `pd.read_parquet()` + pandas preprocessing on every epoch. Created `tools/tensorize.py` to pre-convert datasets into `.pt` shard files.
 
-**tensorize.py**: Reads parquets, applies full preprocessing (categorical mapping, normalization, windowing), stacks windows into contiguous tensors, distributes across N shards. Output: `train_shard_000.pt` ... `train_shard_063.pt` + `val_shard_*.pt` + `tensor_meta.json`.
+**tools/tensorize.py**: Reads parquets, applies full preprocessing (categorical mapping, normalization, windowing), stacks windows into contiguous tensors, distributes across N shards. Output: `train_shard_000.pt` ... `train_shard_063.pt` + `val_shard_*.pt` + `tensor_meta.json`.
 
-**dataset.py changes**: `StreamingMeleeDataset` auto-detects `tensor_meta.json` in the data dir. If present, uses fast `torch.load()` + tensor indexing path (`_iter_tensorized`). Otherwise falls back to parquet path (`_iter_parquet`). Removed the previous `_ensure_ddp_shard_files` auto-duplication code — tensorization with sufficient shards replaces it.
+**mimic/dataset.py changes**: `StreamingMeleeDataset` auto-detects `tensor_meta.json` in the data dir. If present, uses fast `torch.load()` + tensor indexing path (`_iter_tensorized`). Otherwise falls back to parquet path (`_iter_parquet`). Removed the previous `_ensure_ddp_shard_files` auto-duplication code — tensorization with sufficient shards replaces it.
 
 **Wavedash overfit dataset**: 28,740 windows from 1 parquet → 64 train shards (2.5 GB) + 8 val shards (2.5 GB). Each rank×worker gets a unique shard file, eliminating I/O contention.
 

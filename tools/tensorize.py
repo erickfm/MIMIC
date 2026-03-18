@@ -1,19 +1,22 @@
 """Pre-tensorize a parquet dataset into .pt shards for fast DDP training.
 
 Usage:
-    python3 tensorize.py --data-dir data/wavedash_v2 --n-train-shards 64 --n-val-shards 8
+    python3 tools/tensorize.py --data-dir data/wavedash_v2 --n-train-shards 64 --n-val-shards 8
 """
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
 import json
 import random
-from pathlib import Path
 
 import pandas as pd
 import torch
 
-import features as F
-from features import load_cluster_centers
+import mimic.features as F
+from mimic.features import load_cluster_centers
 
 
 def tensorize(

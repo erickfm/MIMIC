@@ -15,8 +15,8 @@ Previous training used dataset-specific cluster centers (from the small wavedash
 ### Changes
 
 - **`train.py`**: Added `--clusters-path` argument. Cluster centers are now loaded from a canonical source (`data/full/stick_clusters.json`) by default, regardless of which dataset is being trained on.
-- **`dataset.py`**: Updated `_load_cluster_centers()` resolution order: explicit path → data_dir → canonical default.
-- **`generate_wavedash_replay.py`**: Added `EDGE_THRESHOLD` and `_safe_direction()` to prevent Falco from wavedashing off-stage. The bot reverses direction when within 15 units of the edge.
+- **`mimic/dataset.py`**: Updated `_load_cluster_centers()` resolution order: explicit path → data_dir → canonical default.
+- **`tools/generate_wavedash_replay.py`**: Added `EDGE_THRESHOLD` and `_safe_direction()` to prevent Falco from wavedashing off-stage. The bot reverses direction when within 15 units of the edge.
 
 ### Wavedash v2 Dataset
 
@@ -32,11 +32,11 @@ Trained `wavedash-canonical` with label_smoothing=0.0 for sharp predictions:
 
 ## Phase 2: Closed-Loop Debug Tool
 
-### `closedloop_debug.py`
+### `tools/diagnose.py` (formerly `closedloop_debug.py`)
 
 Built a frame-by-frame tensor comparison tool following [Eric Gu's HAL methodology](https://github.com/ericyuegu/hal): the single most important debugging step is to verify that training and inference data distributions perfectly match.
 
-**Phase 1 (offline)**: Loads a training parquet and processes it through both the training pipeline (`dataset.py`) and the inference pipeline (`inference.py`), then compares every tensor element. Initial run found 57 categorical mismatches caused by `cat_maps.json` using string keys vs. integer keys — fixed by converting keys in `closedloop_debug.py`'s loader. After fix: **perfect alignment, 0 mismatches**.
+**Phase 1 (offline)**: Loads a training parquet and processes it through both the training pipeline (`mimic/dataset.py`) and the inference pipeline (`inference.py`), then compares every tensor element. Initial run found 57 categorical mismatches caused by `cat_maps.json` using string keys vs. integer keys — fixed by converting keys in the loader. After fix: **perfect alignment, 0 mismatches**.
 
 **Phase 2 (online)**: Added `--diag-log-all` flag to `inference.py` that pickles every raw row dict during live play for post-hoc comparison.
 
@@ -202,9 +202,9 @@ def send_controller_inputs(controller, inputs):
 |------|--------|
 | `inference.py` | `blocking_input=True`; HAL-style press/release; `torch.compile`; pure-Python `_process_one_row()` with tensor caching (0.3ms vs 57ms); flush on menu/skip frames; timing instrumentation |
 | `train.py` | `--clusters-path` for canonical cluster loading |
-| `dataset.py` | Updated `_load_cluster_centers()` resolution order |
-| `generate_wavedash_replay.py` | Edge-safety logic (`EDGE_THRESHOLD`, `_safe_direction()`) |
-| `closedloop_debug.py` | New tool for frame-by-frame tensor comparison (HAL methodology) |
+| `mimic/dataset.py` | Updated `_load_cluster_centers()` resolution order |
+| `tools/generate_wavedash_replay.py` | Edge-safety logic (`EDGE_THRESHOLD`, `_safe_direction()`) |
+| `tools/diagnose.py` | New tool for frame-by-frame tensor comparison (HAL methodology). Formerly `closedloop_debug.py` + `diagnose.py`, merged during repo reorganization. |
 
 ---
 

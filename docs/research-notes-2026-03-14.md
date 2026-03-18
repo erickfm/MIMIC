@@ -18,7 +18,7 @@ Several discrepancies between training data feature extraction and live inferenc
 
 ### Stick Prediction is the Core Failure
 
-Offline diagnostic (`diagnose.py`, `test_closed_loop_comprehensive.py`) showed:
+Offline diagnostic (`tools/diagnose.py`, `tools/test_closed_loop_comprehensive.py`) showed:
 - **Button prediction**: 94-98% F1 — appears strong
 - **Stick prediction**: ~1% top-1 accuracy — catastrophically bad
 
@@ -34,7 +34,7 @@ Narrowed the problem to a minimal reproducible case: Falco wavedashing back and 
 
 ### Data Generation
 
-Built `generate_wavedash_replay.py` using libmelee to programmatically control P1 Falco. Key findings during development:
+Built `tools/generate_wavedash_replay.py` using libmelee to programmatically control P1 Falco. Key findings during development:
 
 - **Airdodge requires digital L press**: `press_button(BUTTON_L)` is required. `press_shoulder(BUTTON_L, 1.0)` (analog only) does NOT trigger airdodge, only ground shield. Discovered via systematic testing in `test_airdodge_methods.py`.
 - **Y must be released for 1 frame between presses** for the game engine to register a new jump input.
@@ -45,7 +45,7 @@ Final output: 7200 frames, 336 perfect wavedashes, exported as parquet with the 
 
 ### Training
 
-Preprocessed with `preprocess.py` and `build_clusters.py`. Stick clusters correctly identified the 3 unique positions (neutral, left-down, right-down). Trained `--model small` for 3000 steps with `--stick-loss clusters --autoregressive-heads`.
+Preprocessed with `preprocess.py` and `tools/build_clusters.py`. Stick clusters correctly identified the 3 unique positions (neutral, left-down, right-down). Trained `--model small` for 3000 steps with `--stick-loss clusters --autoregressive-heads`.
 
 ### Results: Model Collapses to Majority Class
 
@@ -159,7 +159,7 @@ The most generalizable solutions are: (1) reformulate the loss to be less sensit
 
 ### Changes Made (~15 lines total)
 
-1. **`model.py`**: Changed `btn_loss` default from `"bce"` to `"focal"`. Changed `btn_threshold` default from 0.5 to 0.2.
+1. **`mimic/model.py`**: Changed `btn_loss` default from `"bce"` to `"focal"`. Changed `btn_threshold` default from 0.5 to 0.2.
 2. **`train.py`**: Replaced `F.cross_entropy` for stick clusters and shoulder bins with existing `focal_loss()` (which includes gamma=2.0 + label smoothing 0.1). Updated argparse help text.
 3. **`inference.py`**: Added `--btn-threshold` CLI argument (default 0.2). Updated button firing logic and feedback loop to use configurable threshold instead of hardcoded 0.5.
 

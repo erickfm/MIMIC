@@ -106,7 +106,7 @@ Architecture (`--model`) is intentionally NOT changed — `shallow` won on waved
 | File | Change |
 |------|--------|
 | `train.py` | New defaults: `BATCH_SIZE=256`, `LEARNING_RATE=5e-5`, `WARMUP_FRAC=0.05`. Added `--warmup-steps` CLI arg for explicit override. Added `--target-val-f1`, `--max-wall-time`, `--val-frac` for sweep control. |
-| `model.py` | `ModelConfig.pos_enc` default changed from `"learned"` to `"rope"` |
+| `mimic/model.py` | `ModelConfig.pos_enc` default changed from `"learned"` to `"rope"` |
 | `sweep/launch.sh` | Updated COMMON args to use shallow+RoPE base config for sweep2 |
 
 ---
@@ -125,7 +125,7 @@ Without autoregressive chaining, each output head (L shoulder, R shoulder, c-sti
 
 **Code removed**:
 
-- `model.py`: MSE/huber branch in `PredictionHeads.__init__`, non-AR branch in `__init__` and `forward`
+- `mimic/model.py`: MSE/huber branch in `PredictionHeads.__init__`, non-AR branch in `__init__` and `forward`
 - `train.py`: `_stick_regression_loss()` function, `--stick-loss` and `--autoregressive-heads` CLI args, MSE/huber branch in `compute_loss()`, `_mse`/`_huber` loss modules
 - `inference.py`: All `if cfg.stick_loss == "clusters"` / `else` guards in cluster loading, logging, feedback, and controller output
 

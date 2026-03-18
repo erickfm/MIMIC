@@ -23,8 +23,8 @@ import numpy as np
 import pandas as pd
 import torch
 
-import features as F
-from model import FramePredictor, ModelConfig
+import mimic.features as F
+from mimic.model import FramePredictor, ModelConfig
 
 # ── CLI / logging ───────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Realtime MIMIC bot")

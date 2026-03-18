@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import torch
 
-from cat_maps import (
+from .cat_maps import (
     STAGE_MAP,
     CHARACTER_MAP,
     ACTION_MAP,

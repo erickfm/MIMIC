@@ -25,8 +25,8 @@ from pathlib import Path
 
 import wandb
 
-from dataset import StreamingMeleeDataset
-from model   import FramePredictor, ModelConfig, MODEL_PRESETS
+from mimic.dataset import StreamingMeleeDataset
+from mimic.model   import FramePredictor, ModelConfig, MODEL_PRESETS
 
 # ---------------------------------------------------------------------------
 # Distributed helpers
@@ -261,7 +261,7 @@ def _compute_intervals(max_steps):
     )
 
 
-def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=False,
+def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
                   rank=0, world_size=1):
     _log(f"  Using streaming dataset from {data_dir}")
     train_ds = StreamingMeleeDataset(
@@ -301,7 +301,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               encoder_type=None, d_intra=None, dropout_override=None,
               k_query=None, intra_layers=None, scaled_emb=False,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
-              btn_loss=None, no_opp_inputs=True, no_self_inputs=False,
+              btn_loss=None, no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None, n_shoulder_bins=None):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
@@ -466,7 +466,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         _log(f"  LR scaled by {world_size}x: {lr or LEARNING_RATE} → {actual_lr}")
 
     _log(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}")
-    from features import load_cluster_centers
+    from mimic.features import load_cluster_centers
     _cp = Path(clusters_path) if clusters_path else None
     stick_centers_np, shoulder_centers_np = load_cluster_centers(
         data_dir=Path(data_dir), clusters_path=_cp)
@@ -855,8 +855,8 @@ if __name__ == "__main__":
                         help="Button loss type (default: focal)")
     parser.add_argument("--opp-inputs", action="store_true",
                         help="Include opponent controller inputs (default: excluded)")
-    parser.add_argument("--no-self-inputs", action="store_true",
-                        help="Omit self controller inputs; model learns purely from game state")
+    parser.add_argument("--self-inputs", action="store_true",
+                        help="Include self controller inputs (default: excluded)")
     parser.add_argument("--weight-decay", type=float, default=None,
                         help="Weight decay (default: 1e-2)")
     parser.add_argument("--seed", type=int, default=None,
@@ -919,7 +919,7 @@ if __name__ == "__main__":
         n_kv_heads=args.n_kv_heads,
         btn_loss=args.btn_loss,
         no_opp_inputs=not args.opp_inputs,
-        no_self_inputs=args.no_self_inputs,
+        no_self_inputs=not args.self_inputs,
         clusters_path=args.clusters_path,
         target_val_f1=args.target_val_f1,
         max_wall_time=args.max_wall_time,

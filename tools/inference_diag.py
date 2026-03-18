@@ -10,18 +10,20 @@ Usage:
     python inference_diag.py --checkpoint checkpoints/noi_ctx180_65k_machB.pt --n-windows 200
 """
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 import argparse
 import glob
 import json
-import sys
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import torch
 
-import features as F
-from model import FramePredictor, ModelConfig
+import mimic.features as F
+from mimic.model import FramePredictor, ModelConfig
 
 parser = argparse.ArgumentParser(description="Offline MIMIC inference diagnostics")
 parser.add_argument("--checkpoint", type=str, required=True)

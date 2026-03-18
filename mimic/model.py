@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as Fn
 
 # Source-of-truth enum maps
-from cat_maps import (
+from .cat_maps import (
     STAGE_MAP,
     CHARACTER_MAP,
     ACTION_MAP,
@@ -58,7 +58,7 @@ class ModelConfig:
     stick_loss: str      = "clusters"
     btn_loss: str        = "focal"
     no_opp_inputs: bool  = True
-    no_self_inputs: bool = False
+    no_self_inputs: bool = True
 
     # cluster output configuration
     n_stick_clusters: int       = 63
@@ -317,7 +317,7 @@ class FramePredictor(nn.Module):
     """
     def __init__(self, cfg: ModelConfig, encoder: Optional[nn.Module] = None):
         super().__init__()
-        from frame_encoder import build_encoder
+        from .frame_encoder import build_encoder
 
         self.cfg = cfg
         self.encoder = encoder or build_encoder(

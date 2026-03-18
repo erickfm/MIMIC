@@ -20,9 +20,9 @@ import torch.nn.functional as F
 from torch.amp import autocast
 from torch.utils.data import DataLoader
 
-from dataset import StreamingMeleeDataset
-from features import load_cluster_centers
-from model import FramePredictor, ModelConfig
+from mimic.dataset import StreamingMeleeDataset
+from mimic.features import load_cluster_centers
+from mimic.model import FramePredictor, ModelConfig
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 AMP_DTYPE = torch.bfloat16

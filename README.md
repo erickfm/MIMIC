@@ -2,10 +2,11 @@
 
 MIMIC is an imitation-learning bot for Super Smash Bros. Melee. Given a
 window of recent gameplay frames, it predicts the controller inputs a human
-player would enter on the next frame. The model observes both players' full
-game state (positions, actions, speeds, buttons, analog sticks, projectiles,
-stage geometry) through Slippi replay data and learns to reproduce human
-decision-making at 60 fps.
+player would enter on the next frame. The model observes game state
+(positions, actions, speeds, projectiles, stage geometry) through Slippi
+replay data and learns to reproduce human decision-making at 60 fps.
+Self-controller inputs are excluded by default — the model learns purely
+from game state, eliminating train/inference distribution shift.
 
 ## Goal
 
@@ -18,7 +19,7 @@ Dolphin via libmelee and drives a controller in real time.
 ## Controller Mapping
 
 The GameCube controller has five input groups. Each maps to a dedicated
-prediction head in `model.py`. Heads are chained autoregressively
+prediction head in `mimic/model.py`. Heads are chained autoregressively
 (L → R → cdir → main → buttons) so each head conditions on previous
 predictions:
 
@@ -45,7 +46,7 @@ Slippi Frame ──► HybridFrameEncoder (16 entity tokens + attention) ──�
           main_cluster  L/R bin   c_dir_5way   btn_12way
 ```
 
-### Phase 1 -- Frame Understanding (`frame_encoder.py`)
+### Phase 1 -- Frame Understanding (`mimic/frame_encoder.py`)
 
 Each frame is decomposed into 16 entity-level tokens via the **hybrid16**
 encoder: game state, self/opponent identity, action, state, and input
@@ -60,7 +61,7 @@ interaction). 16 tokens let the model learn which entities and feature
 types are most relevant to each other (e.g., opponent position + opponent
 action = threat assessment) while keeping intra-frame attention cheap (16×16).
 
-### Phase 2 -- Temporal Patterns (`model.py`)
+### Phase 2 -- Temporal Patterns (`mimic/model.py`)
 
 A 4-layer pre-norm causal transformer operates over the 60-frame window
 (1 second at 60 fps). Causal masking ensures position T can only attend to
@@ -73,7 +74,7 @@ relative position directly into attention via rotation matrices. Flash
 Attention via `F.scaled_dot_product_attention(is_causal=True)` is used for
 speed; `torch.compile` fuses the full forward pass.
 
-### Phase 3 -- Action Prediction (`model.py` PredictionHeads)
+### Phase 3 -- Action Prediction (`mimic/model.py` PredictionHeads)
 
 All T hidden states are fed through an autoregressive chain of prediction
 heads. The chain order is L → R → cdir → main → buttons, where each
@@ -124,7 +125,7 @@ handling needed.
 ### C-Stick 5-Way Classification
 
 Melee functionally treats the c-stick as 5 discrete states (neutral, up,
-down, left, right). `features.encode_cstick_dir` uses a deadzone and
+down, left, right). `mimic.features.encode_cstick_dir` uses a deadzone and
 cardinal-dominance rule that matches the game engine's behavior. Diagonal
 inputs are rare and resolve to one cardinal direction.
 
@@ -153,9 +154,9 @@ wastes a small amount of head capacity.
 - **Multi-step prediction**: Predicting frames T+1 through T+K
   simultaneously could help the model learn action planning and committal
   sequences.
-- **Opponent modeling**: Currently `no_opp_inputs=True` drops opponent
-  controller inputs from the feature set. Re-introducing them with a
-  better conditioning mechanism could improve reactive play.
+- **Opponent modeling**: Currently opponent and self controller inputs are
+  both excluded by default. Re-introducing them with a better conditioning
+  mechanism could improve reactive play.
 
 ## Model Presets
 
@@ -194,24 +195,29 @@ Pass `--model <preset>` to `train.py` for scaling experiments:
 
 ```
 .
-├── train.py            # Training loop & checkpointing
-├── inference.py        # Real-time single-window inference via libmelee
-├── model.py            # FramePredictor + Transformer heads
-├── frame_encoder.py    # Intra-frame cross-attention encoder
-├── features.py         # Shared feature engineering (columns, preprocessing, tensors)
-├── dataset.py          # Streaming tensor shard dataset for training
-├── cat_maps.py         # Melee enum → dense index maps
-├── setup.sh                     # One-command setup for fresh machines
-├── upload_dataset.py            # Pretokenize parquets → tensor shards + upload to HF
-├── tensorize.py                 # Optional: pre-window shards for max local throughput
-├── build_clusters.py            # K-means stick/shoulder cluster centers
-├── generate_wavedash_replay.py  # Synthetic wavedash data generator (libmelee)
-├── eval.py                      # Validation metrics on a checkpoint
-├── closedloop_debug.py          # Frame-by-frame tensor comparison (train vs inference)
-├── diagnose.py                  # Offline inference diagnostic tool
-├── checkpoints/                 # Saved *.pt files
-├── docs/                        # Research notes and session logs
-└── data/                        # Pretokenized tensor shards + metadata
+├── train.py                # Training loop & checkpointing
+├── inference.py            # Real-time single-window inference via libmelee
+├── eval.py                 # Validation metrics on a checkpoint
+├── parallel.sh             # Multi-GPU DDP launcher (SSH + torchrun)
+├── setup.sh                # One-command setup for fresh machines
+│
+├── mimic/                  # Core library
+│   ├── model.py            # FramePredictor + Transformer heads
+│   ├── frame_encoder.py    # Intra-frame cross-attention encoder
+│   ├── features.py         # Feature engineering (columns, preprocessing, tensors)
+│   ├── dataset.py          # Streaming tensor shard dataset for training
+│   └── cat_maps.py         # Melee enum → dense index maps
+│
+├── tools/                  # Standalone scripts & diagnostics
+│   ├── upload_dataset.py   # Pretokenize parquets → tensor shards + upload to HF
+│   ├── tensorize.py        # Pre-window shards for max local throughput
+│   ├── build_clusters.py   # K-means stick/shoulder cluster centers
+│   ├── generate_wavedash_replay.py  # Synthetic wavedash data generator
+│   └── diagnose.py         # Pipeline debug (train vs inference tensor comparison)
+│
+├── checkpoints/            # Saved *.pt files
+├── docs/                   # Research notes and session logs
+└── data/                   # Pretokenized tensor shards + metadata
 ```
 
 ## Quick Start (New Machine)
@@ -372,7 +378,7 @@ Options:
 | `--deterministic` | Use threshold-based button decisions instead of stochastic sampling |
 | `--btn-threshold` | Sigmoid threshold for button presses (default: 0.2) |
 | `--temperature` | Temperature for stick/shoulder cluster sampling (default: 1.0 = argmax) |
-| `--no-pred-feedback` | Use game controller readback instead of model predictions for self-inputs |
+| `--self-inputs` | Include self controller inputs (excluded by default) |
 | `--diag-log-all` | Save every raw row dict to pickle for offline debugging |
 | `--debug` | Verbose frame-by-frame logging |
 
