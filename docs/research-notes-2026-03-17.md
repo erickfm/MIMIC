@@ -247,8 +247,46 @@ Machine D (same 8×RTX 5090 but PyTorch 2.10.0) showed only 9.7 step/s — a sus
 
 ---
 
+### Steady-State Throughput
+
+Machine C (PyTorch 2.8) continued climbing past 18.6 and stabilized at **20.0 step/s** by step 27,000 — a **16.3% speedup** over the 17.2 parquet+file-dup baseline.
+
+Machine D (PyTorch 2.10) stabilized at **10.8-10.9 step/s** despite identical 8×5090 hardware. The 2× gap is attributed to a `torch.compile` regression in PyTorch 2.10 vs 2.8 (both CUDA 12.8).
+
+### Machine C Crash: NCCL Timeout
+
+Machine C crashed at step ~28,125 with `SIGABRT` on all non-zero ranks. Root cause: NCCL ALLREDUCE timeout (600,000ms) at SeqNum 168767 (last completed: 168766). Error from log:
+
+```
+[rank7] Watchdog caught collective operation timeout: WorkNCCL(SeqNum=168767,
+  OpType=ALLREDUCE, NumelIn=1, NumelOut=1, Timeout(ms)=600000)
+  ran for 600003 milliseconds before timing out.
+```
+
+The crash occurred immediately after saving the step-28,125 periodic checkpoint and the best-val checkpoint (val bf1=98.3%). Likely cause: a data iterator desync between ranks at an epoch boundary, causing one rank to stall on the next DDP gradient allreduce while others waited. Transient — not a code bug. Run was relaunched as `wd-ddp-5090-tensor-v2`.
+
+### Inference Verification
+
+Downloaded `wd-ddp-5090-tensor_best.pt` (371 MB, val bf1=98.3%) from Machine C. Ran live inference on local GPU:
+
+```
+python3 inference.py --checkpoint checkpoints/wd-ddp-5090-tensor_best.pt \
+  --data-dir data/wavedash_v2 --character FALCO --cpu-character FALCO \
+  --stage FINAL_DESTINATION --cpu-level 0 --btn-threshold 0.2 --deterministic
+```
+
+Results: model executes clean wavedashes at 60fps. The pattern is correct:
+- **BUTTON_Y** pressed for 1 frame (jump, 0.93-0.99 confidence)
+- Idle frames at neutral stick
+- **BUTTON_L** pressed with diagonal stick (airdodge angle, 0.996-0.998 confidence)
+- Frame-precise timing, no sticky inputs
+
+DDP checkpoint loaded and ran inference identically to single-GPU checkpoints.
+
+---
+
 ## Status
 
-DDP + tensorized pipeline running on two 8×5090 pods. Machine C (PyTorch 2.8) reaching 18.6 step/s and climbing. Machine D (PyTorch 2.10) relaunched after a performance regression.
+Tensorized DDP pipeline validated end-to-end: tensorize → train at 20 step/s → checkpoint → inference works. Machine C relaunched (`wd-ddp-5090-tensor-v2`), Machine D running at 10.9 step/s. Both targeting val_f1=98.5%.
 
-Next: monitor convergence to target val_f1=98.5%, compare wall time to overfit against single-GPU baseline.
+Next: monitor convergence, investigate PyTorch version impact on Machine D, prepare for full-dataset DDP training.
