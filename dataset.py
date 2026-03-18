@@ -191,6 +191,8 @@ class StreamingMeleeDataset(IterableDataset):
         val_frac: float = 0.1,
         no_opp_inputs: bool = False,
         no_self_inputs: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
     ) -> None:
         super().__init__()
         self.data_dir        = Path(data_dir)
@@ -199,41 +201,57 @@ class StreamingMeleeDataset(IterableDataset):
         self.split           = split
         self._no_opp_inputs  = no_opp_inputs
         self._no_self_inputs = no_self_inputs
+        self._rank           = rank
+        self._world_size     = world_size
 
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
-        with open(self.data_dir / "cat_maps.json") as fh:
-            raw = json.load(fh)
-            self.cat_maps: Dict[str, Dict[int, int]] = {
-                col: {int(k): v for k, v in m.items()} for col, m in raw.items()
-            }
-        with open(self.data_dir / "file_index.json") as fh:
-            self.file_index: Dict[str, int] = json.load(fh)
 
-        self._stick_centers, self._shoulder_centers = _load_cluster_centers(self.data_dir)
+        tensor_meta_path = self.data_dir / "tensor_meta.json"
+        self._tensorized = tensor_meta_path.exists()
 
-        self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs,
-                                          no_self_inputs=no_self_inputs)
-        self._categorical_cols = F.get_categorical_cols(self._fg)
-
-        all_names = sorted(self.file_index.keys())
-        rng = random.Random(42)
-        rng.shuffle(all_names)
-        n_val = int(len(all_names) * val_frac)
-
-        if split == "val" and n_val > 0:
-            names = all_names[:n_val]
+        if self._tensorized:
+            with open(tensor_meta_path) as fh:
+                tmeta = json.load(fh)
+            key = "val_shards" if split == "val" else "train_shards"
+            shard_names = tmeta[key]
+            self.files = [self.data_dir / n for n in shard_names]
+            self.n_games = len(self.files)
+            wkey = "n_val_windows" if split == "val" else "n_train_windows"
+            self._total_windows = tmeta[wkey]
+            self._stick_centers, self._shoulder_centers = _load_cluster_centers(self.data_dir)
         else:
-            names = all_names[n_val:] if n_val > 0 else all_names
+            with open(self.data_dir / "cat_maps.json") as fh:
+                raw = json.load(fh)
+                self.cat_maps: Dict[str, Dict[int, int]] = {
+                    col: {int(k): v for k, v in m.items()} for col, m in raw.items()
+                }
+            with open(self.data_dir / "file_index.json") as fh:
+                self.file_index: Dict[str, int] = json.load(fh)
 
-        self.files = [self.data_dir / n for n in names]
-        self.n_games = len(self.files)
+            self._stick_centers, self._shoulder_centers = _load_cluster_centers(self.data_dir)
 
-        W, R = sequence_length, reaction_delay
-        self._total_windows = sum(
-            max(0, self.file_index[n] - W - R + 1)
-            for n in names
-        )
+            self._fg = F.build_feature_groups(no_opp_inputs=no_opp_inputs,
+                                              no_self_inputs=no_self_inputs)
+            self._categorical_cols = F.get_categorical_cols(self._fg)
+
+            all_names = sorted(self.file_index.keys())
+            rng = random.Random(42)
+            rng.shuffle(all_names)
+            n_val = int(len(all_names) * val_frac)
+
+            if split == "val" and n_val > 0:
+                names = all_names[:n_val]
+            else:
+                names = all_names[n_val:] if n_val > 0 else all_names
+
+            self.files = [self.data_dir / n for n in names]
+            self.n_games = len(self.files)
+
+            W, R = sequence_length, reaction_delay
+            self._total_windows = sum(
+                max(0, self.file_index[n] - W - R + 1) for n in names
+            )
 
     def __len__(self):
         return self._total_windows
@@ -255,14 +273,37 @@ class StreamingMeleeDataset(IterableDataset):
             shoulder_centers=self._shoulder_centers)
         return state, targets, len(df)
 
-    def __iter__(self):
+    def _shard_files(self, files):
+        """Shard file list by DDP rank and DataLoader worker."""
         worker_info = get_worker_info()
+        if self._world_size > 1:
+            files = files[self._rank :: self._world_size]
+        if worker_info is not None:
+            files = files[worker_info.id :: worker_info.num_workers]
+        return files
 
+    def _iter_tensorized(self):
         files = list(self.files)
         rng = random.Random(42)
         rng.shuffle(files)
-        if worker_info is not None:
-            files = files[worker_info.id :: worker_info.num_workers]
+        files = self._shard_files(files)
+        random.shuffle(files)
+
+        for path in files:
+            shard = torch.load(path, weights_only=True)
+            n = shard["n"]
+            indices = list(range(n))
+            random.shuffle(indices)
+            for i in indices:
+                state = {k: v[i] for k, v in shard["states"].items()}
+                target = {k: v[i] for k, v in shard["targets"].items()}
+                yield state, target
+
+    def _iter_parquet(self):
+        files = list(self.files)
+        rng = random.Random(42)
+        rng.shuffle(files)
+        files = self._shard_files(files)
         random.shuffle(files)
 
         W, R = self.sequence_length, self.reaction_delay
@@ -293,3 +334,9 @@ class StreamingMeleeDataset(IterableDataset):
 
         random.shuffle(buf)
         yield from buf
+
+    def __iter__(self):
+        if self._tensorized:
+            yield from self._iter_tensorized()
+        else:
+            yield from self._iter_parquet()

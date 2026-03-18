@@ -205,8 +205,50 @@ Added `--no-self-inputs` flag following the same pattern as `--no-opp-inputs`:
 
 ---
 
+## Phase 6: DDP Training & Speed Optimization
+
+### DDP Implementation
+
+Integrated PyTorch Distributed Data Parallel into `train.py` and `dataset.py` to enable multi-GPU training of a single model. Created `parallel.sh` as a launcher wrapping `torchrun` over SSH.
+
+| File | Change |
+|------|--------|
+| `train.py` | Auto-detect `torchrun` via `RANK` env var, `DDP` wrapping, rank-0 logging/checkpointing, `dist.barrier()` sync, `--scale-lr` flag |
+| `dataset.py` | `rank`/`world_size` params for file-level DDP sharding across ranks + worker-level sharding within each rank |
+| `parallel.sh` | New bash launcher: machine registry (A/B/C/D), SSH-based `torchrun` dispatch, foreground/background modes, `DRY=1` |
+
+### Pre-Tensorized Dataset Pipeline
+
+Parquet-based streaming was bottlenecked by `pd.read_parquet()` + pandas preprocessing on every epoch. Created `tensorize.py` to pre-convert datasets into `.pt` shard files.
+
+**tensorize.py**: Reads parquets, applies full preprocessing (categorical mapping, normalization, windowing), stacks windows into contiguous tensors, distributes across N shards. Output: `train_shard_000.pt` ... `train_shard_063.pt` + `val_shard_*.pt` + `tensor_meta.json`.
+
+**dataset.py changes**: `StreamingMeleeDataset` auto-detects `tensor_meta.json` in the data dir. If present, uses fast `torch.load()` + tensor indexing path (`_iter_tensorized`). Otherwise falls back to parquet path (`_iter_parquet`). Removed the previous `_ensure_ddp_shard_files` auto-duplication code — tensorization with sufficient shards replaces it.
+
+**Wavedash overfit dataset**: 28,740 windows from 1 parquet → 64 train shards (2.5 GB) + 8 val shards (2.5 GB). Each rank×worker gets a unique shard file, eliminating I/O contention.
+
+### wandb.log Optimization
+
+Removed per-step `wandb.log()` call (25+ metrics × every step = heavy HTTP overhead). Metrics are now only logged at `log_interval` via the existing averaged-metric path. Per-step accumulation into `_run_sums` is unchanged.
+
+### Wavedash Overfit DDP Results
+
+**Baseline** (parquet file duplication, `--no-compile`): **17.2 step/s** on 8×RTX 5090
+
+**Optimized** (tensorized shards, `torch.compile`, gated wandb.log): **18.6 step/s** on 8×RTX 5090 (Machine C, PyTorch 2.8.0) — **+8.1% throughput**, still climbing at step 9,672.
+
+Machine D (same 8×RTX 5090 but PyTorch 2.10.0) showed only 9.7 step/s — a suspected `torch.compile` regression in the newer PyTorch version. Run killed and relaunched.
+
+| Config | step/s | Notes |
+|--------|--------|-------|
+| 1×5090 single-GPU (parquet) | 9.2 | `docs/research-notes-2026-03-15.md` |
+| 8×5090 DDP parquet+file-dup | 17.2 | Previous best, `--no-compile` |
+| 8×5090 DDP tensorized+compile | 18.6+ | Current best, still ramping |
+
+---
+
 ## Status
 
-Documentation complete. Code changes implemented. Ready to launch experiments comparing no-self-inputs against the baseline, with sequence length sweeps as a secondary variable.
+DDP + tensorized pipeline running on two 8×5090 pods. Machine C (PyTorch 2.8) reaching 18.6 step/s and climbing. Machine D (PyTorch 2.10) relaunched after a performance regression.
 
-Next: launch 6 runs (3x no-self-inputs at seq_len 60/120/240, 3x control at seq_len 60/120/240) and evaluate with `eval.py` to directly compare transition accuracy.
+Next: monitor convergence to target val_f1=98.5%, compare wall time to overfit against single-GPU baseline.

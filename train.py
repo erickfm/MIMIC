@@ -16,7 +16,10 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.utils as nn_utils
 import torch.nn.functional as F
+import torch.distributed as dist
 from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data.distributed import DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.amp import autocast
 from pathlib import Path
 
@@ -24,6 +27,17 @@ import wandb
 
 from dataset import MeleeFrameDatasetWithDelay, StreamingMeleeDataset
 from model   import FramePredictor, ModelConfig, MODEL_PRESETS
+
+# ---------------------------------------------------------------------------
+# Distributed helpers
+# ---------------------------------------------------------------------------
+_is_main = True  # rank 0 or single-GPU; set at start of train()
+
+def _log(*args, **kwargs):
+    """Print only on the main process."""
+    if _is_main:
+        kwargs.setdefault("flush", True)
+        print(*args, **kwargs)
 
 # -----------------------------------------------------------------------------
 # 1. Config
@@ -247,13 +261,14 @@ def _compute_intervals(max_steps):
     )
 
 
-def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=False):
+def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=False,
+                  rank=0, world_size=1):
     p = Path(data_dir)
     has_metadata = all((p / f).exists() for f in
                        ("norm_stats.json", "cat_maps.json", "file_index.json"))
 
     if has_metadata:
-        print(f"  Using streaming dataset from {data_dir}", flush=True)
+        _log(f"  Using streaming dataset from {data_dir}")
         train_ds = StreamingMeleeDataset(
             data_dir=data_dir,
             sequence_length=SEQUENCE_LENGTH,
@@ -261,6 +276,8 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=False):
             split="train",
             no_opp_inputs=no_opp_inputs,
             no_self_inputs=no_self_inputs,
+            rank=rank,
+            world_size=world_size,
         )
         val_ds = StreamingMeleeDataset(
             data_dir=data_dir,
@@ -269,9 +286,11 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=False):
             split="val",
             no_opp_inputs=no_opp_inputs,
             no_self_inputs=no_self_inputs,
+            rank=rank,
+            world_size=world_size,
         )
     else:
-        print(f"  No metadata found, using raw-parquet dataset (slow startup)", flush=True)
+        _log(f"  No metadata found, using raw-parquet dataset (slow startup)")
         train_ds = MeleeFrameDatasetWithDelay(
             parquet_dir=data_dir,
             sequence_length=SEQUENCE_LENGTH,
@@ -291,13 +310,14 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=False):
         )
     return train_ds, val_ds
 
-def get_dataloader(ds, shuffle=True, persistent=True):
+def get_dataloader(ds, shuffle=True, persistent=True, sampler=None):
     is_iterable = isinstance(ds, IterableDataset)
     nw = NUM_WORKERS if persistent else 0
     return DataLoader(
         ds,
         batch_size=BATCH_SIZE,
-        shuffle=(shuffle and not is_iterable),
+        shuffle=(shuffle and not is_iterable and sampler is None),
+        sampler=sampler,
         num_workers=nw,
         collate_fn=collate_fn,
         drop_last=True,
@@ -348,11 +368,15 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         model = torch.compile(model)
     return model, cfg
 
-def infinite_loader(dl):
+def infinite_loader(dl, sampler=None):
     """Yield batches forever, cycling through epochs."""
+    epoch = 0
     while True:
+        if sampler is not None:
+            sampler.set_epoch(epoch)
         for batch in dl:
             yield batch
+        epoch += 1
 
 # -----------------------------------------------------------------------------
 # 5. Training loop (step-based)
@@ -388,9 +412,26 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           max_wall_time: float = None,
           val_frac_override: float = None,
           warmup_steps_override: int = None,
-          weight_decay_override: float = None):
+          weight_decay_override: float = None,
+          scale_lr: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
+
+    # --- Distributed setup (auto-detect torchrun via RANK env var) ---
+    global _is_main, DEVICE
+    is_distributed = "RANK" in os.environ
+    if is_distributed:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        DEVICE = torch.device(f"cuda:{local_rank}")
+        dist.init_process_group("nccl", device_id=DEVICE)
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+    else:
+        rank, local_rank, world_size = 0, 0, 1
+    _is_main = (rank == 0)
+    if not _is_main:
+        os.environ["WANDB_MODE"] = "disabled"
 
     global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC, WEIGHT_DECAY
     if seq_len_override:
@@ -402,31 +443,42 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if weight_decay_override is not None:
         WEIGHT_DECAY = weight_decay_override
 
-    print(f"Loading dataset from {data_dir} ...", flush=True)
+    if is_distributed:
+        _log(f"DDP: {world_size} GPUs (rank {rank}, local_rank {local_rank}), "
+             f"per-GPU batch={BATCH_SIZE}, effective batch={BATCH_SIZE * world_size}")
+
+    _log(f"Loading dataset from {data_dir} ...")
     ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs,
-                              no_self_inputs=no_self_inputs)
+                              no_self_inputs=no_self_inputs,
+                              rank=rank, world_size=world_size)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
     n_val_games   = getattr(val_ds, "n_games", len(getattr(val_ds, "files", [])))
-    print(f"  Train: {n_train:,} windows from {n_train_games} games", flush=True)
-    print(f"  Val:   {n_val:,} windows from {n_val_games} games", flush=True)
+    _log(f"  Train: {n_train:,} windows from {n_train_games} games")
+    _log(f"  Val:   {n_val:,} windows from {n_val_games} games")
 
-    dl     = get_dataloader(ds)
-    val_dl = get_dataloader(val_ds, shuffle=False, persistent=False)
+    train_sampler, val_sampler = None, None
+    if is_distributed and not isinstance(ds, IterableDataset):
+        train_sampler = DistributedSampler(ds, shuffle=True)
+        val_sampler = DistributedSampler(val_ds, shuffle=False)
+
+    dl     = get_dataloader(ds, sampler=train_sampler)
+    val_dl = get_dataloader(val_ds, shuffle=False, persistent=False,
+                            sampler=val_sampler)
 
     est_batches = max(n_train // BATCH_SIZE, 1)
     if max_samples and max_steps is None:
         max_steps = max_samples // BATCH_SIZE
-        print(f"  {max_samples:,} samples / bs {BATCH_SIZE} = {max_steps:,} steps", flush=True)
+        _log(f"  {max_samples:,} samples / bs {BATCH_SIZE} = {max_steps:,} steps")
     elif max_steps is None:
         if epochs is None:
             epochs = 1
         max_steps = epochs * est_batches
-        print(f"  {epochs} epoch(s) x {est_batches} batches = {max_steps:,} steps", flush=True)
+        _log(f"  {epochs} epoch(s) x {est_batches} batches = {max_steps:,} steps")
     else:
         epoch_frac = max_steps / est_batches
-        print(f"  {max_steps:,} steps (~{epoch_frac:.2f} epochs)", flush=True)
+        _log(f"  {max_steps:,} steps (~{epoch_frac:.2f} epochs)")
 
     intervals = _compute_intervals(max_steps)
     log_interval  = intervals["log_interval"]
@@ -437,8 +489,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         warmup_steps = warmup_steps_override
 
     actual_lr = lr or LEARNING_RATE
+    if scale_lr and world_size > 1:
+        actual_lr *= world_size
+        _log(f"  LR scaled by {world_size}x: {lr or LEARNING_RATE} → {actual_lr}")
 
-    print(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}", flush=True)
+    _log(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}")
     from dataset import _load_cluster_centers
     _cp = Path(clusters_path) if clusters_path else None
     stick_centers_np, shoulder_centers_np = _load_cluster_centers(
@@ -449,7 +504,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             f"(checked: {clusters_path}, {data_dir}, data/full/)")
     n_stick_clusters = len(stick_centers_np)
     n_shoulder_bins = len(shoulder_centers_np)
-    print(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder", flush=True)
+    _log(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder")
 
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
                            num_layers_override=num_layers_override,
@@ -463,9 +518,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            n_stick_clusters=n_stick_clusters,
                            n_shoulder_bins=n_shoulder_bins)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})", flush=True)
-    print(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
-          f"ckpt={ckpt_interval}  warmup={warmup_steps}", flush=True)
+    _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
+    _log(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
+         f"ckpt={ckpt_interval}  warmup={warmup_steps}")
 
     loss_weights = torch.ones(len(TASK_NAMES), device=DEVICE)
 
@@ -498,7 +553,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         if ckpt.get("scheduler_state_dict"):
             scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_step = ckpt.get('global_step', 0)
-        print(f"Resumed from {resume}, starting at step {start_step}")
+        _log(f"Resumed from {resume}, starting at step {start_step}")
+
+    # --- DDP wrapping (after compile, optimizer, and checkpoint load) ---
+    if is_distributed:
+        model = DDP(model, device_ids=[local_rank])
+    _raw_model = model.module if is_distributed else model
 
     if not run_name:
         extra = {}
@@ -516,6 +576,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         tags=wandb_tags or [],
         config=dict(
             batch_size=BATCH_SIZE,
+            effective_batch_size=BATCH_SIZE * world_size,
+            world_size=world_size,
             learning_rate=actual_lr,
             max_steps=max_steps,
             total_samples=max_steps * BATCH_SIZE,
@@ -535,7 +597,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     )
     wandb.run.summary["n_params"] = n_params
 
-    loader = infinite_loader(dl)
+    loader = infinite_loader(dl, sampler=train_sampler)
     skip_ct = 0
     t0 = time.time()
 
@@ -556,11 +618,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     _oom_retries = 0
     best_val_f1 = -1.0
-    print(f"\n=== Training {max_steps} steps ===", flush=True)
+    _log(f"\n=== Training {max_steps} steps ===")
     _target_hit = False
     for step in range(start_step + 1, max_steps + 1):
         if max_wall_time and (time.time() - t0) > max_wall_time:
-            print(f"WALL TIME LIMIT ({max_wall_time}s) exceeded at step {step}", flush=True)
+            _log(f"WALL TIME LIMIT ({max_wall_time}s) exceeded at step {step}")
             break
 
         model.train()
@@ -578,11 +640,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             metrics, task_losses = compute_loss(
                 preds, target, btn_loss_type=cfg.btn_loss)
         except torch.cuda.OutOfMemoryError:
+            if is_distributed:
+                raise RuntimeError("OOM in distributed mode; reduce --batch-size")
             torch.cuda.empty_cache()
             _oom_retries += 1
             if _oom_retries <= 3:
                 BATCH_SIZE = max(BATCH_SIZE // 2, 1)
-                print(f"  [OOM] Halving batch size to {BATCH_SIZE}, retry #{_oom_retries}", flush=True)
+                _log(f"  [OOM] Halving batch size to {BATCH_SIZE}, retry #{_oom_retries}")
                 dl = get_dataloader(ds, shuffle=True)
                 loader = infinite_loader(dl)
                 scheduler.step()
@@ -594,7 +658,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
         if not torch.isfinite(total_loss):
             skip_ct += 1
-            print(f"  [skip] step {step} -- non-finite loss ({skip_ct} total)", flush=True)
+            _log(f"  [skip] step {step} -- non-finite loss ({skip_ct} total)")
             scheduler.step()
             continue
 
@@ -605,7 +669,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         has_inf_grad = not math.isfinite(grad_norm)
         if has_inf_grad:
             skip_ct += 1
-            print(f"  [skip] step {step} -- inf grad norm ({skip_ct} total)", flush=True)
+            _log(f"  [skip] step {step} -- inf grad norm ({skip_ct} total)")
             optimiser.zero_grad(set_to_none=True)
             scheduler.step()
             continue
@@ -620,34 +684,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 _run_sums[_mk] += metrics[_mk]
         _run_ct += 1
 
-        wandb.log({
-            "train/total":     total_loss.item(),
-            "train/main":      metrics["loss_main"],
-            "train/l":         metrics["loss_l"],
-            "train/r":         metrics["loss_r"],
-            "train/cdir":      metrics["loss_cdir"],
-            "train/btn":       metrics["loss_btn"],
-            "train/cdir_acc":  metrics["cdir_acc"],
-            "train/btn_acc":   metrics["btn_acc"],
-            "train/btn_f1":    metrics["btn_f1"],
-            "train/btn_precision": metrics["btn_precision"],
-            "train/btn_recall":    metrics["btn_recall"],
-            "train/main_f1":       metrics["main_f1"],
-            "train/main_precision": metrics["main_precision"],
-            "train/main_recall":    metrics["main_recall"],
-            "train/shldr_f1":       metrics["shldr_f1"],
-            "train/shldr_precision": metrics["shldr_precision"],
-            "train/shldr_recall":    metrics["shldr_recall"],
-            "train/cdir_f1":       metrics["cdir_f1"],
-            "train/cdir_precision": metrics["cdir_precision"],
-            "train/cdir_recall":    metrics["cdir_recall"],
-            "train/cdir_active_acc": metrics["cdir_active_acc"],
-            "train/main_top1_acc":    metrics["main_top1_acc"],
-            "train/shoulder_top1_acc": metrics["shoulder_top1_acc"],
-            "train/grad_norm": grad_norm,
-            "train/lr":        scheduler.get_last_lr()[0],
-        }, step=step)
-
         if step % log_interval == 0 or step == 1:
             elapsed = time.time() - t0
             sps = step / elapsed
@@ -655,12 +691,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             if _run_ct > 0:
                 avg_log = {f"avg/{k}": _run_sums[k] / _run_ct for k in _AVG_KEYS}
                 avg_log["perf/step_per_sec"]    = sps
-                avg_log["perf/samples_per_sec"] = sps * BATCH_SIZE
+                avg_log["perf/samples_per_sec"] = sps * BATCH_SIZE * world_size
                 wandb.log(avg_log, step=step)
                 _run_sums = {k: 0.0 for k in _AVG_KEYS}
                 _run_ct = 0
 
-            print(
+            _log(
                 f"[{step:5d}/{max_steps}] "
                 f"total={total_loss.item():.4f} "
                 f"main={metrics['loss_main']:.5f} "
@@ -676,7 +712,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 f"gnorm={grad_norm:.2f} "
                 f"lr={scheduler.get_last_lr()[0]:.2e} "
                 f"({sps:.1f} step/s)",
-                flush=True,
             )
 
         # Validation
@@ -715,70 +750,79 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             if val_ct > 0:
                 val_avg = {f"val/{k}": val_sums[k] / val_ct for k in _VAL_KEYS}
                 wandb.log(val_avg, step=step)
-                print(f"  -- val total={val_avg['val/total']:.4f}  "
-                      f"bf1={val_avg['val/btn_f1']:.1%} "
-                      f"bP={val_avg['val/btn_precision']:.1%} bR={val_avg['val/btn_recall']:.1%}  "
-                      f"mf1={val_avg['val/main_f1']:.1%} "
-                      f"sf1={val_avg['val/shldr_f1']:.1%} "
-                      f"cf1={val_avg['val/cdir_f1']:.1%}  "
-                      f"(batches={val_ct})", flush=True)
+                _log(f"  -- val total={val_avg['val/total']:.4f}  "
+                     f"bf1={val_avg['val/btn_f1']:.1%} "
+                     f"bP={val_avg['val/btn_precision']:.1%} bR={val_avg['val/btn_recall']:.1%}  "
+                     f"mf1={val_avg['val/main_f1']:.1%} "
+                     f"sf1={val_avg['val/shldr_f1']:.1%} "
+                     f"cf1={val_avg['val/cdir_f1']:.1%}  "
+                     f"(batches={val_ct})")
                 cur_val_f1 = val_avg.get('val/btn_f1', 0.0)
                 if cur_val_f1 > best_val_f1:
                     best_val_f1 = cur_val_f1
-                    os.makedirs("checkpoints", exist_ok=True)
-                    best_path = f"checkpoints/{run_name}_best.pt"
-                    best_ckpt = {
-                        "global_step":          step,
-                        "model_state_dict":     model.state_dict(),
-                        "optimizer_state_dict": optimiser.state_dict(),
-                        "scheduler_state_dict": scheduler.state_dict(),
-                        "loss_weights":         loss_weights.cpu(),
-                        "norm_stats":           ds.norm_stats,
-                        "config":               cfg.__dict__,
-                    }
-                    if stick_centers_np is not None:
-                        best_ckpt["stick_centers"] = stick_centers_np.tolist()
-                    if shoulder_centers_np is not None:
-                        best_ckpt["shoulder_centers"] = shoulder_centers_np.tolist()
-                    torch.save(best_ckpt, best_path)
-                    print(f"  -- new best val f1={cur_val_f1:.1%} → {best_path}", flush=True)
+                    if _is_main:
+                        os.makedirs("checkpoints", exist_ok=True)
+                        best_path = f"checkpoints/{run_name}_best.pt"
+                        best_ckpt = {
+                            "global_step":          step,
+                            "model_state_dict":     _raw_model.state_dict(),
+                            "optimizer_state_dict": optimiser.state_dict(),
+                            "scheduler_state_dict": scheduler.state_dict(),
+                            "loss_weights":         loss_weights.cpu(),
+                            "norm_stats":           ds.norm_stats,
+                            "config":               cfg.__dict__,
+                        }
+                        if stick_centers_np is not None:
+                            best_ckpt["stick_centers"] = stick_centers_np.tolist()
+                        if shoulder_centers_np is not None:
+                            best_ckpt["shoulder_centers"] = shoulder_centers_np.tolist()
+                        torch.save(best_ckpt, best_path)
+                        _log(f"  -- new best val f1={cur_val_f1:.1%} → {best_path}")
                 if target_val_f1 and cur_val_f1 >= target_val_f1:
                     _elapsed = time.time() - t0
-                    print(f"TARGET REACHED: val_f1={cur_val_f1:.4f} at step {step} in {_elapsed:.1f}s", flush=True)
+                    _log(f"TARGET REACHED: val_f1={cur_val_f1:.4f} at step {step} in {_elapsed:.1f}s")
                     wandb.log({"target_reached_step": step, "target_reached_wall_s": _elapsed}, step=step)
                     _target_hit = True
                     break
             else:
-                print("  -- val: no valid batches", flush=True)
+                _log("  -- val: no valid batches")
+            if is_distributed:
+                dist.barrier()
 
         # Checkpoint
         if step % ckpt_interval == 0 or step == max_steps:
-            os.makedirs("checkpoints", exist_ok=True)
-            ckpt_path = f"checkpoints/{run_name}_step{step:06d}.pt"
-            ckpt_data = {
-                "global_step":          step,
-                "model_state_dict":     model.state_dict(),
-                "optimizer_state_dict": optimiser.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict(),
-                "loss_weights":         loss_weights.cpu(),
-                "norm_stats":           ds.norm_stats,
-                "config":               cfg.__dict__,
-            }
-            if stick_centers_np is not None:
-                ckpt_data["stick_centers"] = stick_centers_np.tolist()
-            if shoulder_centers_np is not None:
-                ckpt_data["shoulder_centers"] = shoulder_centers_np.tolist()
-            torch.save(ckpt_data, ckpt_path)
-            print(f"  -- saved {ckpt_path}", flush=True)
+            if _is_main:
+                os.makedirs("checkpoints", exist_ok=True)
+                ckpt_path = f"checkpoints/{run_name}_step{step:06d}.pt"
+                ckpt_data = {
+                    "global_step":          step,
+                    "model_state_dict":     _raw_model.state_dict(),
+                    "optimizer_state_dict": optimiser.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "loss_weights":         loss_weights.cpu(),
+                    "norm_stats":           ds.norm_stats,
+                    "config":               cfg.__dict__,
+                }
+                if stick_centers_np is not None:
+                    ckpt_data["stick_centers"] = stick_centers_np.tolist()
+                if shoulder_centers_np is not None:
+                    ckpt_data["shoulder_centers"] = shoulder_centers_np.tolist()
+                torch.save(ckpt_data, ckpt_path)
+                _log(f"  -- saved {ckpt_path}")
+            if is_distributed:
+
+                dist.barrier()
 
     elapsed = time.time() - t0
     skip_msg = f"  skipped={skip_ct}" if skip_ct else ""
     epoch_frac = step / max(est_batches, 1)
-    print(f"\nDone. {step:,}/{max_steps:,} steps ({epoch_frac:.2f} epochs) in {elapsed:.0f}s "
-          f"({step/elapsed:.1f} step/s){skip_msg}", flush=True)
+    _log(f"\nDone. {step:,}/{max_steps:,} steps ({epoch_frac:.2f} epochs) in {elapsed:.0f}s "
+         f"({step/elapsed:.1f} step/s){skip_msg}")
     if target_val_f1 and not _target_hit:
-        print(f"TARGET NOT REACHED: best val_f1={best_val_f1:.4f} (target={target_val_f1:.4f})", flush=True)
+        _log(f"TARGET NOT REACHED: best val_f1={best_val_f1:.4f} (target={target_val_f1:.4f})")
     wandb.finish()
+    if is_distributed:
+        dist.destroy_process_group()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="MIMIC training")
@@ -859,6 +903,8 @@ if __name__ == "__main__":
                         help="Override validation frequency as fraction of max_steps (default: 0.05)")
     parser.add_argument("--warmup-steps", type=int, default=None,
                         help="Override warmup steps (default: 1%% of max_steps)")
+    parser.add_argument("--scale-lr", action="store_true",
+                        help="Scale LR by world_size for DDP (linear scaling rule)")
     args = parser.parse_args()
 
     import train as _self_module
@@ -908,4 +954,5 @@ if __name__ == "__main__":
         val_frac_override=args.val_frac,
         warmup_steps_override=args.warmup_steps,
         weight_decay_override=args.weight_decay,
+        scale_lr=args.scale_lr,
     )

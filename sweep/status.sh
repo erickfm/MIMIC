@@ -10,8 +10,10 @@ MACHINE_A="root@203.57.40.63"
 PORT_A=10015
 MACHINE_B="root@38.65.239.14"
 PORT_B=28750
-MACHINE_C="root@38.65.239.56"
-PORT_C=45107
+MACHINE_C="root@194.14.47.19"
+PORT_C=22824
+MACHINE_D="root@142.127.93.36"
+PORT_D=11559
 
 check_machine() {
     local label=$1 host=$2 port=$3
@@ -38,9 +40,11 @@ case "$TARGET" in
         check_machine A "$MACHINE_A" "$PORT_A"
         check_machine B "$MACHINE_B" "$PORT_B"
         check_machine C "$MACHINE_C" "$PORT_C"
+        check_machine D "$MACHINE_D" "$PORT_D"
         ;;
     A|a) check_machine A "$MACHINE_A" "$PORT_A" ;;
     B|b) check_machine B "$MACHINE_B" "$PORT_B" ;;
     C|c) check_machine C "$MACHINE_C" "$PORT_C" ;;
-    *) echo "Usage: status.sh [all|A|B|C]"; exit 1 ;;
+    D|d) check_machine D "$MACHINE_D" "$PORT_D" ;;
+    *) echo "Usage: status.sh [all|A|B|C|D]"; exit 1 ;;
 esac
