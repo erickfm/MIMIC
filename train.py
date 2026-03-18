@@ -396,7 +396,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.cuda.set_device(local_rank)
         DEVICE = torch.device(f"cuda:{local_rank}")
-        dist.init_process_group("nccl", device_id=DEVICE)
+        from datetime import timedelta
+        dist.init_process_group("nccl", device_id=DEVICE,
+                                timeout=timedelta(seconds=1800))
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
     else:
@@ -529,7 +531,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     # --- DDP wrapping (after compile, optimizer, and checkpoint load) ---
     if is_distributed:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(model, device_ids=[local_rank],
+                    find_unused_parameters=True)
     _raw_model = model.module if is_distributed else model
 
     if not run_name:

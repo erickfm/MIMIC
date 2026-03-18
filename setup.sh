@@ -8,7 +8,7 @@ set -euo pipefail
 #   bash setup.sh --run        # also starts a 1-epoch training run
 #   bash setup.sh --run --model small   # train with a smaller model
 
-REPO_ID="${HF_REPO:-erickfm/frame-melee}"
+REPO_ID="${HF_REPO:-erickfm/mimic-melee}"
 DATA_DIR="${DATA_DIR:-data/full}"
 RUN_AFTER=false
 EXTRA_TRAIN_ARGS=()

@@ -13,13 +13,13 @@ Prerequisites (already done for existing datasets):
 
 Usage:
     # Tensorize + upload (streaming, multiprocessing)
-    python3 upload_dataset.py --data-dir data/full --repo erickfm/frame-melee --stream --workers 64
+    python3 upload_dataset.py --data-dir data/full --repo erickfm/mimic-melee --stream --workers 64
 
     # Tensorize only (no upload)
-    python3 upload_dataset.py --data-dir data/full --repo erickfm/frame-melee --no-upload
+    python3 upload_dataset.py --data-dir data/full --repo erickfm/mimic-melee --no-upload
 
     # Upload a previously staged directory
-    python3 upload_dataset.py --staging-dir data/full_upload --repo erickfm/frame-melee --upload-only
+    python3 upload_dataset.py --staging-dir data/full_upload --repo erickfm/mimic-melee --upload-only
 """
 
 import sys as _sys
@@ -518,7 +518,7 @@ def main():
     parser.add_argument("--data-dir", type=str, default=None,
                         help="Directory with parquets + metadata JSONs")
     parser.add_argument("--repo", required=True,
-                        help="HuggingFace repo ID (e.g. erickfm/frame-melee)")
+                        help="HuggingFace repo ID (e.g. erickfm/mimic-melee)")
     parser.add_argument("--shard-gb", type=float, default=4.0,
                         help="Target shard size in GB (default: 4)")
     parser.add_argument("--staging-dir", default=None,

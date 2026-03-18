@@ -239,8 +239,8 @@ bash setup.sh --run --model small     # 14M param model
 bash setup.sh --run --model tiny      # 3.5M param model
 ```
 
-The full dataset is hosted at [erickfm/frame-melee](https://huggingface.co/datasets/erickfm/frame-melee) (~94k replays, pretokenized tensor shards).
-A smaller subset is at [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) for quick experiments.
+The full dataset is hosted at [erickfm/mimic-melee](https://huggingface.co/datasets/erickfm/mimic-melee) (~94k replays, pretokenized tensor shards).
+A smaller subset is at [erickfm/mimic-melee-subset](https://huggingface.co/datasets/erickfm/mimic-melee-subset) for quick experiments.
 
 ## Manual Setup
 
@@ -252,12 +252,16 @@ pip install torch numpy pandas pyarrow wandb huggingface_hub melee==0.45.1 typin
 
 ## Data
 
-Two datasets are hosted on HuggingFace as pretokenized tensor shards:
+Three datasets are hosted on HuggingFace as pretokenized tensor shards:
 
-| Dataset | Replays | Size | Use |
-|---|---|---|---|
-| [erickfm/frame-melee](https://huggingface.co/datasets/erickfm/frame-melee) | ~94k | ~86 GB | Full training |
-| [erickfm/frame-melee-subset](https://huggingface.co/datasets/erickfm/frame-melee-subset) | ~1k | ~780 MB | Quick experiments |
+| Dataset | Replays | Games | Size | Use |
+|---|---|---|---|---|
+| [erickfm/mimic-melee](https://huggingface.co/datasets/erickfm/mimic-melee) | ~94k | 188,416 | 2.59 TB | Full training |
+| [erickfm/mimic-melee-subset](https://huggingface.co/datasets/erickfm/mimic-melee-subset) | ~1k | 2,000 | 26.7 GB | Quick experiments |
+| [erickfm/mimic-melee-wavedash](https://huggingface.co/datasets/erickfm/mimic-melee-wavedash) | 1 (synthetic) | 57,480 windows | 4.93 GB | Wavedash fine-tuning |
+
+Game counts are 2x replay counts because each replay is tensorized from both
+players' perspectives.
 
 Each dataset contains `.pt` shard files with pretokenized game data (all
 preprocessing, normalization, and target building done ahead of time),
@@ -281,14 +285,14 @@ Or manually:
 ```bash
 python3 -c "
 from huggingface_hub import snapshot_download
-snapshot_download('erickfm/frame-melee', repo_type='dataset', local_dir='data/full')
+snapshot_download('erickfm/mimic-melee', repo_type='dataset', local_dir='data/full')
 "
 ```
 
 For the smaller subset:
 
 ```bash
-bash setup.sh --repo erickfm/frame-melee-subset --data-dir data/subset
+bash setup.sh --repo erickfm/mimic-melee-subset --data-dir data/subset
 ```
 
 Source parquet files are generated from Slippi `.slp` replays using
