@@ -380,8 +380,8 @@ All runs at eff batch 512 (bs=64 × 8 GPUs), lr=5e-5, --no-compile.
 ## Status (End of 2026-03-19)
 
 - All runs killed, bug fix synced to C/E/F
-- **C** (`194.14.47.19:22874`): ready, has data + deps + fixed code
-- **E** (`66.222.138.178:11335`): ready, has data + deps + fixed code
-- **F** (`74.2.96.10:18619`): ready, has data + deps + fixed code
-- **D**: needs new machine — will run xxlarge model capacity test
-- Waiting for user to provide new Machine D before launching
+- **C** (`194.14.47.19:22874`): 8× RTX 5090, ready, has data + deps + fixed code
+- **D** (`50.145.48.107:12404`): **8× H200 144 GB**, 2 TB disk, PyTorch 2.4 — needs setup (deps, code, data)
+- **E** (`66.222.138.178:11335`): 8× RTX 5090, ready, has data + deps + fixed code
+- **F** (`74.2.96.10:18619`): 8× RTX 5090, ready, has data + deps + fixed code
+- All 4 machines available, ready to launch context window ablation + capacity test
