@@ -291,11 +291,62 @@ These are testable hypotheses for future runs.
 
 ---
 
-## Status (End of 2026-03-18)
+---
 
-- All training runs killed
-- **C** (`194.14.47.19:22874`): idle, has full data + deps
-- **E** (`66.222.138.178:11335`): idle, has full data + deps
-- **F** (`74.2.96.10:18619`): idle, has full data + deps
+## Phase 8: Critical Bug — `--self-inputs` Flag Broken (Found 2026-03-19)
+
+### The Bug
+
+In `train.py` `get_model()`, the override logic for `no_self_inputs` only applied when the value was `True`:
+
+```python
+if no_self_inputs:
+    overrides["no_self_inputs"] = True
+```
+
+When `--self-inputs` was passed (`no_self_inputs=False`), the override was **never set**. Since `ModelConfig.no_self_inputs` was changed to default `True` in commit `83fd59c`, the config always received `True` regardless of the CLI flag.
+
+### Impact
+
+**Every run since commit `83fd59c` (2026-03-18) trained with `no_self_inputs=True`**, including runs explicitly launched with `--self-inputs`. This affected:
+
+- All 4 wavedash self-inputs ablation runs (both conditions were actually identical)
+- All 3 eff-1024 full-data runs (the "self-inputs control" on Machine C was not actually using self-inputs)
+- All 3 eff-512 full-data runs (Machine F's "self-inputs" run was identical to C and E)
+
+### Consequences
+
+1. **The batch size theory was wrong.** The ~40% btn_f1 plateau on full data was not caused by effective batch size. It was caused by `no_self_inputs=True` — the model cannot learn full Melee gameplay without self-controller feedback. The old `full-ddp-D-500M` run that hit 89% btn_f1 was the last run on the old code where self-inputs worked.
+
+2. **The wavedash ablation was accidentally valid.** Both conditions truly ran with `no_self_inputs=True`, confirming that self-inputs don't matter for wavedash (a conclusion that happened to be correct, for the wrong reason).
+
+3. **All batch size conclusions are confounded.** The eff-1024 vs eff-512 comparison was actually comparing two runs that both lacked self-inputs. The batch size effect may still be real, but we can't confirm it from these runs.
+
+### Fix
+
+```python
+# Before (broken)
+if no_opp_inputs:
+    overrides["no_opp_inputs"] = True
+if no_self_inputs:
+    overrides["no_self_inputs"] = True
+
+# After (fixed)
+overrides["no_opp_inputs"] = no_opp_inputs
+overrides["no_self_inputs"] = no_self_inputs
+```
+
+Note: the same pattern existed for `no_opp_inputs`, meaning `--opp-inputs` was also broken. Both are now fixed.
+
+### Root Cause
+
+The original override logic (`if value: overrides[key] = True`) was designed for flags that default to `False` — it only needs to override when turning something ON. When we flipped the default to `True`, the logic needed to also handle turning it OFF, but we didn't update it.
+
+---
+
+## Status (End of 2026-03-19)
+
+- Three runs still active on C/E/F (all no_self_inputs=True, now understood to be the cause of poor metrics)
+- Bug fix committed but not yet synced to remote machines
 - **D**: needs replacement machine
-- HuggingFace: `erickfm/mimic-melee-500M` uploaded (200 shards, 761 GB)
+- **Next**: kill current runs, sync fix, relaunch with working `--self-inputs` flag to get the first real self-inputs comparison on full data at eff 512

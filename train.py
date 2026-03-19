@@ -326,10 +326,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["n_kv_heads"] = n_kv_heads
     if btn_loss:
         overrides["btn_loss"] = btn_loss
-    if no_opp_inputs:
-        overrides["no_opp_inputs"] = True
-    if no_self_inputs:
-        overrides["no_self_inputs"] = True
+    overrides["no_opp_inputs"] = no_opp_inputs
+    overrides["no_self_inputs"] = no_self_inputs
     if n_stick_clusters is not None:
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
