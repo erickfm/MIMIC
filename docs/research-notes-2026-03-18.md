@@ -344,9 +344,44 @@ The original override logic (`if value: overrides[key] = True`) was designed for
 
 ---
 
+## Phase 9: Next Experiment — Context Window + Capacity (Planned 2026-03-19)
+
+### Motivation
+
+With the `--self-inputs` bug found, we know no_self_inputs=True plateaus at ~40% btn_f1 on full data. Before giving up on no-self-inputs entirely, we want to test whether **longer context** (256 frames, matching HAL) helps the model infer intention from game state trajectory instead of needing explicit controller feedback. HAL uses 256-frame context and self-inputs — we want to see if long context alone can compensate.
+
+### Planned Runs
+
+| Machine | Run | Context | Self-Inputs | Model | Samples |
+|---------|-----|---------|-------------|-------|---------|
+| C | `full-nsi-ctx256-seed42` | 256 frames | No | medium (~32M) | 250M |
+| E | `full-nsi-ctx256-seed43` | 256 frames | No | medium (~32M) | 250M |
+| F | `full-si-ctx60-seed42` | 60 frames | **Yes** (fixed flag) | medium (~32M) | 250M |
+| New D | `full-nsi-ctx256-xxl-seed42` | 256 frames | No | xxlarge (~228M) | 250M |
+
+**What we learn:**
+- C vs E: seed variance at ctx=256 no-self-inputs
+- C vs F: does ctx=256 no-self-inputs match ctx=60 self-inputs? (the key question)
+- New D: does a 7x larger model help when inputs are removed? (capacity test)
+
+All runs at eff batch 512 (bs=64 × 8 GPUs), lr=5e-5, --no-compile.
+
+### Available Model Presets
+
+| Preset | d_model | Layers | Heads | ~Params |
+|--------|---------|--------|-------|---------|
+| medium | 768 | 4 | 8 | ~32M |
+| base | 1024 | 4 | 8 | ~51M |
+| xlarge | 1024 | 8 | 8 | ~102M |
+| xxlarge | 1536 | 8 | 12 | ~228M |
+
+---
+
 ## Status (End of 2026-03-19)
 
-- Three runs still active on C/E/F (all no_self_inputs=True, now understood to be the cause of poor metrics)
-- Bug fix committed but not yet synced to remote machines
-- **D**: needs replacement machine
-- **Next**: kill current runs, sync fix, relaunch with working `--self-inputs` flag to get the first real self-inputs comparison on full data at eff 512
+- All runs killed, bug fix synced to C/E/F
+- **C** (`194.14.47.19:22874`): ready, has data + deps + fixed code
+- **E** (`66.222.138.178:11335`): ready, has data + deps + fixed code
+- **F** (`74.2.96.10:18619`): ready, has data + deps + fixed code
+- **D**: needs new machine — will run xxlarge model capacity test
+- Waiting for user to provide new Machine D before launching
