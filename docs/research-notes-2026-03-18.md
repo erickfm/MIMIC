@@ -204,10 +204,72 @@ The HAL comparison suggests our architecture may be over-engineered (complex fra
 
 ---
 
+## Phase 7: Self-Inputs Control Run + Batch Size Theory
+
+### Setup
+
+Launched `full-bs128-si-seed42` on Machine C with `--self-inputs` — same seed, same batch size as Machine F's no-self-inputs run. Direct comparison.
+
+### Mid-Training Observation (step ~200k)
+
+| | C: self-inputs seed42 | E: no-self seed43 | F: no-self seed42 |
+|---|---|---|---|
+| Step | 190k | 205k | 259k |
+| Train btn_f1 | 43.9% | 38.6% | 56.3% |
+| **Val btn_f1** | **39.9%** | **39.6%** | **39.1%** |
+| Val main_f1 | 6.6% | 7.1% | 8.0% |
+| Val loss | 1.96 | 1.82 | 1.83 |
+| step/s | 14.2 | 10.0 | 11.0 |
+
+### Corrected Understanding: Batch Size, Not Self-Inputs
+
+**The earlier conclusion that no_self_inputs "dramatically hurts learning" was wrong.** Machine C with self-inputs has nearly identical val metrics to the no-self-inputs runs. All three runs are underperforming equally.
+
+The confound is **effective batch size**. All three runs use batch=128 × 8 GPUs = eff 1024. Prior successful runs used:
+
+| Run | Eff batch | Result |
+|-----|-----------|--------|
+| Sweep (single GPU, batch=256) | 256 | 88-90% val btn_f1 |
+| full-ddp-D-500M (batch=64 × 8) | 512 | 89% btn_f1 at step 48k |
+| Wavedash bs=32 (batch=32 × 8) | 256 | Hit 98.5% target |
+| Wavedash bs=64 (batch=64 × 8) | 512 | Hit 98.5% target |
+| Wavedash bs=128 (batch=128 × 8) | 1024 | Missed target (98.28%) |
+| Wavedash bs=256 (batch=256 × 8) | 2048 | Plateaued at 96.1% |
+| **Current full-data runs (batch=128 × 8)** | **1024** | **~39% btn_f1 at 200k+ steps** |
+
+The pattern is consistent: eff batch ≤512 converges well, eff batch ≥1024 underperforms. This holds on both wavedash and full data. On wavedash the gap was small (98.5% vs 98.3%), but on full Melee data it's catastrophic (89% vs 39% at comparable step counts).
+
+The self-inputs vs no-self-inputs question **cannot be evaluated at eff batch 1024** because the batch size itself prevents convergence. Any real self-inputs effect is masked by the batch size bottleneck.
+
+### Why Large Batch Hurts More on Full Data Than Wavedash
+
+Wavedash is a single repeating pattern — larger batches still capture the full distribution. Full Melee has thousands of characters, matchups, situations, and tech patterns. At eff batch 1024, each gradient step averages over too many diverse examples, washing out the signal from rare but important patterns (wavedash angles, combo starters, DI). Smaller batches see fewer examples per step but each step gets a sharper gradient signal, enabling the model to learn rare patterns without them being averaged away.
+
+This is consistent with HAL's finding: "going to 1024 batch size made the model generalize much worse — smaller batch sizes seem to help regularize learning."
+
+### Current Theory
+
+1. **Effective batch size is the dominant variable** — more important than self-inputs, dropout, or most other hyperparameters on full Melee data
+2. **Eff batch 256-512 is the sweet spot** for our model/LR/data combination, consistent across wavedash and full data
+3. **Self-inputs effect is still unknown** — needs evaluation at eff batch ≤512
+4. **LR may interact with batch size** — HAL uses 3e-4 (6x higher) with batch 1024. We might be able to use larger batches with higher LR, but our sweep found only 5e-5 worked. That sweep used self-inputs though.
+
+### Next Steps (After Current Runs Complete)
+
+1. **Priority: bs=64 runs on full data** (eff batch 512) — this is the proven working config. Need Machine D replacement. Run with both seeds (42, 43) to see where full-data training actually converges at a proper batch size.
+
+2. **Self-inputs ablation at eff 512** — once bs=64 runs work, add a `--self-inputs` control to determine if self-controller feedback actually helps on full data at a batch size that converges.
+
+3. **Consider LR sweep at eff 512** — test whether 1e-4 or 3e-4 works at eff 512. HAL uses 3e-4 at eff 1024. If higher LR works with our architecture, training time drops dramatically.
+
+4. **Let current eff-1024 runs finish** — they may still slowly converge over the full 1B sample budget. The final val F1 will tell us the ceiling for eff 1024, which is useful even if suboptimal.
+
+---
+
 ## Status
 
-- **E**: `full-bs128-seed43` training, ~27h remaining
-- **F**: `full-bs128-seed42` training, ~24h remaining, also uploaded mimic-melee-500M to HuggingFace
-- **C** (194.14.47.19:22874): set up with deps, needs data rsync from F
-- **D**: needs replacement machine
-- Two bs=64 runs pending machine availability
+- **C** (`194.14.47.19:22874`): `full-bs128-si-seed42` (self-inputs control), step 190k, ~15h remaining
+- **E** (`66.222.138.178:11335`): `full-bs128-seed43`, step 205k, ~21h remaining
+- **F** (`74.2.96.10:18619`): `full-bs128-seed42`, step 259k, ~18h remaining
+- **D**: needs replacement machine — critical for bs=64 (eff 512) runs
+- HuggingFace: `erickfm/mimic-melee-500M` uploaded (200 shards, 761 GB)
