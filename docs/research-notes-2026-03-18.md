@@ -254,22 +254,48 @@ This is consistent with HAL's finding: "going to 1024 batch size made the model 
 3. **Self-inputs effect is still unknown** — needs evaluation at eff batch ≤512
 4. **LR may interact with batch size** — HAL uses 3e-4 (6x higher) with batch 1024. We might be able to use larger batches with higher LR, but our sweep found only 5e-5 worked. That sweep used self-inputs though.
 
-### Next Steps (After Current Runs Complete)
+### Final Results (Runs Killed 2026-03-19)
 
-1. **Priority: bs=64 runs on full data** (eff batch 512) — this is the proven working config. Need Machine D replacement. Run with both seeds (42, 43) to see where full-data training actually converges at a proper batch size.
+All three runs plateaued and were killed. LR had decayed to 1/6th–1/12th of peak with no improvement in val metrics.
 
-2. **Self-inputs ablation at eff 512** — once bs=64 runs work, add a `--self-inputs` control to determine if self-controller feedback actually helps on full data at a batch size that converges.
+| | C: self-inputs seed42 | E: no-self seed43 | F: no-self seed42 |
+|---|---|---|---|
+| **Final step** | 801k / 976k (82%) | 635k / 976k (65%) | 727k / 976k (74%) |
+| **Val btn_f1** | **41.5%** | 38.3% | 38.5% |
+| **Val main_f1** | 7.1% | 7.7% | 8.1% |
+| **Val loss** | 1.84 | 1.97 | 1.69 |
+| **LR at kill** | 4.3e-6 | — | 8.4e-6 |
+| **Samples seen** | ~820M | ~650M | ~745M |
 
-3. **Consider LR sweep at eff 512** — test whether 1e-4 or 3e-4 works at eff 512. HAL uses 3e-4 at eff 1024. If higher LR works with our architecture, training time drops dramatically.
+**Conclusion:** Eff batch 1024 plateaus at ~40% val btn_f1 on full Melee data regardless of self-inputs. Self-inputs gave a marginal +3% edge (41.5% vs 38.5%) but this is negligible compared to the 89% achieved at eff batch 512 by the old full-ddp-D-500M run.
 
-4. **Let current eff-1024 runs finish** — they may still slowly converge over the full 1B sample budget. The final val F1 will tell us the ceiling for eff 1024, which is useful even if suboptimal.
+### Why Large Batch Causes Such a Large Gap
+
+The 40% vs 89% gap from a 2x batch size change is extreme. Two contributing factors beyond gradient averaging:
+
+1. **Half the gradient updates for the same data.** At eff 1024 with 976k max_steps, the model gets half the optimization steps compared to eff 512 with 1.95M steps for the same 1B samples. The cosine LR schedule is tied to max_steps, so the model has half as many steps at high LR before decay kicks in.
+
+2. **LR not scaled with batch size.** The standard fix for large-batch training is linear LR scaling. We used the same lr=5e-5 for both eff 512 and 1024. Doubling to 1e-4 for eff 1024 might close the gap. However, the prior sweep found only lr=5e-5 converged — though that sweep used self-inputs and single-GPU batch=256.
+
+These are testable hypotheses for future runs.
+
+### Next Steps
+
+1. **Priority: bs=64 runs on full data** (eff batch 512) — the proven working config. Need Machine D replacement. Run with both seeds (42, 43) and both self-inputs conditions.
+
+2. **LR scaling experiment** — test lr=1e-4 at eff 1024 (bs=128×8) to determine if the gap is purely an LR issue. If this works, 8-GPU DDP becomes viable at bs=128 which is more throughput-efficient.
+
+3. **Self-inputs ablation at eff 512** — the only valid way to test self-inputs. The eff-1024 runs were confounded by batch size.
+
+4. **HAL-inspired changes** — single-label buttons, longer context (256 frames), higher LR. Each could be tested independently at eff 512.
 
 ---
 
-## Status
+## Status (End of 2026-03-18)
 
-- **C** (`194.14.47.19:22874`): `full-bs128-si-seed42` (self-inputs control), step 190k, ~15h remaining
-- **E** (`66.222.138.178:11335`): `full-bs128-seed43`, step 205k, ~21h remaining
-- **F** (`74.2.96.10:18619`): `full-bs128-seed42`, step 259k, ~18h remaining
-- **D**: needs replacement machine — critical for bs=64 (eff 512) runs
+- All training runs killed
+- **C** (`194.14.47.19:22874`): idle, has full data + deps
+- **E** (`66.222.138.178:11335`): idle, has full data + deps
+- **F** (`74.2.96.10:18619`): idle, has full data + deps
+- **D**: needs replacement machine
 - HuggingFace: `erickfm/mimic-melee-500M` uploaded (200 shards, 761 GB)
