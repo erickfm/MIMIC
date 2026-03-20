@@ -387,7 +387,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           scale_lr: bool = False,
           grad_accum_steps: int = 1,
           nccl_timeout: int = 1800,
-          grad_clip_norm: float = None):
+          grad_clip_norm: float = None,
+          no_load_optim: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -532,11 +533,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if resume:
         ckpt = torch.load(resume, map_location=DEVICE)
         model.load_state_dict(ckpt['model_state_dict'])
-        optimiser.load_state_dict(ckpt['optimizer_state_dict'])
-        if ckpt.get("scheduler_state_dict"):
-            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if not no_load_optim:
+            optimiser.load_state_dict(ckpt['optimizer_state_dict'])
+            if ckpt.get("scheduler_state_dict"):
+                scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_step = ckpt.get('global_step', 0)
-        _log(f"Resumed from {resume}, starting at step {start_step}")
+        _log(f"Resumed from {resume}, starting at step {start_step}"
+             + (f" (fresh optimizer, lr={actual_lr})" if no_load_optim else ""))
 
     # --- DDP wrapping (after compile, optimizer, and checkpoint load) ---
     if is_distributed:
@@ -919,6 +922,8 @@ if __name__ == "__main__":
                         help="NCCL timeout in seconds (default: 1800, use 3600 for large models)")
     parser.add_argument("--grad-clip-norm", type=float, default=None,
                         help="Gradient clipping norm (default: 1.0)")
+    parser.add_argument("--no-load-optim", action="store_true",
+                        help="Skip loading optimizer/scheduler state on resume (fresh LR)")
     args = parser.parse_args()
 
     import train as _self_module
@@ -972,4 +977,5 @@ if __name__ == "__main__":
         grad_accum_steps=args.grad_accum_steps,
         nccl_timeout=args.nccl_timeout,
         grad_clip_norm=args.grad_clip_norm,
+        no_load_optim=args.no_load_optim,
     )
