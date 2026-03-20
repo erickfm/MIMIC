@@ -28,8 +28,8 @@ set -euo pipefail
 declare -A HOSTS PORTS GPUS DIRS
 HOSTS[A]="root@203.57.40.63";  PORTS[A]=10015;  GPUS[A]=6;  DIRS[A]="/root/FRAME"  # OFFLINE
 HOSTS[B]="root@38.65.239.14";  PORTS[B]=28750;  GPUS[B]=7;  DIRS[B]="/root/FRAME"  # OFFLINE
-HOSTS[C]="root@194.14.47.19";  PORTS[C]=22824;  GPUS[C]=8;  DIRS[C]="/root/FRAME"
-HOSTS[D]="root@142.127.93.36"; PORTS[D]=11559;  GPUS[D]=8;  DIRS[D]="/root/FRAME"
+HOSTS[C]="root@194.14.47.19";  PORTS[C]=22874;  GPUS[C]=8;  DIRS[C]="/root/FRAME"
+HOSTS[D]="root@50.145.48.107"; PORTS[D]=12404;  GPUS[D]=8;  DIRS[D]="/root/FRAME"
 HOSTS[E]="root@66.222.138.178"; PORTS[E]=11335; GPUS[E]=8;  DIRS[E]="/root/FRAME"
 HOSTS[F]="root@74.2.96.10";     PORTS[F]=18619; GPUS[F]=8;  DIRS[F]="/root/FRAME"
 

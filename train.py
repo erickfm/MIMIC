@@ -11,6 +11,7 @@ import os
 import math
 import time
 import argparse
+from contextlib import nullcontext
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -383,7 +384,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           val_frac_override: float = None,
           warmup_steps_override: int = None,
           weight_decay_override: float = None,
-          scale_lr: bool = False):
+          scale_lr: bool = False,
+          grad_accum_steps: int = 1,
+          nccl_timeout: int = 1800,
+          grad_clip_norm: float = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -396,7 +400,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         DEVICE = torch.device(f"cuda:{local_rank}")
         from datetime import timedelta
         dist.init_process_group("nccl", device_id=DEVICE,
-                                timeout=timedelta(seconds=1800))
+                                timeout=timedelta(seconds=nccl_timeout))
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
     else:
@@ -405,7 +409,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if not _is_main:
         os.environ["WANDB_MODE"] = "disabled"
 
-    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC, WEIGHT_DECAY
+    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC, WEIGHT_DECAY, GRAD_CLIP_NORM
     if seq_len_override:
         SEQUENCE_LENGTH = seq_len_override
     if batch_size_override:
@@ -414,10 +418,17 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         VAL_FRAC = val_frac_override
     if weight_decay_override is not None:
         WEIGHT_DECAY = weight_decay_override
+    if grad_clip_norm is not None:
+        GRAD_CLIP_NORM = grad_clip_norm
 
+    eff_batch = BATCH_SIZE * world_size * grad_accum_steps
     if is_distributed:
         _log(f"DDP: {world_size} GPUs (rank {rank}, local_rank {local_rank}), "
-             f"per-GPU batch={BATCH_SIZE}, effective batch={BATCH_SIZE * world_size}")
+             f"per-GPU batch={BATCH_SIZE}, accum={grad_accum_steps}, effective batch={eff_batch}")
+    elif grad_accum_steps > 1:
+        _log(f"Gradient accumulation: {grad_accum_steps} steps, effective batch={eff_batch}")
+    if eff_batch > 512:
+        _log(f"  WARNING: eff batch {eff_batch} > 512 — known to plateau on full Melee data")
 
     _log(f"Loading dataset from {data_dir} ...")
     ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs,
@@ -599,44 +610,66 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             break
 
         model.train()
-        state, target = next(loader)
+        optimiser.zero_grad(set_to_none=True)
 
-        for k, v in state.items():
-            state[k] = v.to(DEVICE, non_blocking=True)
-        for k, v in target.items():
-            target[k] = v.to(DEVICE, non_blocking=True)
+        # -- Gradient accumulation loop --
+        accum_loss = 0.0
+        accum_metrics = None
+        skip_step = False
+        for _micro in range(grad_accum_steps):
+            # Skip DDP gradient sync on all but last micro-batch
+            maybe_no_sync = (model.no_sync() if is_distributed and _micro < grad_accum_steps - 1
+                             else nullcontext())
+            state, target = next(loader)
+            for k, v in state.items():
+                state[k] = v.to(DEVICE, non_blocking=True)
+            for k, v in target.items():
+                target[k] = v.to(DEVICE, non_blocking=True)
 
-        try:
-            with autocast("cuda", dtype=AMP_DTYPE):
-                preds = model(state)
+            try:
+                with autocast("cuda", dtype=AMP_DTYPE):
+                    preds = model(state)
+                metrics, task_losses = compute_loss(
+                    preds, target, btn_loss_type=cfg.btn_loss)
+            except torch.cuda.OutOfMemoryError:
+                mem = torch.cuda.max_memory_allocated() / 1e9
+                _log(f"OOM on rank {rank}, device {DEVICE}: {mem:.1f}GB peak")
+                if is_distributed:
+                    raise RuntimeError(
+                        f"OOM on rank {rank} ({mem:.1f}GB peak). "
+                        f"Reduce --batch-size or add --grad-accum-steps.")
+                torch.cuda.empty_cache()
+                _oom_retries += 1
+                if _oom_retries <= 3:
+                    BATCH_SIZE = max(BATCH_SIZE // 2, 1)
+                    _log(f"  [OOM] Halving batch size to {BATCH_SIZE}, retry #{_oom_retries}")
+                    dl = get_dataloader(ds, shuffle=True)
+                    loader = infinite_loader(dl)
+                    skip_step = True
+                    break
+                else:
+                    raise RuntimeError(f"OOM after {_oom_retries} retries (batch_size={BATCH_SIZE})")
 
-            metrics, task_losses = compute_loss(
-                preds, target, btn_loss_type=cfg.btn_loss)
-        except torch.cuda.OutOfMemoryError:
-            if is_distributed:
-                raise RuntimeError("OOM in distributed mode; reduce --batch-size")
-            torch.cuda.empty_cache()
-            _oom_retries += 1
-            if _oom_retries <= 3:
-                BATCH_SIZE = max(BATCH_SIZE // 2, 1)
-                _log(f"  [OOM] Halving batch size to {BATCH_SIZE}, retry #{_oom_retries}")
-                dl = get_dataloader(ds, shuffle=True)
-                loader = infinite_loader(dl)
-                scheduler.step()
-                continue
-            else:
-                raise RuntimeError(f"OOM after {_oom_retries} retries (batch_size={BATCH_SIZE})")
-        loss_vec = torch.stack(task_losses)
-        total_loss = (loss_weights * loss_vec).sum()
+            loss_vec = torch.stack(task_losses)
+            micro_loss = (loss_weights * loss_vec).sum() / grad_accum_steps
 
-        if not torch.isfinite(total_loss):
-            skip_ct += 1
-            _log(f"  [skip] step {step} -- non-finite loss ({skip_ct} total)")
+            if not torch.isfinite(micro_loss):
+                skip_step = True
+                skip_ct += 1
+                _log(f"  [skip] step {step} -- non-finite loss ({skip_ct} total)")
+                break
+
+            with maybe_no_sync:
+                micro_loss.backward()
+            accum_loss += micro_loss.item()
+
+            # Accumulate metrics (use last micro-batch for per-step logging)
+            accum_metrics = metrics
+
+        if skip_step:
+            optimiser.zero_grad(set_to_none=True)
             scheduler.step()
             continue
-
-        optimiser.zero_grad(set_to_none=True)
-        total_loss.backward()
 
         grad_norm = nn_utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_NORM).item()
         has_inf_grad = not math.isfinite(grad_norm)
@@ -650,7 +683,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         optimiser.step()
         scheduler.step()
 
-        _run_sums["total"]     += total_loss.item()
+        total_loss_val = accum_loss  # already averaged across micro-batches
+        metrics = accum_metrics
+        _run_sums["total"]     += total_loss_val
         _run_sums["grad_norm"] += grad_norm
         for _mk in _AVG_KEYS:
             if _mk not in ("total", "grad_norm"):
@@ -664,14 +699,14 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             if _run_ct > 0:
                 avg_log = {f"avg/{k}": _run_sums[k] / _run_ct for k in _AVG_KEYS}
                 avg_log["perf/step_per_sec"]    = sps
-                avg_log["perf/samples_per_sec"] = sps * BATCH_SIZE * world_size
+                avg_log["perf/samples_per_sec"] = sps * BATCH_SIZE * world_size * grad_accum_steps
                 wandb.log(avg_log, step=step)
                 _run_sums = {k: 0.0 for k in _AVG_KEYS}
                 _run_ct = 0
 
             _log(
                 f"[{step:5d}/{max_steps}] "
-                f"total={total_loss.item():.4f} "
+                f"total={total_loss_val:.4f} "
                 f"main={metrics['loss_main']:.5f} "
                 f"l={metrics['loss_l']:.5f} "
                 f"r={metrics['loss_r']:.5f} "
@@ -878,6 +913,12 @@ if __name__ == "__main__":
                         help="Override warmup steps (default: 1%% of max_steps)")
     parser.add_argument("--scale-lr", action="store_true",
                         help="Scale LR by world_size for DDP (linear scaling rule)")
+    parser.add_argument("--grad-accum-steps", type=int, default=1,
+                        help="Gradient accumulation steps (default: 1, eff_batch = bs * gpus * accum)")
+    parser.add_argument("--nccl-timeout", type=int, default=1800,
+                        help="NCCL timeout in seconds (default: 1800, use 3600 for large models)")
+    parser.add_argument("--grad-clip-norm", type=float, default=None,
+                        help="Gradient clipping norm (default: 1.0)")
     args = parser.parse_args()
 
     import train as _self_module
@@ -928,4 +969,7 @@ if __name__ == "__main__":
         warmup_steps_override=args.warmup_steps,
         weight_decay_override=args.weight_decay,
         scale_lr=args.scale_lr,
+        grad_accum_steps=args.grad_accum_steps,
+        nccl_timeout=args.nccl_timeout,
+        grad_clip_norm=args.grad_clip_norm,
     )

@@ -60,7 +60,8 @@ class ModelConfig:
     no_opp_inputs: bool  = True
     no_self_inputs: bool = True
 
-    # cluster output configuration
+    # prediction heads
+    head_hidden: int            = 256
     n_stick_clusters: int       = 63
     n_shoulder_bins: int        = 4
     autoregressive_heads: bool  = True
@@ -86,6 +87,10 @@ MODEL_PRESETS = {
     "wide-shallow": dict(d_model=1536, nhead=12, num_layers=2, dim_feedforward=6144),
     "xlarge":       dict(d_model=1024, nhead=8,  num_layers=8, dim_feedforward=4096),
     "xxlarge":      dict(d_model=1536, nhead=12, num_layers=8, dim_feedforward=6144),
+    "huge":         dict(d_model=2048, nhead=16, num_layers=12, dim_feedforward=8192,
+                         d_intra=512, head_hidden=512),
+    "giant":        dict(d_model=3072, nhead=24, num_layers=12, dim_feedforward=12288,
+                         d_intra=512, head_hidden=768),
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -351,6 +356,7 @@ class FramePredictor(nn.Module):
         self.final_norm = nn.LayerNorm(cfg.d_model)
         self.heads = PredictionHeads(
             cfg.d_model,
+            hidden=cfg.head_hidden,
             stick_loss=cfg.stick_loss,
             n_stick_clusters=cfg.n_stick_clusters,
             n_shoulder_bins=cfg.n_shoulder_bins,

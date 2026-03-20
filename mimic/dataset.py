@@ -137,13 +137,26 @@ class StreamingMeleeDataset(IterableDataset):
             targets = shard["targets"]
 
             window_indices: List[Tuple[int, int]] = []
+            skipped_games = 0
             for g in range(n_games):
                 start = offsets[g].item()
                 end = offsets[g + 1].item()
                 n_frames = end - start
                 max_w = n_frames - W - R
+                if max_w < 0:
+                    skipped_games += 1
+                    continue
                 for w in range(max_w + 1):
                     window_indices.append((start + w, start + w))
+            if skipped_games > 0 and n_games > 0:
+                pct = 100 * skipped_games / n_games
+                if pct > 5:
+                    import warnings
+                    warnings.warn(
+                        f"seq_len={W}: skipped {skipped_games}/{n_games} games "
+                        f"({pct:.0f}%) in {path.name} — too short for context window",
+                        stacklevel=2,
+                    )
 
             random.shuffle(window_indices)
 
