@@ -130,27 +130,48 @@ Step 1 metrics: total_loss=6.898, gnorm=90.44 (4.5× higher than medium model's 
 
 ## Phase 4: Monitoring Status
 
-All 4 runs confirmed training with high GPU utilization. Step 1 completed on all machines. Next log output at step 19,531 (log_interval = max_steps × 0.005), estimated 5–10+ hours from launch.
+### Initial Check (Step 1)
 
-| Machine | GPUs | Run | Status | GPU Util | Memory/GPU | Step |
-|---------|------|-----|--------|----------|------------|------|
-| C (5090) | 8× 32 GB | full-nsi-ctx256-seed42 | Training | 100% | 18.3 GB (56%) | 1 |
-| E (5090) | 8× 32 GB | full-nsi-ctx256-seed43 | Training | 82% | 13.9 GB (43%) | 1 |
-| F (5090) | 8× 32 GB | full-si-ctx60-seed42 | Training | 72% | 4.5 GB (14%) | 1 |
-| D (H200) | 8× 144 GB | full-nsi-ctx256-huge-seed42 | Training | 100% | 52.8 GB (37%) | 1 |
+All 4 runs confirmed training with high GPU utilization. Step 1 completed on all machines. Log interval = 19,531 steps (max_steps × 0.005).
+
+| Machine | GPUs | Run | GPU Util | Memory/GPU |
+|---------|------|-----|----------|------------|
+| C (5090) | 8× 32 GB | full-nsi-ctx256-seed42 | 100% | 18.3 GB (56%) |
+| E (5090) | 8× 32 GB | full-nsi-ctx256-seed43 | 82% | 13.9 GB (43%) |
+| F (5090) | 8× 32 GB | full-si-ctx60-seed42 | 72% | 4.5 GB (14%) |
+| D (H200) | 8× 144 GB | full-nsi-ctx256-huge-seed42 | 100% | 52.8 GB (37%) |
+
+### Mid-Session Check (~1% through)
+
+| Machine | Step | btn_f1 | main_f1 | total_loss | gnorm | step/s |
+|---------|------|--------|---------|------------|-------|--------|
+| F (ctx=60, si) | 117,186 (3%) | **88.3%** | **34.7%** | 0.58 | 4.35 | 15.5 |
+| D (ctx=256, huge) | 19,531 (0.5%) | 36.4% | 6.4% | 1.75 | 1.40 | 3.1 |
+| C (ctx=256, nsi) | 39,062 (1%) | 29.4% | 5.6% | 1.62 | 1.19 | 5.1 |
+| E (ctx=256, nsi) | 39,062 (1%) | 27.2% | 6.3% | 1.72 | 1.15 | 7.7 |
+
+### Early Observations
+
+1. **F (self-inputs) is dominant.** 88.3% btn_f1 at 3% of training, tracking the old successful `full-ddp-D-500M` run. Self-inputs + ctx=60 at eff-512 is the proven formula.
+
+2. **D (huge model) leads C/E despite fewer steps.** 36.4% btn_f1 at step 19,531 vs C's 29.4% at step 39,062 — the 621M model is learning roughly 2× faster per step than the 32M model. Capacity scaling helps in the no-self-inputs regime.
+
+3. **C vs E seed variance is tight.** 29.4% vs 27.2% btn_f1 at the same step — good reproducibility, ~2% noise.
+
+4. **Throughput scales inversely with compute.** F (ctx=60, medium) at 15.5 step/s, C/E (ctx=256, medium) at 5–8 step/s, D (ctx=256, huge) at 3.1 step/s.
+
+5. **ctx=256 no-self-inputs runs already past 27-29% btn_f1.** The eff-1024 no-self-inputs runs plateaued at ~40%. At only 1% through training, C/E are already at 27-29% — on track to surpass the plateau if the learning curve continues.
 
 ### wandb Links
 
 - C: [n783gmpa](https://wandb.ai/erickfm/MIMIC/runs/n783gmpa)
 - E: [5vpl2tec](https://wandb.ai/erickfm/MIMIC/runs/5vpl2tec)
-- F: [899jcfps visible in project](https://wandb.ai/erickfm/MIMIC)
+- F: [rke803tw](https://wandb.ai/erickfm/MIMIC/runs/rke803tw)
 - D: [899jcfps](https://wandb.ai/erickfm/MIMIC/runs/899jcfps)
 
 ---
 
 ## Planned Comparisons
-
-Once all runs have meaningful metrics:
 
 | Comparison | Pair | Question |
 |------------|------|----------|
