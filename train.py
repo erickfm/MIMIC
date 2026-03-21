@@ -388,7 +388,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           grad_accum_steps: int = 1,
           nccl_timeout: int = 1800,
           grad_clip_norm: float = None,
-          no_load_optim: bool = False):
+          no_load_optim: bool = False,
+          si_drop_start: float = None, si_drop_end: float = None,
+          si_drop_max: float = 1.0):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -547,6 +549,20 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     find_unused_parameters=True)
     _raw_model = model.module if is_distributed else model
 
+    # -- Self-input curriculum schedule --
+    _si_schedule = None
+    if si_drop_start is not None and si_drop_end is not None:
+        si_start_step = int(si_drop_start * max_steps)
+        si_end_step = int(si_drop_end * max_steps)
+        def _si_drop_prob(step):
+            if step < si_start_step:
+                return 0.0
+            if step >= si_end_step:
+                return si_drop_max
+            return si_drop_max * (step - si_start_step) / (si_end_step - si_start_step)
+        _si_schedule = _si_drop_prob
+        _log(f"SI curriculum: drop 0→{si_drop_max} over steps {si_start_step}→{si_end_step}")
+
     if not run_name:
         extra = {}
         if num_layers_override:
@@ -579,6 +595,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             compiled=compile_model,
             model_preset=model_preset or "base",
             n_params=n_params,
+            si_drop_start=si_drop_start,
+            si_drop_end=si_drop_end,
+            si_drop_max=si_drop_max,
             **cfg.__dict__,
         ),
     )
@@ -613,6 +632,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             break
 
         model.train()
+        if _si_schedule:
+            _raw_model.encoder.si_drop_prob = _si_schedule(step)
         optimiser.zero_grad(set_to_none=True)
 
         # -- Gradient accumulation loop --
@@ -703,6 +724,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 avg_log = {f"avg/{k}": _run_sums[k] / _run_ct for k in _AVG_KEYS}
                 avg_log["perf/step_per_sec"]    = sps
                 avg_log["perf/samples_per_sec"] = sps * BATCH_SIZE * world_size * grad_accum_steps
+                if _si_schedule:
+                    avg_log["curriculum/si_drop_prob"] = _raw_model.encoder.si_drop_prob
                 wandb.log(avg_log, step=step)
                 _run_sums = {k: 0.0 for k in _AVG_KEYS}
                 _run_ct = 0
@@ -722,12 +745,16 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 f"cf1={metrics['cdir_f1']:.1%} "
                 f"gnorm={grad_norm:.2f} "
                 f"lr={scheduler.get_last_lr()[0]:.2e} "
-                f"({sps:.1f} step/s)",
+                + (f"si_drop={_raw_model.encoder.si_drop_prob:.2f} " if _si_schedule else "")
+                + f"({sps:.1f} step/s)",
             )
 
         # Validation
         if step % val_interval == 0 or step == max_steps:
             model.eval()
+            if _si_schedule:
+                _saved_si_prob = _raw_model.encoder.si_drop_prob
+                _raw_model.encoder.si_drop_prob = 0.0
             _VAL_KEYS = ["total", "loss_main", "loss_l", "loss_r",
                          "loss_cdir", "loss_btn", "cdir_acc", "btn_acc",
                          "btn_f1", "btn_precision", "btn_recall",
@@ -799,6 +826,42 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 _log("  -- val: no valid batches")
             if is_distributed:
                 dist.barrier()
+
+            # Restore si_drop_prob after normal val
+            if _si_schedule:
+                _raw_model.encoder.si_drop_prob = _saved_si_prob
+
+            # Dual validation: eval with all self-inputs dropped
+            if _si_schedule and _saved_si_prob > 0:
+                _raw_model.encoder.si_drop_prob = 1.0
+                val_nsi_sums = {k: 0.0 for k in _VAL_KEYS}
+                val_nsi_ct = 0
+                with torch.no_grad():
+                    for vs, vt in val_dl:
+                        for k, v in vs.items():
+                            vs[k] = v.to(DEVICE, non_blocking=True)
+                        for k, v in vt.items():
+                            vt[k] = v.to(DEVICE, non_blocking=True)
+                        with autocast("cuda", dtype=AMP_DTYPE):
+                            vpreds = model(vs)
+                        vm, vtl = compute_loss(vpreds, vt,
+                                               btn_loss_type=cfg.btn_loss)
+                        batch_total = sum(t.item() for t in vtl)
+                        if math.isfinite(batch_total):
+                            val_nsi_sums["total"] += batch_total
+                            for _vk in _VAL_KEYS:
+                                if _vk != "total":
+                                    val_nsi_sums[_vk] += vm[_vk]
+                            val_nsi_ct += 1
+                        if val_nsi_ct >= MAX_VAL_BATCHES:
+                            break
+                if val_nsi_ct > 0:
+                    val_nsi_avg = {f"val_nsi/{k}": val_nsi_sums[k] / val_nsi_ct for k in _VAL_KEYS}
+                    wandb.log(val_nsi_avg, step=step)
+                    _log(f"  -- val_nsi bf1={val_nsi_avg['val_nsi/btn_f1']:.1%} "
+                         f"mf1={val_nsi_avg['val_nsi/main_f1']:.1%} "
+                         f"cf1={val_nsi_avg['val_nsi/cdir_f1']:.1%}")
+                _raw_model.encoder.si_drop_prob = _saved_si_prob
 
         # Checkpoint
         if step % ckpt_interval == 0 or step == max_steps:
@@ -924,6 +987,12 @@ if __name__ == "__main__":
                         help="Gradient clipping norm (default: 1.0)")
     parser.add_argument("--no-load-optim", action="store_true",
                         help="Skip loading optimizer/scheduler state on resume (fresh LR)")
+    parser.add_argument("--si-drop-start", type=float, default=None,
+                        help="Fraction of training where SI dropout begins")
+    parser.add_argument("--si-drop-end", type=float, default=None,
+                        help="Fraction of training where SI dropout reaches max")
+    parser.add_argument("--si-drop-max", type=float, default=1.0,
+                        help="Max SI drop probability (default: 1.0)")
     args = parser.parse_args()
 
     import train as _self_module
@@ -978,4 +1047,7 @@ if __name__ == "__main__":
         nccl_timeout=args.nccl_timeout,
         grad_clip_norm=args.grad_clip_norm,
         no_load_optim=args.no_load_optim,
+        si_drop_start=args.si_drop_start,
+        si_drop_end=args.si_drop_end,
+        si_drop_max=args.si_drop_max,
     )

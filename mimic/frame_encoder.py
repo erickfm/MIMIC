@@ -99,6 +99,7 @@ class _BaseFrameEncoder(nn.Module):
         self._dropout = dropout
         self._no_opp_inputs = no_opp_inputs
         self._no_self_inputs = no_self_inputs
+        self.si_drop_prob: float = 0.0
 
         def _emb_dim(n_vocab: int) -> int:
             if scaled_emb:
@@ -159,6 +160,23 @@ class _BaseFrameEncoder(nn.Module):
         t: Dict[str, torch.Tensor] = {}
         noi = self._no_opp_inputs
         nsi = self._no_self_inputs
+
+        # -- Curriculum: stochastic self-input masking --
+        if not nsi and self.si_drop_prob > 0:
+            seq = dict(seq)  # shallow copy to avoid mutating caller's dict
+            B = seq["self_analog"].shape[0]
+            device = seq["self_analog"].device
+            if self.training and self.si_drop_prob < 1.0:
+                keep = (torch.rand(B, 1, 1, device=device) >= self.si_drop_prob).float()
+            else:
+                keep = torch.zeros(B, 1, 1, device=device)
+            keep_idx = keep.squeeze(-1).long()  # (B, 1) for index tensors
+            seq["self_analog"] = seq["self_analog"] * keep
+            seq["self_nana_analog"] = seq["self_nana_analog"] * keep
+            seq["self_c_dir"] = seq["self_c_dir"] * keep_idx
+            seq["self_nana_c_dir"] = seq["self_nana_c_dir"] * keep_idx
+            seq["self_buttons"] = seq["self_buttons"] * keep_idx.unsqueeze(-1)
+            seq["self_nana_buttons"] = seq["self_nana_buttons"] * keep_idx.unsqueeze(-1)
 
         t["stage"]        = self.stage_emb(seq["stage"])
         t["self_port"]    = self.port_emb(seq["self_port"])
