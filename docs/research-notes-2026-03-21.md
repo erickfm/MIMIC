@@ -1,0 +1,90 @@
+# Research Notes — 2026-03-21
+
+## Context
+
+Continued from [2026-03-19](research-notes-2026-03-19.md). Active runs at start of session:
+- **Machine C**: `full-nsi-ctx256-seed42` — medium (32M), ctx=256, no self-inputs, lr=5e-5
+- **Machine E**: `full-nsi-ctx256-seed43` — medium (32M), ctx=256, no self-inputs, lr=5e-5
+- **Machine D**: `full-nsi-ctx256-huge-seed42` — huge (621M), ctx=256, no self-inputs, lr=5e-5
+- **Machine F**: `full-si-ctx60-seed42` — medium (32M), ctx=60, self-inputs, lr=5e-5 (previously diverged)
+
+F's original self-inputs run had diverged: gradient norms exploded from ~5 to 180,000 between steps 400k-878k, crashing btn_f1 from 88% to 35%.
+
+---
+
+## Finding 1: Self-inputs instability is not an LR problem
+
+Ran three fresh self-inputs runs on Machine F (medium model, ctx=60, seed=42), varying only the peak learning rate:
+
+| Run | Peak LR | Blowup step | gnorm trajectory |
+|-----|---------|-------------|------------------|
+| `full-si-ctx60-seed42` (original) | 5e-5 | ~400k | 5 → 180,000 |
+| `full-si-ctx60-seed42-lr4e5` | 4e-5 | ~410k | 3 → 22 → 40 (killed) |
+| `full-si-ctx60-seed42-lr3e5` | 3e-5 | ~490k | 4 → 30 → 138 → 754 → 7,404 |
+
+All three diverged in the same training region (400-600k steps). Lower LR only delayed the explosion slightly. The instability is structural — self-inputs create a sharp loss landscape that the medium model can't handle.
+
+Prior to divergence, all runs reached ~88-92% train btn_f1, confirming self-inputs enable much faster learning vs no-self-inputs (~55% at the same point).
+
+## Finding 2: Medium model without self-inputs plateaus at ~40% val btn_f1
+
+Machines C and E ran to ~1.1M steps (29% of training) with stable gnorms (~1.0) but val btn_f1 plateaued around 38-42%:
+
+| Machine | Steps reached | Val btn_f1 (last 5) | Train btn_f1 |
+|---------|--------------|---------------------|--------------|
+| C (seed=42) | 1.15M (29.5%) | 42→41→41→39→40% | ~50% |
+| E (seed=43) | 1.13M (29.0%) | 42→39→38→41→41% | ~55% |
+
+Train > val gap suggests overfitting. The medium model (32M params) may be capacity-limited for ctx=256 without self-inputs. **Killed both runs.**
+
+## Finding 3: Huge model (621M) is much more capable
+
+Machine D's huge model at same config (ctx=256, no self-inputs, lr=5e-5) reached 77% train btn_f1 at only 11.5% through training with perfectly stable gnorms (0.48-0.60). Only 2 val checkpoints so far (~39% val btn_f1), too early to assess plateau. This run continues.
+
+## Finding 4: Autoregressive prediction feedback already exists
+
+Investigated whether to implement autoregressive feedback (feed model predictions back as self-inputs at inference, like HAL's approach). Found it's already implemented in `inference.py:644-662` — when `no_self_inputs=False` and `--no-pred-feedback` is not set, the model feeds its previous predictions back as self-inputs. No code changes needed.
+
+This means the training/inference gap for self-inputs runs is standard exposure bias (teacher forcing vs autoregressive generation), same as any LLM.
+
+---
+
+## Action: Curriculum masking on Machine F
+
+Since self-inputs diverge at all learning rates but enable much faster early learning, implemented scheduled self-input dropout (curriculum masking):
+
+### Implementation (commit `7f33676`)
+
+**`mimic/frame_encoder.py`:** Added `si_drop_prob` attribute to `_BaseFrameEncoder`. In `_build_raw_tokens()`, when `si_drop_prob > 0`, applies per-sample Bernoulli mask that zeros `self_analog`, `self_buttons`, `self_c_dir` (+ nana variants). Stochastic during training, deterministic zeros during eval.
+
+**`train.py`:** Added `--si-drop-start`, `--si-drop-end`, `--si-drop-max` CLI args. Linear ramp schedule from 0 to `si_drop_max` over the configured training fraction. Dual validation: normal val at `si_drop_prob=0` (full self-inputs), plus `val_nsi/*` at `si_drop_prob=1.0` (no self-inputs). Logs `curriculum/si_drop_prob` to wandb.
+
+Also added `--no-load-optim` flag (commit `6790199`) for resuming with fresh optimizer/scheduler state.
+
+### Launch
+
+```bash
+BG=1 bash parallel.sh F -- \
+  --model medium --seq-len 60 --batch-size 64 --max-samples 250000000 \
+  --no-compile --self-inputs --seed 42 \
+  --lr 3e-5 \
+  --si-drop-start 0.05 --si-drop-end 0.5 \
+  --run-name full-si-curriculum-ctx60-seed42
+```
+
+Schedule: `si_drop` ramps 0→1.0 over steps 195k (5%) to 1.95M (50%). Steps 0-195k train with full self-inputs (fast learning). By the 400k danger zone, `si_drop` ≈ 12%. Steps 1.95M+ train with fully masked self-inputs.
+
+### Hypothesis
+
+The instability is caused by the model over-relying on self-inputs, creating sharp loss landscape features that amplify gradient norms. Gradually masking self-inputs forces the model to diversify its feature reliance, potentially smoothing the landscape enough to prevent divergence.
+
+---
+
+## Active runs
+
+| Machine | Run | Model | Config | Status |
+|---------|-----|-------|--------|--------|
+| **C** | — | — | — | **killed** (plateaued) |
+| **D** | `full-nsi-ctx256-huge-seed42` | huge (621M) | ctx=256, no SI, lr=5e-5 | running (11.5%, 77% btn_f1) |
+| **E** | — | — | — | **killed** (plateaued) |
+| **F** | `full-si-curriculum-ctx60-seed42` | medium (32M) | ctx=60, SI+curriculum, lr=3e-5 | running (0.5%, 83% btn_f1) |
