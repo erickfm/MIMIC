@@ -84,7 +84,27 @@ The instability is caused by the model over-relying on self-inputs, creating sha
 
 | Machine | Run | Model | Config | Status |
 |---------|-----|-------|--------|--------|
-| **C** | — | — | — | **killed** (plateaued) |
-| **D** | `full-nsi-ctx256-huge-seed42` | huge (621M) | ctx=256, no SI, lr=5e-5 | running (11.5%, 77% btn_f1) |
-| **E** | — | — | — | **killed** (plateaued) |
-| **F** | `full-si-curriculum-ctx60-seed42` | medium (32M) | ctx=60, SI+curriculum, lr=3e-5 | running (0.5%, 83% btn_f1) |
+| **C** | `falco-med-ctx60-sicur-lr5e5-s42` | medium (32M) | Falco, ctx=60, SI+curriculum, lr=5e-5 | running |
+| **D** | `all-huge-ctx256-nsi-lr5e5-s42` | huge (621M) | All chars, ctx=256, no SI, lr=5e-5 | running (19.5%, 74.7% btn_f1) |
+| **E** | `falco-med-ctx180-sicur-lr5e5-s43` | medium (32M) | Falco, ctx=180, SI+curriculum, lr=5e-5 | running |
+| **F** | `fox-med-ctx180-nsi-lr5e5-s42` | medium (32M) | Fox, ctx=180, no SI, lr=5e-5 | running (14%, 38.3% btn_f1) |
+
+---
+
+## Run Naming Convention
+
+Format: `{char}-{model}-{ctx}-{si_mode}-{lr}-s{seed}`
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `char` | `fox`, `falco`, `marth`, `all`, ... | Character dataset |
+| `model` | `med`, `huge`, `giant` | Model preset |
+| `ctx` | `ctx60`, `ctx180`, `ctx256` | Sequence length |
+| `si_mode` | `nsi` (no self-inputs), `si` (self-inputs), `sicur` (SI + curriculum) | Self-input config |
+| `lr` | `lr5e5`, `lr3e5`, `lr2e5` | Peak learning rate |
+| `s{seed}` | `s42`, `s43`, ... | Random seed |
+
+Examples:
+- `fox-med-ctx60-nsi-lr5e5-s42` — Fox only, medium model, ctx=60, no self-inputs
+- `all-huge-ctx256-nsi-lr5e5-s42` — All characters, huge model, ctx=256, no self-inputs
+- `falco-med-ctx180-sicur-lr5e5-s43` — Falco only, medium, ctx=180, self-inputs with curriculum
