@@ -78,6 +78,38 @@ Schedule: `si_drop` ramps 0→1.0 over steps 195k (5%) to 1.95M (50%). Steps 0-1
 
 The instability is caused by the model over-relying on self-inputs, creating sharp loss landscape features that amplify gradient norms. Gradually masking self-inputs forces the model to diversify its feature reliance, potentially smoothing the landscape enough to prevent divergence.
 
+### Result: Curriculum slowed but did not prevent divergence
+
+The curriculum run on F diverged at ~586k steps (si_drop=0.22), later than the non-curriculum runs (~400-490k) but with the same exponential gnorm pattern:
+
+| Step | si_drop | gnorm |
+|------|---------|-------|
+| 469k | 0.16 | 6.11 |
+| 586k | 0.22 | 65.68 |
+| 762k | 0.32 | 785 |
+
+Killed at gnorm=785. The curriculum delayed divergence by ~100-180k steps compared to plain self-inputs, but the fundamental instability remains for the medium model.
+
+---
+
+## Finding 5: Medium no-SI plateaus at ~40% val btn_f1 regardless of character or context
+
+Ran Fox (ctx=60) and Falco (ctx=60) single-character runs. Both hit the same ~36-43% val btn_f1 ceiling seen on the all-character ctx=256 runs (C/E). Fox ctx=180 also reached 43% val after only 2 val checkpoints.
+
+The ~40% val btn_f1 ceiling appears to be a medium model limitation, not a data or context issue.
+
+---
+
+## Pivot: Character-specific runs with curriculum masking
+
+Launched character-specific runs to test whether:
+1. Single-character data (smoother loss landscape?) helps curriculum masking survive
+2. Longer context (180 vs 60) improves learning rate per step
+
+Data sizes:
+- FOX: 443M frames (48k games), 331 shards
+- FALCO: 292M frames (32k games), 240 shards
+
 ---
 
 ## Active runs
