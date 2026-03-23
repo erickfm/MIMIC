@@ -112,14 +112,62 @@ Data sizes:
 
 ---
 
-## Active runs
+## HAL Reference Analysis (2026-03-23)
+
+Deep-dived into Eric Gu's HAL architecture and training. Key differences from MIMIC:
+
+| | **HAL** | **MIMIC (medium)** |
+|---|---|---|
+| Params | ~20M | ~32M |
+| Sequence layers | 6 × 512-d | 4 × 768-d |
+| Frame encoding | Flat concat → linear | Intra-frame transformer (2 layers) |
+| Pos encoding | Shaw relative | RoPE |
+| Buttons | Single-label CE (6 classes) | Multi-hot focal BCE (12 outputs) |
+| Sticks | 36 hand-designed clusters, plain CE | 30 k-means clusters, focal CE |
+| Dropout | 0.2 | 0.1 |
+| LR | 3e-4 | 5e-5 (was), 3e-4 (new) |
+| Grad clip | 1.0 | none (was), 1.0 (new) |
+| Context | 256 | 60 / 180 |
+
+Critical insight: **HAL uses gradient clipping at 1.0** — we weren't clipping at all, which directly caused our self-inputs gradient explosions.
+
+---
+
+## Finding 6: Gradient clipping solves self-inputs instability at ctx=60
+
+Launched self-inputs runs with `--grad-clip-norm 1.0 --lr 3e-4` (matching HAL):
+
+| Run | ctx | Step | gnorm | btn_f1 | Status |
+|-----|-----|------|-------|--------|--------|
+| `falco-med-ctx60-si-lr3e4-clip1-s42` (C) | 60 | 898k | 1.23 | 86.3% | **stable** — past all previous death zones |
+| `falco-med-ctx180-si-lr3e4-clip1-s43` (E) | 180 | 410k | 126,100 | 43.0% | **diverging** despite clipping |
+
+ctx=60 + clip + lr=3e-4 is fully stable through 898k steps (previous runs exploded at 400-500k). First successful self-inputs run past the danger zone.
+
+ctx=180 + clip + lr=3e-4 explodes — gnorm reaches 126k. The clipping prevents NaN but the model degrades. The same lr=3e-4 that HAL uses at ctx=256 doesn't work for us at ctx=180, suggesting architectural differences (intra-frame attention, focal loss, multi-hot buttons) amplify instabilities at longer sequences.
+
+---
+
+## Note on historical sweep validity (2026-03-23)
+
+The hyperparameter sweep results from 2026-03-16 and 2026-03-17 were obtained under a specific regime:
+- Single GPU, batch=256, lr=5e-5, no grad clipping, focal loss, no self-inputs, 50M samples
+
+Current training regime differs significantly:
+- DDP 8 GPUs, eff batch=512, lr=3e-4, grad clipping=1.0, self-inputs, 250M samples, character-specific data
+
+Findings like "dropout=0.05 is best" and "lr=5e-5 is the only stable lr" may not transfer. These results should be re-validated under current conditions before being relied upon.
+
+---
+
+## Active runs (2026-03-23)
 
 | Machine | Run | Model | Config | Status |
 |---------|-----|-------|--------|--------|
-| **C** | `falco-med-ctx60-sicur-lr5e5-s42` | medium (32M) | Falco, ctx=60, SI+curriculum, lr=5e-5 | running |
-| **D** | `all-huge-ctx256-nsi-lr5e5-s42` | huge (621M) | All chars, ctx=256, no SI, lr=5e-5 | running (19.5%, 74.7% btn_f1) |
-| **E** | `falco-med-ctx180-sicur-lr5e5-s43` | medium (32M) | Falco, ctx=180, SI+curriculum, lr=5e-5 | running |
-| **F** | `fox-med-ctx180-nsi-lr5e5-s42` | medium (32M) | Fox, ctx=180, no SI, lr=5e-5 | running (14%, 38.3% btn_f1) |
+| **C** | `falco-med-ctx60-si-lr3e4-clip1-s42` | medium (32M) | Falco, ctx=60, SI, lr=3e-4, clip=1.0 | running (23%, 86.3% btn_f1, gnorm=1.23) |
+| **D** | `all-huge-ctx256-nsi-lr5e5-s42` | huge (621M) | All chars, ctx=256, no SI, lr=5e-5 | running (26%, 80.2% btn_f1, gnorm=0.40) |
+| **E** | `falco-med-ctx180-si-lr3e4-clip1-s43` | medium (32M) | Falco, ctx=180, SI, lr=3e-4, clip=1.0 | **diverging** (gnorm=126k) |
+| **F** | `fox-med-ctx180-nsi-lr5e5-s42` | medium (32M) | Fox, ctx=180, no SI, lr=5e-5 | running (18.5%, 49.2% btn_f1, gnorm=1.11) |
 
 ---
 

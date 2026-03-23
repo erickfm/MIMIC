@@ -31,6 +31,8 @@ The canonical wavedash training (`wavedash-canonical`) converged to val_f1=98.5%
 
 Only lr=5e-5 reliably converges to 98.5% F1. Higher LRs (8e-4, 1e-4, 7.5e-5) cause most models to plateau at 66-90% F1 (base-rate collapse or early plateau). This held across all model sizes tested.
 
+> **Caveat (added 2026-03-23):** This sweep was on the wavedash task (single-pattern overfit) with single GPU, batch=256, no grad clipping. On full Melee with grad clipping, lr=3e-4 (HAL's default) works at ctx=60 with self-inputs. The lr=5e-5 conclusion may be specific to the no-clip, focal-loss regime.
+
 ### Key Finding: RoPE > Learned Positional Encoding
 
 RoPE consistently saved ~1,500-2,000 optimization steps vs learned positional encoding. RoPE encodes relative position directly into attention via rotation matrices — for sequential frame prediction where "2 frames ago" always means the same thing regardless of absolute position, this is a free structural prior that learned encoding must spend steps rediscovering.

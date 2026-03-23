@@ -17,6 +17,8 @@ Continued from [2026-03-16](research-notes-2026-03-16.md). Previous session laun
 
 Baseline config: medium model (32.4M params), RoPE, batch=256, lr=5e-5, warmup=5%, dropout=0.1, label_smoothing=0.1, seq_len=60.
 
+> **Caveat (added 2026-03-23):** These sweep results were obtained under a specific regime: single GPU, batch=256, lr=5e-5, 50M samples, no self-inputs, no grad clipping, focal loss. Many of these conditions have since changed (DDP 8 GPUs, eff batch 512, lr=3e-4 with grad clipping, self-inputs). Rankings (e.g. dropout=0.05 best, 0.2 worst) may not hold under the current training regime and should be re-validated before relying on them.
+
 ### Key Results
 
 | Finding | Detail |
