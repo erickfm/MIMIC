@@ -160,14 +160,69 @@ Findings like "dropout=0.05 is best" and "lr=5e-5 is the only stable lr" may not
 
 ---
 
+## Terminated run results (2026-03-23)
+
+### D: `all-huge-ctx256-nsi-lr5e5-s42` — huge model (621M), all chars, ctx=256, no SI
+
+**Killed at step 1.02M (26% of training).**
+
+| Metric | Value |
+|--------|-------|
+| Train btn_f1 | 80.2% |
+| Val btn_f1 (last 5) | 39.2%, 39.2%, 40.3%, 39.5%, 42.8% |
+| Train mf1 | 80.0% |
+| Val mf1 | 6.5-8.0% |
+| gnorm | 0.35-0.45 (stable throughout) |
+| Train total loss | 0.189 |
+| Val total loss | 3.2-3.9 |
+
+Facts: Train btn_f1 climbed from 36% to 80% over 1M steps while val btn_f1 stayed flat at 39-43%. Train/val loss diverged by 20x (0.19 vs 3.9). The model memorized training data without generalizing. gnorm was perfectly stable (0.35-0.45) throughout — no training instability.
+
+The 621M model has 19x more parameters than medium (32M). Both plateau at the same ~40% val btn_f1 without self-inputs. The huge model achieves 2x higher train metrics but identical val, indicating severe overfitting.
+
+Possible explanations: (1) without self-inputs, val performance may be fundamentally limited by the information available in game state alone — 40% may be near-ceiling for predicting buttons from game state without knowing what was pressed last frame; (2) the huge model overfits to training-set-specific patterns that don't transfer; (3) the all-character dataset's diversity may make generalization harder than single-character.
+
+### E: `falco-med-ctx180-si-lr3e4-clip1-s43` — medium (32M), Falco, ctx=180, SI, clip=1.0
+
+**Killed at step 410k (10.5% of training). Diverged.**
+
+| Metric | Value |
+|--------|-------|
+| Train btn_f1 at peak | ~87.8% (step 195k, first val) |
+| Train btn_f1 at kill | 43.0% |
+| Val btn_f1 | 78.9% (only 1 val checkpoint before divergence) |
+| gnorm trajectory | 2,714 (step 312k) → 9,997 (step 391k) → 126,100 (step 410k) |
+
+Facts: Grad clipping at 1.0 prevented NaN/crash — the model kept training and logging throughout. But raw (pre-clip) gnorm grew exponentially starting around step 300k. btn_f1 degraded from 87.8% to 43.0% as the clipped gradients became too noisy to learn effectively.
+
+The same lr=3e-4 and clip=1.0 is stable at ctx=60 (Machine C, gnorm ~1-5 at 918k steps). The instability is specific to ctx=180.
+
+Possible explanations: (1) longer sequences create more gradient signal per step, making lr=3e-4 effectively too large; (2) our intra-frame transformer (2 layers of attention per frame, absent in HAL) deepens the compute graph proportionally to sequence length; (3) focal loss amplifies gradients on hard examples, and longer sequences contain more hard frames.
+
+### F: `fox-med-ctx180-nsi-lr5e5-s42` — medium (32M), Fox, ctx=180, no SI
+
+**Killed at step 742k (19% of training).**
+
+| Metric | Value |
+|--------|-------|
+| Train btn_f1 | 57.4% |
+| Val btn_f1 (last 3) | 40.0%, 42.6%, 42.3% |
+| gnorm | 1.07-1.21 (stable throughout) |
+
+Facts: Stable training, no instability. Val btn_f1 plateaued at 40-43% — the same ceiling as D (huge, all chars, ctx=256), the old C/E runs (medium, all chars, ctx=256), and Falco/Fox ctx=60 runs. gnorm stayed at 1.0-1.2 throughout.
+
+The 40% val btn_f1 ceiling appears at every combination of model size (32M, 621M), context length (60, 180, 256), and character (Fox, Falco, all) — as long as self-inputs are excluded. Machine C with self-inputs + grad clipping broke through to 87-88% val btn_f1.
+
+---
+
 ## Active runs (2026-03-23)
 
 | Machine | Run | Model | Config | Status |
 |---------|-----|-------|--------|--------|
-| **C** | `falco-med-ctx60-si-lr3e4-clip1-s42` | medium (32M) | Falco, ctx=60, SI, lr=3e-4, clip=1.0 | running (23%, 86.3% btn_f1, gnorm=1.23) |
-| **D** | `all-huge-ctx256-nsi-lr5e5-s42` | huge (621M) | All chars, ctx=256, no SI, lr=5e-5 | running (26%, 80.2% btn_f1, gnorm=0.40) |
-| **E** | `falco-med-ctx180-si-lr3e4-clip1-s43` | medium (32M) | Falco, ctx=180, SI, lr=3e-4, clip=1.0 | **diverging** (gnorm=126k) |
-| **F** | `fox-med-ctx180-nsi-lr5e5-s42` | medium (32M) | Fox, ctx=180, no SI, lr=5e-5 | running (18.5%, 49.2% btn_f1, gnorm=1.11) |
+| **C** | `falco-med-ctx60-si-lr3e4-clip1-s42` | medium (32M) | Falco, ctx=60, SI, lr=3e-4, clip=1.0 | running (23.5%, 88.6% train / 87.8% val btn_f1) |
+| **D** | — | — | — | **killed** (huge model overfitting, val stuck at 40%) |
+| **E** | — | — | — | **killed** (ctx=180 diverged despite clipping) |
+| **F** | — | — | — | **killed** (no-SI val plateau at 42%) |
 
 ---
 
