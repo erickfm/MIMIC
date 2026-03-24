@@ -294,10 +294,40 @@
 
 <div class="box encoder">
   <div class="title">Flat Encoder</div>
-  <div class="step">55 features &rarr; each embedded to <span class="dim">256-d</span> via learned embeddings / MLPs</div>
-  <div class="step">Concatenate all &rarr; <span class="dim">14,080-d</span> vector</div>
-  <div class="step">Linear(14080 &rarr; 768) &rarr; GELU &rarr; Linear(768 &rarr; 768)</div>
-  <div class="step" style="margin-top: 10px; color: var(--text-tertiary);">Output: one <span class="dim">768-d</span> vector per frame</div>
+
+  <div style="display: flex; gap: 12px; margin: 12px 0; flex-wrap: wrap; justify-content: center;">
+    <div style="flex: 1; min-width: 200px;">
+      <div style="color: var(--accent-terracotta); font-size: 12px; font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Categorical &rarr; Embedding</div>
+      <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7; text-align: left;">
+        stage, self_port, opp_port<br>
+        self_char, opp_char<br>
+        self_action, opp_action<br>
+        self_costume, opp_costume<br>
+        self_c_dir, nana chars/actions/cdirs<br>
+        proj&times;8 (owner, type, subtype)
+      </div>
+      <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 4px;">~37 tokens, each int &rarr; <span class="dim">256-d</span> embedding</div>
+    </div>
+    <div style="flex: 1; min-width: 200px;">
+      <div style="color: var(--accent-sage); font-size: 12px; font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Numeric &rarr; MLP</div>
+      <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7; text-align: left;">
+        global (timer, frame count, &hellip;20 floats)<br>
+        self_player (pos, vel, %, stocks, &hellip;23 floats)<br>
+        opp_player (same 23 floats)<br>
+        self/opp nana (28 floats each)<br>
+        self/opp analog (stick x/y, shoulders, 4 floats)<br>
+        projectile numerics (5&times;8 = 40 floats)<br>
+        self/opp buttons (12 bools each)
+      </div>
+      <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 4px;">~18 tokens, each floats &rarr; LayerNorm &rarr; Linear &rarr; GELU &rarr; <span class="dim">256-d</span></div>
+    </div>
+  </div>
+
+  <div style="height: 1px; background: linear-gradient(90deg, transparent, var(--border-subtle) 20%, var(--border-subtle) 80%, transparent); margin: 10px 0;"></div>
+
+  <div class="step">All 55 tokens concatenated &rarr; <span class="dim">14,080-d</span> vector</div>
+  <div class="step">LayerNorm &rarr; Linear(14080 &rarr; 768) &rarr; GELU &rarr; Dropout &rarr; Linear(768 &rarr; 768) &rarr; Dropout</div>
+  <div class="step" style="margin-top: 6px; color: var(--text-tertiary);">Output: one <span class="dim">768-d</span> vector per frame &mdash; no attention, just projection</div>
 </div>
 
 <div class="arrow">&darr;</div>
