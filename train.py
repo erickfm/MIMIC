@@ -70,8 +70,8 @@ MAX_VAL_BATCHES    = 100
 
 # Intervals derived from max_steps at runtime (see _compute_intervals)
 WARMUP_FRAC        = 0.05     # 5% warmup
-LOG_FRAC           = 0.005    # log every ~0.5%
-VAL_FRAC           = 0.05     # validate every ~5%
+LOG_FRAC           = 0.001    # log every ~0.1%
+VAL_FRAC           = 0.01     # validate every ~1%
 CKPT_FRAC          = 0.05     # checkpoint every ~5%
 
 # -----------------------------------------------------------------------------
