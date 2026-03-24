@@ -215,14 +215,60 @@ The 40% val btn_f1 ceiling appears at every combination of model size (32M, 621M
 
 ---
 
-## Active runs (2026-03-23)
+## Finding 7: Intra-frame attention (hybrid16) is the root cause of gradient instability (2026-03-24)
 
-| Machine | Run | Model | Config | Status |
-|---------|-----|-------|--------|--------|
-| **C** | `falco-med-ctx60-si-lr3e4-clip1-s42` | medium (32M) | Falco, ctx=60, SI, lr=3e-4, clip=1.0 | running (23.5%, 88.6% train / 87.8% val btn_f1) |
-| **D** | — | — | — | **killed** (huge model overfitting, val stuck at 40%) |
-| **E** | — | — | — | **killed** (ctx=180 diverged despite clipping) |
-| **F** | — | — | — | **killed** (no-SI val plateau at 42%) |
+Ran three simultaneous experiments with self-inputs + lr=3e-4 + clip=1.0, varying encoder type:
+
+| Run | Encoder | ctx | Step at check | gnorm | btn_f1 | Status |
+|-----|---------|-----|---------------|-------|--------|--------|
+| C: hybrid16, ctx=60 | hybrid16 | 60 | 2.46M (63%) | **509,047** | 0.0% | **collapsed** |
+| E: hybrid16, ctx=256 | hybrid16 | 256 | 547k (14%) | **13,643** | 12.7% | **diverging** |
+| F: flat, ctx=180 | **flat** | 180 | 1.04M (26.5%) | **0.38** | 88.5% | **stable** |
+
+Facts:
+- Machine C (hybrid16, ctx=60) was stable for 23% of training (87.8% val btn_f1) but eventually collapsed at ~63%. The instability was delayed, not prevented.
+- Machine E (hybrid16, ctx=256) diverged by step 547k — same pattern as all previous hybrid16 long-context runs.
+- Machine F (flat encoder, ctx=180) is completely stable at 1.04M steps. gnorm=0.38, never clipped. Train/val btn_f1 = 88.5%/87.8%. mf1=60.2% — highest ever observed.
+- The flat encoder removes the 2-layer intra-frame transformer and replaces it with concat → 2-layer MLP, matching HAL's approach.
+
+Conclusion: The `_GroupAttention` module (2 layers of `nn.TransformerEncoderLayer` operating on ~55 feature-group tokens per frame) creates gradient instability that eventually causes divergence in all runs. The instability manifests later at shorter context lengths and lower learning rates, but is always fatal. The flat encoder eliminates this entirely.
+
+### What does intra-frame attention buy us (in theory)?
+
+The hybrid16 encoder groups ~55 raw features into ~16 entity-level tokens, then runs 2 layers of self-attention across them before pooling to a single d_model vector. This lets the model learn cross-feature relationships *within* a single frame — e.g., attending to position based on velocity, or relating action state to stick position.
+
+### What does the flat encoder do instead?
+
+Concatenates all ~55 feature embeddings (each d_intra=256) into a single vector (~14,080-dim), then projects through a 2-layer MLP to d_model. No per-frame attention. All cross-feature reasoning happens at the sequence-level transformer.
+
+### What do we lose?
+
+In practice, maybe nothing — HAL achieves 95% win rate vs CPU with flat concat. The sequence-level transformer (4 layers, 768-d) has enough capacity to learn intra-frame relationships implicitly. The features are already semantically encoded (embeddings for categorical, MLPs for numeric), so the concat is information-preserving.
+
+The theoretical loss is *per-frame structural inductive bias*. With attention, the model can learn "when action=JUMPSQUAT, attend to stick angle" as a reusable pattern. With flat concat, this must be learned through the MLP weights, which can only do fixed linear combinations. But the sequence transformer downstream can still learn these relationships through its attention mechanism — it just sees them as part of the temporal sequence rather than as an explicit per-frame structure.
+
+### Could we get intra-frame mixing without the instability?
+
+Ideas to explore:
+- **1 layer instead of 2** — halves the per-frame compute graph depth
+- **No attention, just MLP mixing** — apply a shared MLP across feature groups (like a pointwise convolution). Cheaper than attention, still enables cross-feature interaction
+- **Gated residual mixing** — lightweight gating between feature groups without full attention
+- **Lower d_intra** — smaller intra-frame dimension means smaller gradients through the encoder
+- **Separate gradient clipping for encoder vs backbone** — clip the intra-frame encoder more aggressively
+- **Freeze encoder after warmup** — let it learn basic cross-feature patterns, then freeze to prevent instability
+
+None of these have been tested. The flat encoder is the proven winner for now.
+
+---
+
+## Active runs (2026-03-24)
+
+| Machine | Run | Config | Hypothesis |
+|---------|-----|--------|------------|
+| **C** | `falco-med-ctx180-si-lr5e4-clip1-flat-drop05-wd1e3-s42` | flat, ctx=180, lr=5e-4, dropout=0.05, wd=1e-3 | Higher lr + lower dropout/wd were best tweaks from old sweep |
+| **D** | — | — | pod killed |
+| **E** | `falco-med-ctx256-si-lr3e4-clip1-flat-s43` | flat, ctx=256, lr=3e-4 | HAL's context length with flat encoder |
+| **F** | `falco-med-ctx180-si-lr3e4-clip1-flat-s42` | flat, ctx=180, lr=3e-4 (baseline) | 88.5% train / 87.8% val btn_f1, gnorm=0.38, stable |
 
 ---
 
