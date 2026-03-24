@@ -261,14 +261,31 @@ None of these have been tested. The flat encoder is the proven winner for now.
 
 ---
 
-## Active runs (2026-03-24)
+## Finding 8: hybrid16 ctx=60 (Machine C) eventually collapsed too (2026-03-24)
 
-| Machine | Run | Config | Hypothesis |
-|---------|-----|--------|------------|
-| **C** | `falco-med-ctx180-si-lr5e4-clip1-flat-drop05-wd1e3-s42` | flat, ctx=180, lr=5e-4, dropout=0.05, wd=1e-3 | Higher lr + lower dropout/wd were best tweaks from old sweep |
-| **D** | — | — | pod killed |
-| **E** | `falco-med-ctx256-si-lr3e4-clip1-flat-s43` | flat, ctx=256, lr=3e-4 | HAL's context length with flat encoder |
-| **F** | `falco-med-ctx180-si-lr3e4-clip1-flat-s42` | flat, ctx=180, lr=3e-4 (baseline) | 88.5% train / 87.8% val btn_f1, gnorm=0.38, stable |
+The hybrid16 ctx=60 run on Machine C — previously our best result at 87.8% val btn_f1 — collapsed after extended training:
+
+| Step | gnorm | btn_f1 | Val btn_f1 |
+|------|-------|--------|-----------|
+| 918k (23.5%) | 4.97 | 88.6% | 87.8% |
+| 1.29M (33%) | 17.36 | 87.0% | — |
+| 2.46M (63%) | 509,047 | 0.0% | 1.1% |
+
+The instability was delayed compared to longer-context hybrid16 runs but was always fatal. No hybrid16 run has survived to completion. The flat encoder (Machine F) remained completely stable through the same training period with gnorm consistently under 1.0.
+
+---
+
+## Current experiments (2026-03-24)
+
+All three active runs use the flat encoder with self-inputs, grad clipping at 1.0, on Falco data.
+
+| Machine | Run | Key difference from F baseline | Status |
+|---------|-----|-------------------------------|--------|
+| **C** | `falco-med-ctx180-si-lr5e4-clip1-flat-drop05-wd1e3-s42` | lr=5e-4, dropout=0.05, wd=1e-3 | just launched |
+| **E** | `falco-med-ctx256-si-lr3e4-clip1-flat-s43` | ctx=256 (HAL's context length) | just launched |
+| **F** | `falco-med-ctx180-si-lr3e4-clip1-flat-s42` | baseline flat run | 88.5% train / 87.8% val, gnorm=0.38, 1.04M steps |
+
+Goal: push val btn_f1 above 90%. C tests whether hyperparameter tweaks (higher lr, lower dropout/wd from old sweep) help. E tests whether HAL's longer context improves metrics. Both use the proven-stable flat encoder.
 
 ---
 

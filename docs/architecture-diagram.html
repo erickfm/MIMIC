@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MIMIC Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=DM+Serif+Display&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-base: #1A1714;
+    --bg-surface: #232019;
+    --bg-elevated: #2C2820;
+    --bg-input: #292520;
+    --text-primary: #E8E0D4;
+    --text-secondary: #B8AFA3;
+    --text-tertiary: #7A7269;
+    --text-heading: #F0E9DD;
+    --accent-terracotta: #C4725A;
+    --accent-terracotta-light: #D4826A;
+    --accent-sage: #7D8C6E;
+    --accent-sage-light: #96A685;
+    --accent-gold: #BFA265;
+    --accent-sand: #C4B08F;
+    --accent-stone-blue: #6B8A9E;
+    --accent-clay-rose: #A67B6B;
+    --accent-umber: #8B6E4E;
+    --border-subtle: #3A3530;
+    --border-medium: #4A4338;
+    --border-active: #5A5245;
+    --shadow-sm: 0 1px 4px rgba(20, 16, 12, 0.3);
+    --shadow-md: 0 4px 16px rgba(20, 16, 12, 0.4);
+    --shadow-lg: 0 8px 32px rgba(20, 16, 12, 0.5);
+    --font-heading: 'DM Serif Display', Georgia, serif;
+    --font-body: 'DM Sans', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Menlo', monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: var(--font-body);
+    background: var(--bg-base);
+    background-image: linear-gradient(145deg, #1A1714 0%, #1E1A15 50%, #1A1714 100%);
+    color: var(--text-primary);
+    padding: 48px 40px;
+    line-height: 1.65;
+    min-height: 100vh;
+  }
+  h1 {
+    font-family: var(--font-heading);
+    color: var(--text-heading);
+    margin-bottom: 8px;
+    font-size: 32px;
+    font-weight: normal;
+    letter-spacing: 0.01em;
+  }
+  h2 {
+    font-family: var(--font-body);
+    color: var(--text-tertiary);
+    font-size: 14px;
+    font-weight: 400;
+    margin-bottom: 48px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  h3 {
+    font-family: var(--font-heading);
+    color: var(--accent-terracotta);
+    margin: 56px 0 24px;
+    font-size: 22px;
+    font-weight: normal;
+  }
+  .diagram { max-width: 1000px; margin: 0 auto; }
+
+  /* Shared styles */
+  .box { border-radius: 10px; padding: 20px; text-align: center; position: relative; }
+  .arrow { text-align: center; color: var(--text-tertiary); font-size: 20px; line-height: 1.4; padding: 4px 0; }
+  .label { font-size: 11px; color: var(--text-tertiary); letter-spacing: 0.03em; }
+  .dim { color: var(--accent-gold); font-weight: 500; font-size: 12px; font-family: var(--font-mono); }
+  .note {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 20px;
+    margin: 20px 0;
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.7;
+  }
+  .note strong { color: var(--text-primary); }
+
+  /* Divider */
+  .divider {
+    height: 1px;
+    margin: 48px 0;
+    background: linear-gradient(90deg, transparent, var(--border-medium) 30%, var(--border-medium) 70%, transparent);
+  }
+
+  /* Frame row */
+  .frames-row { display: flex; gap: 10px; justify-content: center; align-items: flex-end; margin: 24px 0; }
+  .frame-box {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 12px 14px;
+    min-width: 110px;
+    font-size: 11px;
+    box-shadow: var(--shadow-sm);
+  }
+  .frame-box .title { color: var(--accent-stone-blue); font-weight: 500; font-size: 12px; margin-bottom: 6px; letter-spacing: 0.02em; }
+  .frame-box .feat { color: var(--accent-sage); font-size: 10px; line-height: 1.6; }
+  .frame-dots { color: var(--text-tertiary); font-size: 24px; align-self: center; padding: 0 8px; }
+
+  /* Encoder */
+  .encoder {
+    background: linear-gradient(145deg, var(--bg-surface), var(--bg-elevated));
+    border: 1px solid var(--accent-terracotta);
+    box-shadow: var(--shadow-md);
+  }
+  .encoder .title { color: var(--accent-terracotta); font-family: var(--font-heading); font-size: 16px; margin-bottom: 12px; }
+  .encoder .step { color: var(--text-primary); font-size: 12px; margin: 6px 0; }
+
+  /* Vector row */
+  .vec-row { display: flex; gap: 12px; justify-content: center; margin: 14px 0; }
+  .vec {
+    background: var(--bg-surface);
+    border: 1px solid var(--accent-gold);
+    border-radius: 6px;
+    padding: 8px 18px;
+    font-size: 11px;
+    box-shadow: var(--shadow-sm);
+  }
+
+  /* Transformer layer */
+  .transformer-layer {
+    background: linear-gradient(145deg, #22261E, #262A20);
+    border: 1px solid var(--accent-sage);
+    margin: 8px 0;
+    box-shadow: var(--shadow-sm);
+  }
+  .transformer-layer .title { color: var(--accent-sage-light); font-weight: 500; }
+
+  /* Detail sections */
+  .layer-detail {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 28px;
+    margin: 24px 0;
+    box-shadow: var(--shadow-md);
+  }
+  .layer-detail .section { margin: 16px 0; }
+  .layer-detail .section-title { color: var(--accent-clay-rose); font-weight: 500; font-size: 13px; margin-bottom: 8px; }
+
+  /* Attention heads */
+  .heads-row { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin: 12px 0; }
+  .head {
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-clay-rose);
+    border-radius: 6px;
+    padding: 8px 12px;
+    min-width: 80px;
+    font-size: 11px;
+    text-align: center;
+  }
+  .head .name { color: var(--accent-sand); font-weight: 700; }
+  .head .info { color: var(--text-tertiary); font-size: 10px; }
+
+  /* Attention computation */
+  .attn-calc {
+    background: var(--bg-elevated);
+    border-radius: 8px;
+    padding: 20px;
+    margin: 16px 0;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .attn-calc .frame-label { color: var(--accent-stone-blue); }
+  .attn-calc .score { color: var(--accent-gold); }
+  .attn-calc .mask { color: var(--accent-terracotta); }
+  .attn-calc .weight { color: var(--accent-sage-light); }
+  .attn-calc .comment { color: var(--text-tertiary); }
+
+  /* Prediction heads */
+  .pred-heads {
+    background: linear-gradient(145deg, #2A2318, #2E271C);
+    border: 1px solid var(--accent-umber);
+    box-shadow: var(--shadow-md);
+  }
+  .pred-heads .title { color: var(--accent-sand); font-family: var(--font-heading); font-size: 16px; margin-bottom: 12px; }
+  .pred-chain { display: flex; gap: 4px; justify-content: center; align-items: center; flex-wrap: wrap; }
+  .pred-box {
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-umber);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 11px;
+    color: var(--accent-sand);
+  }
+  .pred-arrow { color: var(--text-tertiary); }
+
+  /* Comparison */
+  .compare { display: flex; gap: 20px; margin: 24px 0; }
+  .compare > div {
+    flex: 1;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 24px;
+    box-shadow: var(--shadow-md);
+  }
+  .compare .tag {
+    display: inline-block;
+    border-radius: 12px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 500;
+    margin-bottom: 14px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .compare .stable { background: #242E22; color: var(--accent-sage-light); border: 1px solid var(--accent-sage); }
+  .compare .unstable { background: #2E2220; color: var(--accent-terracotta-light); border: 1px solid var(--accent-terracotta); }
+
+  /* Head specialization */
+  .spec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
+  .spec-item {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 11px;
+  }
+  .spec-item .role { color: var(--accent-clay-rose); font-weight: 500; margin-bottom: 4px; }
+  .spec-item .desc { color: var(--text-secondary); }
+
+  /* Width comparison */
+  .width-compare { display: flex; gap: 16px; margin: 20px 0; }
+  .width-option {
+    flex: 1;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 20px;
+    text-align: center;
+    box-shadow: var(--shadow-sm);
+  }
+  .width-option .config { color: var(--accent-stone-blue); font-weight: 500; font-size: 14px; margin-bottom: 10px; font-family: var(--font-mono); }
+  .width-option .heads-mini { display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; margin: 10px 0; }
+  .width-option .head-mini {
+    width: 28px;
+    height: 28px;
+    border-radius: 5px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent-clay-rose);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    color: var(--accent-sand);
+    font-family: var(--font-mono);
+  }
+</style>
+</head>
+<body>
+<div class="diagram">
+
+<h1>MIMIC Architecture</h1>
+<h2>Flat Encoder &middot; Medium Model (32M params)</h2>
+
+<!-- ───── FULL MODEL FLOW ───── -->
+<h3>Full Model Flow</h3>
+
+<div class="frames-row">
+  <div class="frame-box">
+    <div class="title">Frame 1</div>
+    <div class="feat">stage<br>self_pos_x, y<br>self_vel (&times;5)<br>self_action<br>self_buttons (&times;12)<br>opp_pos, vel, act<br>projectiles<br>&hellip;55 features</div>
+  </div>
+  <div class="frame-box">
+    <div class="title">Frame 2</div>
+    <div class="feat">stage<br>self_pos_x, y<br>self_vel (&times;5)<br>self_action<br>self_buttons (&times;12)<br>opp_pos, vel, act<br>projectiles<br>&hellip;55 features</div>
+  </div>
+  <div class="frame-dots">&middot;&middot;&middot;</div>
+  <div class="frame-box">
+    <div class="title">Frame 180</div>
+    <div class="feat">stage<br>self_pos_x, y<br>self_vel (&times;5)<br>self_action<br>self_buttons (&times;12)<br>opp_pos, vel, act<br>projectiles<br>&hellip;55 features</div>
+  </div>
+</div>
+
+<div class="arrow">&darr; &nbsp; each feature embedded independently &nbsp; &darr;</div>
+
+<div class="box encoder">
+  <div class="title">Flat Encoder</div>
+  <div class="step">55 features &rarr; each embedded to <span class="dim">256-d</span> via learned embeddings / MLPs</div>
+  <div class="step">Concatenate all &rarr; <span class="dim">14,080-d</span> vector</div>
+  <div class="step">Linear(14080 &rarr; 768) &rarr; GELU &rarr; Linear(768 &rarr; 768)</div>
+  <div class="step" style="margin-top: 10px; color: var(--text-tertiary);">Output: one <span class="dim">768-d</span> vector per frame</div>
+</div>
+
+<div class="arrow">&darr;</div>
+
+<div class="vec-row">
+  <div class="vec"><span class="dim">768-d</span><br><span class="label">frame 1</span></div>
+  <div class="vec"><span class="dim">768-d</span><br><span class="label">frame 2</span></div>
+  <div style="color: var(--text-tertiary); align-self: center;">&middot;&middot;&middot;</div>
+  <div class="vec"><span class="dim">768-d</span><br><span class="label">frame 180</span></div>
+</div>
+
+<div class="arrow">&darr; &nbsp; + RoPE position encoding &nbsp; &darr;</div>
+
+<div class="box transformer-layer"><div class="title">Transformer Layer 1 of 4</div></div>
+<div class="arrow" style="font-size: 14px;">&darr;</div>
+<div class="box transformer-layer"><div class="title">Transformer Layer 2 of 4</div></div>
+<div class="arrow" style="font-size: 14px;">&darr;</div>
+<div class="box transformer-layer"><div class="title">Transformer Layer 3 of 4</div></div>
+<div class="arrow" style="font-size: 14px;">&darr;</div>
+<div class="box transformer-layer"><div class="title">Transformer Layer 4 of 4</div></div>
+
+<div class="arrow">&darr;</div>
+
+<div class="vec-row">
+  <div class="vec"><span class="dim">768-d</span><br><span class="label">frame 1</span></div>
+  <div class="vec"><span class="dim">768-d</span><br><span class="label">frame 2</span></div>
+  <div style="color: var(--text-tertiary); align-self: center;">&middot;&middot;&middot;</div>
+  <div class="vec"><span class="dim">768-d</span><br><span class="label">frame 180</span></div>
+</div>
+
+<div class="arrow">&darr;</div>
+
+<div class="box pred-heads">
+  <div class="title">Prediction Heads</div>
+  <div class="pred-chain">
+    <div class="pred-box">L shoulder</div>
+    <div class="pred-arrow">&rarr;</div>
+    <div class="pred-box">R shoulder</div>
+    <div class="pred-arrow">&rarr;</div>
+    <div class="pred-box">C-stick dir</div>
+    <div class="pred-arrow">&rarr;</div>
+    <div class="pred-box">Main stick</div>
+    <div class="pred-arrow">&rarr;</div>
+    <div class="pred-box">Buttons</div>
+  </div>
+  <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 10px;">Each head sees previous heads' outputs (.detach() prevents gradient cascade)</div>
+</div>
+
+<!-- ───── INSIDE A TRANSFORMER LAYER ───── -->
+<h3>Inside One Transformer Layer</h3>
+
+<div class="layer-detail">
+  <div class="section">
+    <div style="text-align: center; color: var(--text-secondary); margin-bottom: 20px;">Input: 180 vectors, each <span class="dim">768-d</span></div>
+
+    <div style="flex: 1;">
+      <div style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 12px; text-align: center; margin-bottom: 8px;">
+        <span style="color: var(--accent-clay-rose);">Layer Norm</span>
+      </div>
+      <div class="arrow" style="font-size: 14px;">&darr;</div>
+      <div style="background: var(--bg-elevated); border: 1px solid var(--accent-clay-rose); border-radius: 10px; padding: 20px; text-align: center; margin: 8px 0; box-shadow: var(--shadow-sm);">
+        <div style="color: var(--accent-sand); font-family: var(--font-heading); font-size: 16px; margin-bottom: 10px;">Multi-Head Attention</div>
+        <div class="heads-row">
+          <div class="head"><div class="name">H1</div><div class="info">96-d</div></div>
+          <div class="head"><div class="name">H2</div><div class="info">96-d</div></div>
+          <div class="head"><div class="name">H3</div><div class="info">96-d</div></div>
+          <div class="head"><div class="name">H4</div><div class="info">96-d</div></div>
+          <div class="head"><div class="name">H5</div><div class="info">96-d</div></div>
+          <div class="head"><div class="name">H6</div><div class="info">96-d</div></div>
+          <div class="head"><div class="name">H7</div><div class="info">96-d</div></div>
+          <div class="head"><div class="name">H8</div><div class="info">96-d</div></div>
+        </div>
+        <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 6px;">Concat &rarr; Linear(768, 768)</div>
+      </div>
+      <div style="text-align: center; color: var(--accent-sage); font-size: 12px; margin: 10px 0;">+ residual connection</div>
+
+      <div style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 12px; text-align: center; margin: 8px 0;">
+        <span style="color: var(--accent-clay-rose);">Layer Norm</span>
+      </div>
+      <div class="arrow" style="font-size: 14px;">&darr;</div>
+      <div style="background: var(--bg-elevated); border: 1px solid var(--accent-sage); border-radius: 10px; padding: 20px; text-align: center; margin: 8px 0; box-shadow: var(--shadow-sm);">
+        <div style="color: var(--accent-sage-light); font-family: var(--font-heading); font-size: 16px; margin-bottom: 10px;">Feed-Forward Network</div>
+        <div style="font-size: 12px; color: var(--text-primary);">Linear(<span class="dim">768</span> &rarr; <span class="dim">3072</span>) &rarr; GELU &rarr; Linear(<span class="dim">3072</span> &rarr; <span class="dim">768</span>)</div>
+      </div>
+      <div style="text-align: center; color: var(--accent-sage); font-size: 12px; margin: 10px 0;">+ residual connection</div>
+    </div>
+
+    <div style="text-align: center; color: var(--text-secondary); margin-top: 20px;">Output: 180 vectors, each <span class="dim">768-d</span></div>
+  </div>
+</div>
+
+<!-- ───── INSIDE ONE HEAD ───── -->
+<h3>Inside One Attention Head</h3>
+
+<div class="layer-detail">
+  <div style="text-align: center; color: var(--text-secondary); margin-bottom: 20px;">
+    One head processes all 180 frames. Each frame gets a Query, Key, and Value.
+  </div>
+
+  <div style="display: flex; gap: 10px; justify-content: center; margin: 20px 0;">
+    <div style="background: #2E2320; border: 1px solid var(--accent-terracotta); border-radius: 8px; padding: 10px 18px; font-size: 11px; text-align: center;">
+      <div style="color: var(--accent-terracotta-light); font-weight: 500; font-size: 13px;">Q</div>
+      <div style="color: var(--text-secondary); margin-top: 2px;">what am I<br>looking for?</div>
+    </div>
+    <div style="background: #222E20; border: 1px solid var(--accent-sage); border-radius: 8px; padding: 10px 18px; font-size: 11px; text-align: center;">
+      <div style="color: var(--accent-sage-light); font-weight: 500; font-size: 13px;">K</div>
+      <div style="color: var(--text-secondary); margin-top: 2px;">what do I<br>contain?</div>
+    </div>
+    <div style="background: #202428; border: 1px solid var(--accent-stone-blue); border-radius: 8px; padding: 10px 18px; font-size: 11px; text-align: center;">
+      <div style="color: var(--accent-stone-blue); font-weight: 500; font-size: 13px;">V</div>
+      <div style="color: var(--text-secondary); margin-top: 2px;">what info<br>to extract?</div>
+    </div>
+  </div>
+
+  <div class="attn-calc">
+    <div style="margin-bottom: 14px; color: var(--text-primary); text-align: center; font-family: var(--font-body);">Computing output for <span class="frame-label">frame 47</span>:</div>
+
+    <div style="margin: 4px 0;"><span class="score">score(47&rarr;1)</span>  = Q<sub>47</sub> &middot; K<sub>1</sub> / &radic;96 &nbsp; <span class="comment">&larr; how relevant is frame 1?</span></div>
+    <div style="margin: 4px 0;"><span class="score">score(47&rarr;2)</span>  = Q<sub>47</sub> &middot; K<sub>2</sub> / &radic;96</div>
+    <div style="margin: 4px 0; color: var(--text-tertiary);">&vellip;</div>
+    <div style="margin: 4px 0;"><span class="score">score(47&rarr;46)</span> = Q<sub>47</sub> &middot; K<sub>46</sub> / &radic;96 &nbsp; <span class="comment">&larr; previous frame</span></div>
+    <div style="margin: 4px 0;"><span class="score">score(47&rarr;47)</span> = Q<sub>47</sub> &middot; K<sub>47</sub> / &radic;96 &nbsp; <span class="comment">&larr; self</span></div>
+    <div style="margin: 4px 0;"><span class="mask">score(47&rarr;48)</span> = <span class="mask">&minus;&infin;</span> &nbsp; <span class="comment">&larr; causal mask: can't see the future</span></div>
+    <div style="margin: 4px 0; color: var(--text-tertiary);">&vellip;</div>
+    <div style="margin: 4px 0;"><span class="mask">score(47&rarr;180)</span> = <span class="mask">&minus;&infin;</span></div>
+
+    <div style="margin: 18px 0; padding-top: 14px; border-top: 1px solid var(--border-subtle);">
+      <span class="weight">weights</span> = softmax(scores)
+      <div style="margin: 6px 0; color: var(--text-tertiary); font-size: 11px;">
+        e.g. [<span style="color: var(--text-tertiary);">0.01, 0.01, &hellip;,</span> <span class="weight">0.40</span><span style="color: var(--text-tertiary);">,</span> <span class="weight">0.30</span><span style="color: var(--text-tertiary);">, &hellip;</span>]
+        <br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="font-size: 10px;">frame 1 &nbsp; frame 2 &nbsp;&nbsp;&nbsp;&nbsp; frame 46 &nbsp; frame 47</span>
+      </div>
+    </div>
+
+    <div style="margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-subtle);">
+      <span class="frame-label">output<sub>47</sub></span> = <span class="weight">w<sub>1</sub></span>&middot;V<sub>1</sub> + <span class="weight">w<sub>2</sub></span>&middot;V<sub>2</sub> + &hellip; + <span class="weight">w<sub>47</sub></span>&middot;V<sub>47</sub>
+      <div style="color: var(--text-secondary); font-size: 11px; margin-top: 6px; font-family: var(--font-body);">A weighted average of all past frames' values. The weights are <em>learned</em> &mdash; the model decides what's relevant.</div>
+    </div>
+  </div>
+
+  <div class="section-title" style="color: var(--accent-clay-rose); margin-top: 24px;">What each head might specialize in:</div>
+  <div class="spec-grid">
+    <div class="spec-item">
+      <div class="role">Head 1: "Previous frame"</div>
+      <div class="desc">Temporal continuity &mdash; what just happened?</div>
+    </div>
+    <div class="spec-item">
+      <div class="role">Head 2: "Same action"</div>
+      <div class="desc">Find past frames with matching action state</div>
+    </div>
+    <div class="spec-item">
+      <div class="role">Head 3: "Opponent movement"</div>
+      <div class="desc">Track where the opponent was and is going</div>
+    </div>
+    <div class="spec-item">
+      <div class="role">Head 4: "Recent context"</div>
+      <div class="desc">Smooth attention over last ~10 frames</div>
+    </div>
+    <div class="spec-item">
+      <div class="role">Head 5: "Feature extraction"</div>
+      <div class="desc">Attend to self (frame 47&rarr;47) to mix features</div>
+    </div>
+    <div class="spec-item">
+      <div class="role">Head 6: "State transitions"</div>
+      <div class="desc">Find when actions changed &mdash; transition timing</div>
+    </div>
+    <div class="spec-item">
+      <div class="role">Head 7: "Spacing"</div>
+      <div class="desc">Track relative positioning over time</div>
+    </div>
+    <div class="spec-item">
+      <div class="role">Head 8: "Combo/tech patterns"</div>
+      <div class="desc">Recognize multi-frame input sequences</div>
+    </div>
+  </div>
+</div>
+
+<!-- ───── MORE HEADS ───── -->
+<h3>Why More Heads Helps</h3>
+
+<div class="width-compare">
+  <div class="width-option">
+    <div class="config">8 heads &times; 96-d = 768</div>
+    <div class="heads-mini">
+      <div class="head-mini">1</div><div class="head-mini">2</div><div class="head-mini">3</div><div class="head-mini">4</div>
+      <div class="head-mini">5</div><div class="head-mini">6</div><div class="head-mini">7</div><div class="head-mini">8</div>
+    </div>
+    <div style="font-size: 11px; color: var(--text-secondary); margin-top: 8px;">8 attention patterns<br>96 bits of info each<br><br><span style="color: var(--text-tertiary);">Must overload heads for both<br>temporal + cross-feature tasks</span></div>
+  </div>
+  <div class="width-option">
+    <div class="config">16 heads &times; 48-d = 768</div>
+    <div class="heads-mini">
+      <div class="head-mini">1</div><div class="head-mini">2</div><div class="head-mini">3</div><div class="head-mini">4</div>
+      <div class="head-mini">5</div><div class="head-mini">6</div><div class="head-mini">7</div><div class="head-mini">8</div>
+      <div class="head-mini">9</div><div class="head-mini">10</div><div class="head-mini">11</div><div class="head-mini">12</div>
+      <div class="head-mini">13</div><div class="head-mini">14</div><div class="head-mini">15</div><div class="head-mini">16</div>
+    </div>
+    <div style="font-size: 11px; color: var(--text-secondary); margin-top: 8px;">16 attention patterns<br>48 bits of info each<br><br><span style="color: var(--text-tertiary);">Room to specialize: some temporal,<br>some cross-feature, some both</span></div>
+  </div>
+</div>
+
+<div class="note">
+  <strong>Same total capacity</strong> (8&times;96 = 16&times;48 = 768), but more heads means more independent &ldquo;what to look at&rdquo; patterns. Especially useful when the model needs to do both temporal reasoning (what happened over 180 frames?) and intra-frame feature extraction (what does action + stick mean together?) through the same attention layers.
+</div>
+
+<!-- ───── FLAT vs HYBRID16 ───── -->
+<h3>Flat vs Hybrid16 Encoder</h3>
+
+<div class="compare">
+  <div>
+    <span class="tag stable">Stable</span>
+    <div style="color: var(--text-heading); font-weight: 500; margin-bottom: 14px;">Flat Encoder (current)</div>
+    <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.8;">
+      55 features &rarr; embed each &rarr; <strong style="color: var(--text-primary);">concat</strong> &rarr; 2-layer MLP &rarr; 768-d<br><br>
+      <strong style="color: var(--text-primary);">No per-frame attention.</strong> All cross-feature reasoning happens in the sequence transformer.<br><br>
+      The model uses temporal attention slots to understand within-frame relationships (e.g., frame 47 attends to frame 46, which has near-identical content).<br><br>
+      <span style="color: var(--accent-sage-light);">gnorm = 0.38 at 1M+ steps</span>
+    </div>
+  </div>
+  <div>
+    <span class="tag unstable">Unstable</span>
+    <div style="color: var(--text-heading); font-weight: 500; margin-bottom: 14px;">Hybrid16 Encoder (old)</div>
+    <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.8;">
+      55 features &rarr; group into 16 tokens &rarr; <strong style="color: var(--text-primary);">2 layers of self-attention</strong> &rarr; pool &rarr; 768-d<br><br>
+      Pre-computes cross-feature relationships within each frame. &ldquo;JUMPSQUAT + diagonal stick = wavedash&rdquo; encoded before the sequence transformer sees it.<br><br>
+      <strong style="color: var(--accent-terracotta);">2 extra attention layers &times; 180 frames = deep gradient paths that eventually explode.</strong><br><br>
+      <span style="color: var(--accent-terracotta);">gnorm &rarr; 509,047 at 2.4M steps (ctx=60)</span><br>
+      <span style="color: var(--accent-terracotta);">gnorm &rarr; 126,100 at 410k steps (ctx=180)</span>
+    </div>
+  </div>
+</div>
+
+<div class="note">
+  <strong>What we lose with flat:</strong> The inductive bias that features within a frame should interact. The flat MLP can learn fixed linear combinations (weighted sums of features), but can't do conditional reasoning like &ldquo;attend to stick angle <em>only when</em> action is JUMPSQUAT.&rdquo; The sequence transformer can still learn this, but it must use attention slots that could otherwise do temporal reasoning.<br><br>
+  <strong>What we gain:</strong> Complete gradient stability, matching HAL's proven architecture. HAL achieves 95% win rate vs CPU with flat concat at 20M params.
+</div>
+
+</div>
+</body>
+</html>
