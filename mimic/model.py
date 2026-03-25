@@ -254,9 +254,16 @@ class PredictionHeads(nn.Module):
     Sticks use n_stick_clusters logits for main, n_shoulder_bins for L/R.
 
     Heads are chained autoregressively:
-      L(h) -> R(h,L) -> cdir(h,L,R) -> main(h,L,R,cdir) -> btn(h,L,R,cdir,main)
+      L(h) -> R(h,L) -> cdir(h,L,R) -> main(h,L,R,cdir)
+      -> btn_A(h,...) -> btn_B(h,...,A) -> btn_X(h,...,A,B) -> ...
     with .detach() on conditioning to prevent gradient cascade.
+
+    Button order: A, B, X, Y, Z, L, R, START, D_UP, D_DOWN, D_LEFT, D_RIGHT
     """
+
+    # Button prediction order: action buttons first, modifiers last
+    BTN_ORDER = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]  # A,B,X,Y,Z,L,R,START,D_UP,D_DOWN,D_LEFT,D_RIGHT
+    N_BUTTONS = 12
 
     def __init__(self, d_model: int, hidden: int = 256, btn_threshold: float = 0.2,
                  stick_loss: str = "clusters",
@@ -285,9 +292,19 @@ class PredictionHeads(nn.Module):
         self.R_head    = _head(d_model + ctx_after_L,      lr_out)
         self.cdir_head = _head(d_model + ctx_after_R,      5)
         self.main_head = _head(d_model + ctx_after_cdir,   main_out)
-        self.btn_head  = _head(d_model + ctx_after_main,   12)
 
-    def forward(self, h: torch.Tensor) -> Dict[str, torch.Tensor]:
+        # Autoregressive button heads: each predicts 1 logit, conditioned on
+        # the backbone context + all previously predicted buttons
+        btn_base_dim = d_model + ctx_after_main
+        self.btn_heads = nn.ModuleList([
+            _head(btn_base_dim + i, 1)  # +i for the i previous button predictions
+            for i in range(self.N_BUTTONS)
+        ])
+
+    def forward(self, h: torch.Tensor, btn_targets: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        """Forward pass. During training, btn_targets (B,T,12) provides ground
+        truth for teacher forcing the autoregressive button chain. During
+        inference, btn_targets=None and each button uses its own prediction."""
         L = self.L_head(h)
         ctx = L.detach()
         R = self.R_head(torch.cat([h, ctx], dim=-1))
@@ -296,14 +313,43 @@ class PredictionHeads(nn.Module):
         ctx = torch.cat([ctx, cdir.detach()], dim=-1)
         main = self.main_head(torch.cat([h, ctx], dim=-1))
         ctx = torch.cat([ctx, main.detach()], dim=-1)
-        btn = self.btn_head(torch.cat([h, ctx], dim=-1))
+
+        # Autoregressive button prediction
+        btn_base = torch.cat([h, ctx], dim=-1)  # (B, T, btn_base_dim)
+        btn_logits_list = []
+        btn_ctx_parts = []
+
+        for i, idx in enumerate(self.BTN_ORDER):
+            # Input: base context + all previous button values
+            if btn_ctx_parts:
+                btn_input = torch.cat([btn_base] + btn_ctx_parts, dim=-1)
+            else:
+                btn_input = btn_base
+
+            logit = self.btn_heads[i](btn_input)  # (B, T, 1)
+            btn_logits_list.append(logit)
+
+            # For conditioning the next button: use ground truth during training,
+            # own prediction during inference
+            if btn_targets is not None:
+                # Teacher forcing: use ground truth for this button
+                btn_val = btn_targets[..., idx:idx+1].float().detach()
+            else:
+                # Inference: use own prediction
+                btn_val = (torch.sigmoid(logit) > self.btn_threshold).float().detach()
+            btn_ctx_parts.append(btn_val)
+
+        # Stack into (B, T, 12) in original button order
+        btn_logits = torch.zeros(*h.shape[:-1], self.N_BUTTONS, device=h.device, dtype=h.dtype)
+        for i, idx in enumerate(self.BTN_ORDER):
+            btn_logits[..., idx] = btn_logits_list[i].squeeze(-1)
 
         return dict(
             main_xy=main,
             L_val=L,
             R_val=R,
             c_dir_logits=cdir,
-            btn_logits=btn,
+            btn_logits=btn_logits,
         )
 
     def threshold_buttons(self, btn_logits: torch.Tensor) -> torch.Tensor:
@@ -378,7 +424,8 @@ class FramePredictor(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, std=0.02)
 
-    def forward(self, frames: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+    def forward(self, frames: Dict[str, torch.Tensor],
+                btn_targets: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
         x = self.encoder(frames)                         # (B, T, d_model)
         if self.pos_emb is not None:
             T = x.size(1)
@@ -386,4 +433,4 @@ class FramePredictor(nn.Module):
         for blk in self.blocks:
             x = blk(x)
         x = self.final_norm(x)                           # (B, T, d_model)
-        return self.heads(x)                             # all T positions
+        return self.heads(x, btn_targets=btn_targets)    # all T positions

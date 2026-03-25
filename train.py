@@ -651,8 +651,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 target[k] = v.to(DEVICE, non_blocking=True)
 
             try:
+                btn_tgt = target.get("btns", target.get("btns_float"))
                 with autocast("cuda", dtype=AMP_DTYPE):
-                    preds = model(state)
+                    preds = model(state, btn_targets=btn_tgt)
                 metrics, task_losses = compute_loss(
                     preds, target, btn_loss_type=cfg.btn_loss)
             except torch.cuda.OutOfMemoryError:
