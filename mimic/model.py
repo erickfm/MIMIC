@@ -262,8 +262,10 @@ class PredictionHeads(nn.Module):
     """
 
     # Button prediction order: action buttons first, modifiers last
-    BTN_ORDER = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]  # A,B,X,Y,Z,L,R,START,D_UP,D_DOWN,D_LEFT,D_RIGHT
-    N_BUTTONS = 12
+    # Drop START(7) and D-pad(8-11) — ~0% press rate, pure noise
+    BTN_ORDER = [0, 1, 2, 3, 4, 5, 6]  # A, B, X, Y, Z, L, R
+    N_BUTTONS = 12  # total button dim in targets (unchanged for compatibility)
+    N_ACTIVE_BUTTONS = 7  # buttons we actually predict
 
     def __init__(self, d_model: int, hidden: int = 256, btn_threshold: float = 0.2,
                  stick_loss: str = "clusters",
@@ -295,10 +297,11 @@ class PredictionHeads(nn.Module):
 
         # Autoregressive button heads: each predicts 1 logit, conditioned on
         # the backbone context + all previously predicted buttons
+        # Only predict active buttons (A,B,X,Y,Z,L,R); skip START/D-pad
         btn_base_dim = d_model + ctx_after_main
         self.btn_heads = nn.ModuleList([
             _head(btn_base_dim + i, 1)  # +i for the i previous button predictions
-            for i in range(self.N_BUTTONS)
+            for i in range(self.N_ACTIVE_BUTTONS)
         ])
 
     def forward(self, h: torch.Tensor, btn_targets: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
@@ -314,7 +317,7 @@ class PredictionHeads(nn.Module):
         main = self.main_head(torch.cat([h, ctx], dim=-1))
         ctx = torch.cat([ctx, main.detach()], dim=-1)
 
-        # Autoregressive button prediction
+        # Autoregressive button prediction (active buttons only: A,B,X,Y,Z,L,R)
         btn_base = torch.cat([h, ctx], dim=-1)  # (B, T, btn_base_dim)
         btn_logits_list = []
         btn_ctx_parts = []
@@ -332,15 +335,16 @@ class PredictionHeads(nn.Module):
             # For conditioning the next button: use ground truth during training,
             # own prediction during inference
             if btn_targets is not None:
-                # Teacher forcing: use ground truth for this button
                 btn_val = btn_targets[..., idx:idx+1].float().detach()
             else:
-                # Inference: use own prediction
                 btn_val = (torch.sigmoid(logit) > self.btn_threshold).float().detach()
             btn_ctx_parts.append(btn_val)
 
-        # Stack into (B, T, 12) in original button order
-        btn_logits = torch.zeros(*h.shape[:-1], self.N_BUTTONS, device=h.device, dtype=h.dtype)
+        # Stack into (B, T, 12) — active buttons get predicted logits,
+        # dropped buttons (START, D-pad) stay at 0 (= sigmoid 0.5, but never
+        # above threshold so they're never pressed)
+        btn_logits = torch.full((*h.shape[:-1], self.N_BUTTONS), -10.0,
+                                device=h.device, dtype=h.dtype)  # large negative = sigmoid ~0
         for i, idx in enumerate(self.BTN_ORDER):
             btn_logits[..., idx] = btn_logits_list[i].squeeze(-1)
 

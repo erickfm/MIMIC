@@ -197,15 +197,18 @@ def compute_loss(preds, targets, btn_loss_type="focal"):
     c_logits_flat = c_logits.reshape(-1, c_logits.size(-1))
     cdir_flat     = cdir_classes.reshape(-1)
     loss_cdir = focal_loss(c_logits_flat, cdir_flat)
-    loss_btn  = focal_bce(btn_pred, btn_tgt) if btn_loss_type == "focal" else _bce(btn_pred, btn_tgt)
+    # Only compute button loss on active buttons (first 7: A,B,X,Y,Z,L,R)
+    active_btn_pred = btn_pred[..., :7]
+    active_btn_tgt = btn_tgt[..., :7]
+    loss_btn  = focal_bce(active_btn_pred, active_btn_tgt) if btn_loss_type == "focal" else _bce(active_btn_pred, active_btn_tgt)
 
     cdir_pred = c_logits_flat.argmax(dim=-1)
     cdir_acc  = (cdir_pred == cdir_flat).float().mean().item()
     cdir_f1, cdir_prec, cdir_rec = _multiclass_prf(cdir_pred, cdir_flat, c_logits.size(-1))
 
-    btn_prob = torch.sigmoid(btn_pred)
+    btn_prob = torch.sigmoid(active_btn_pred)
     btn_hat  = btn_prob > 0.5
-    btn_ref  = btn_tgt > 0.5
+    btn_ref  = active_btn_tgt > 0.5
     btn_acc  = (btn_hat == btn_ref).float().mean().item()
 
     tp = (btn_hat & btn_ref).sum().float()

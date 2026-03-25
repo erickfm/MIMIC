@@ -486,7 +486,9 @@ def press_output(ctrl: melee.Controller,
     btn_probs = torch.sigmoid(pred["btn_logits"])
     pressed = []
     fired: List[bool] = []
-    BLOCKED_BUTTONS = {melee.enums.Button.BUTTON_START}
+    BLOCKED_BUTTONS = {melee.enums.Button.BUTTON_START,
+                       melee.enums.Button.BUTTON_D_UP, melee.enums.Button.BUTTON_D_DOWN,
+                       melee.enums.Button.BUTTON_D_LEFT, melee.enums.Button.BUTTON_D_RIGHT}
     for i, (prob, btn) in enumerate(zip(btn_probs, IDX_TO_BUTTON)):
         p = prob.item()
         fire = (random.random() < p) if sample else (p > args.btn_threshold)
