@@ -151,7 +151,7 @@ def _multiclass_prf(pred_idx, tgt_idx, n_classes):
     return 0.0, 0.0, 0.0
 
 
-def compute_loss(preds, targets, btn_loss_type="focal"):
+def compute_loss(preds, targets, btn_loss_type="focal", plain_ce=False):
     c_logits = preds["c_dir_logits"].float()
     btn_pred = preds["btn_logits"].float()
 
@@ -168,12 +168,13 @@ def compute_loss(preds, targets, btn_loss_type="focal"):
     l_bin_tgt = targets["l_bin"].long()
     r_bin_tgt = targets["r_bin"].long()
 
-    loss_main = focal_loss(main_pred.reshape(-1, n_main),
-                           main_cluster_tgt.reshape(-1))
-    loss_l = focal_loss(l_pred.reshape(-1, n_shldr),
-                        l_bin_tgt.reshape(-1))
-    loss_r = focal_loss(r_pred.reshape(-1, n_shldr),
-                        r_bin_tgt.reshape(-1))
+    _ce = F.cross_entropy if plain_ce else focal_loss
+    loss_main = _ce(main_pred.reshape(-1, n_main),
+                    main_cluster_tgt.reshape(-1))
+    loss_l = _ce(l_pred.reshape(-1, n_shldr),
+                 l_bin_tgt.reshape(-1))
+    loss_r = _ce(r_pred.reshape(-1, n_shldr),
+                 r_bin_tgt.reshape(-1))
 
     main_pred_flat = main_pred.reshape(-1, n_main)
     main_tgt_flat = main_cluster_tgt.reshape(-1)
@@ -196,11 +197,14 @@ def compute_loss(preds, targets, btn_loss_type="focal"):
     cdir_classes = cdir_tgt.argmax(dim=-1)
     c_logits_flat = c_logits.reshape(-1, c_logits.size(-1))
     cdir_flat     = cdir_classes.reshape(-1)
-    loss_cdir = focal_loss(c_logits_flat, cdir_flat)
+    loss_cdir = _ce(c_logits_flat, cdir_flat)
     # Only compute button loss on active buttons (first 7: A,B,X,Y,Z,L,R)
     active_btn_pred = btn_pred[..., :7]
     active_btn_tgt = btn_tgt[..., :7]
-    loss_btn  = focal_bce(active_btn_pred, active_btn_tgt) if btn_loss_type == "focal" else _bce(active_btn_pred, active_btn_tgt)
+    if plain_ce:
+        loss_btn = _bce(active_btn_pred, active_btn_tgt)
+    else:
+        loss_btn = focal_bce(active_btn_pred, active_btn_tgt) if btn_loss_type == "focal" else _bce(active_btn_pred, active_btn_tgt)
 
     cdir_pred = c_logits_flat.argmax(dim=-1)
     cdir_acc  = (cdir_pred == cdir_flat).float().mean().item()
@@ -306,7 +310,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               k_query=None, intra_layers=None, scaled_emb=False,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
               btn_loss=None, no_opp_inputs=True, no_self_inputs=True,
-              n_stick_clusters=None, n_shoulder_bins=None):
+              n_stick_clusters=None, n_shoulder_bins=None,
+              n_heads_override=None):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -332,6 +337,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["btn_loss"] = btn_loss
     overrides["no_opp_inputs"] = no_opp_inputs
     overrides["no_self_inputs"] = no_self_inputs
+    if n_heads_override:
+        overrides["nhead"] = n_heads_override
     if n_stick_clusters is not None:
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
@@ -393,7 +400,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           grad_clip_norm: float = None,
           no_load_optim: bool = False,
           si_drop_start: float = None, si_drop_end: float = None,
-          si_drop_max: float = 1.0):
+          si_drop_max: float = 1.0,
+          plain_ce: bool = False,
+          n_heads_override: int = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -505,7 +514,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            btn_loss=btn_loss, no_opp_inputs=no_opp_inputs,
                            no_self_inputs=no_self_inputs,
                            n_stick_clusters=n_stick_clusters,
-                           n_shoulder_bins=n_shoulder_bins)
+                           n_shoulder_bins=n_shoulder_bins,
+                           n_heads_override=n_heads_override)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -658,7 +668,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 with autocast("cuda", dtype=AMP_DTYPE):
                     preds = model(state, btn_targets=btn_tgt)
                 metrics, task_losses = compute_loss(
-                    preds, target, btn_loss_type=cfg.btn_loss)
+                    preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce)
             except torch.cuda.OutOfMemoryError:
                 mem = torch.cuda.max_memory_allocated() / 1e9
                 _log(f"OOM on rank {rank}, device {DEVICE}: {mem:.1f}GB peak")
@@ -849,7 +859,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         with autocast("cuda", dtype=AMP_DTYPE):
                             vpreds = model(vs)
                         vm, vtl = compute_loss(vpreds, vt,
-                                               btn_loss_type=cfg.btn_loss)
+                                               btn_loss_type=cfg.btn_loss, plain_ce=plain_ce)
                         batch_total = sum(t.item() for t in vtl)
                         if math.isfinite(batch_total):
                             val_nsi_sums["total"] += batch_total
@@ -991,6 +1001,10 @@ if __name__ == "__main__":
                         help="Gradient clipping norm (default: 1.0)")
     parser.add_argument("--no-load-optim", action="store_true",
                         help="Skip loading optimizer/scheduler state on resume (fresh LR)")
+    parser.add_argument("--plain-ce", action="store_true",
+                        help="Use plain cross-entropy instead of focal loss for all heads")
+    parser.add_argument("--n-heads", type=int, default=None,
+                        help="Override number of attention heads")
     parser.add_argument("--si-drop-start", type=float, default=None,
                         help="Fraction of training where SI dropout begins")
     parser.add_argument("--si-drop-end", type=float, default=None,
@@ -1054,4 +1068,6 @@ if __name__ == "__main__":
         si_drop_start=args.si_drop_start,
         si_drop_end=args.si_drop_end,
         si_drop_max=args.si_drop_max,
+        plain_ce=args.plain_ce,
+        n_heads_override=args.n_heads,
     )
