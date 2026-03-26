@@ -537,12 +537,16 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         fused=True,
     )
 
-    warmup  = optim.lr_scheduler.LinearLR(
-        optimiser, start_factor=0.01, total_iters=warmup_steps)
-    cosine  = optim.lr_scheduler.CosineAnnealingLR(
-        optimiser, T_max=max(max_steps - warmup_steps, 1))
-    scheduler = optim.lr_scheduler.SequentialLR(
-        optimiser, [warmup, cosine], milestones=[warmup_steps])
+    if warmup_steps > 0:
+        warmup  = optim.lr_scheduler.LinearLR(
+            optimiser, start_factor=0.01, total_iters=warmup_steps)
+        cosine  = optim.lr_scheduler.CosineAnnealingLR(
+            optimiser, T_max=max(max_steps - warmup_steps, 1))
+        scheduler = optim.lr_scheduler.SequentialLR(
+            optimiser, [warmup, cosine], milestones=[warmup_steps])
+    else:
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimiser, T_max=max_steps)
 
     start_step = 0
     if resume:
