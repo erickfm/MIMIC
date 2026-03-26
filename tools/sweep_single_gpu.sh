@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 
 mkdir -p logs/sweep
 
-DATA="data/falco/FALCO"
+DATA="${1:-data/fox/FOX}"  # pass data dir as first arg, default Fox
 COMMON="--seq-len 180 --batch-size 64 --grad-accum-steps 4 --max-samples 250000000 \
   --no-compile --self-inputs --seed 42 --grad-clip-norm 1.0 --encoder flat --data-dir $DATA"
 
