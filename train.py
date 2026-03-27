@@ -151,7 +151,127 @@ def _multiclass_prf(pred_idx, tgt_idx, n_classes):
     return 0.0, 0.0, 0.0
 
 
-def compute_loss(preds, targets, btn_loss_type="focal", plain_ce=False):
+def _multi_hot_to_single_label(btn_tgt):
+    """Convert multi-hot (B, 12) button targets to single-label (B,) with 5 classes.
+    Classes: A=0, B=1, jump(X|Y)=2, Z=3, NO_BUTTON=4.
+    Priority: A > B > jump > Z > no_button."""
+    a = btn_tgt[..., 0] > 0.5
+    b = btn_tgt[..., 1] > 0.5
+    jump = (btn_tgt[..., 2] > 0.5) | (btn_tgt[..., 3] > 0.5)
+    z = btn_tgt[..., 4] > 0.5
+    # Default = NO_BUTTON (4)
+    single = torch.full(btn_tgt.shape[:-1], 4, device=btn_tgt.device, dtype=torch.long)
+    single[z] = 3
+    single[jump] = 2
+    single[b] = 1
+    single[a] = 0
+    return single
+
+
+def _combine_shoulder_targets(l_bin, r_bin, shoulder_centers):
+    """Combine separate L/R shoulder bin targets into max(L,R) mapped to 3 classes.
+    HAL uses centers [0.0, 0.4, 1.0]."""
+    # Decode bin indices back to analog values using our centers, take max, re-quantize
+    l_vals = shoulder_centers[l_bin]
+    r_vals = shoulder_centers[r_bin]
+    combined = torch.max(l_vals, r_vals)
+    # Map to nearest of [0.0, 0.4, 1.0]
+    hal_centers = torch.tensor([0.0, 0.4, 1.0], device=combined.device)
+    dists = (combined.unsqueeze(-1) - hal_centers).abs()
+    return dists.argmin(dim=-1)
+
+
+def _compute_loss_hal(preds, targets, shoulder_centers=None):
+    """HAL-style loss: plain CE on all heads, single-label buttons, combined shoulder."""
+    main_pred = preds["main_xy"].float()
+    shldr_pred = preds["shoulder_val"].float()
+    c_logits = preds["c_dir_logits"].float()
+    btn_pred = preds["btn_logits"].float()  # (B, T, 5) single-label
+
+    main_tgt = targets["main_cluster"].long()
+    l_bin_tgt = targets["l_bin"].long()
+    r_bin_tgt = targets["r_bin"].long()
+    cdir_tgt = targets["c_dir"].long()
+    btn_tgt = targets.get("btns", targets.get("btns_float")).float()
+
+    n_main = main_pred.size(-1)
+    n_shldr = shldr_pred.size(-1)
+
+    # Main stick
+    loss_main = F.cross_entropy(main_pred.reshape(-1, n_main), main_tgt.reshape(-1))
+
+    # Combined shoulder: max(L,R) → 3-class
+    if shoulder_centers is not None:
+        shldr_tgt = _combine_shoulder_targets(l_bin_tgt.reshape(-1), r_bin_tgt.reshape(-1), shoulder_centers)
+    else:
+        shldr_tgt = l_bin_tgt.reshape(-1)  # fallback
+    loss_shldr = F.cross_entropy(shldr_pred.reshape(-1, n_shldr), shldr_tgt)
+
+    # C-dir
+    cdir_classes = cdir_tgt.argmax(dim=-1)
+    loss_cdir = F.cross_entropy(c_logits.reshape(-1, c_logits.size(-1)), cdir_classes.reshape(-1))
+
+    # Single-label buttons
+    btn_single = _multi_hot_to_single_label(btn_tgt)
+    loss_btn = F.cross_entropy(btn_pred.reshape(-1, btn_pred.size(-1)), btn_single.reshape(-1))
+
+    # Metrics
+    main_flat = main_pred.reshape(-1, n_main)
+    main_tgt_flat = main_tgt.reshape(-1)
+    main_pred_idx = main_flat.argmax(-1)
+    main_top1 = (main_pred_idx == main_tgt_flat).float().mean().item()
+    main_f1, main_prec, main_rec = _multiclass_prf(main_pred_idx, main_tgt_flat, n_main)
+
+    shldr_pred_idx = shldr_pred.reshape(-1, n_shldr).argmax(-1)
+    shldr_f1, shldr_prec, shldr_rec = _multiclass_prf(shldr_pred_idx, shldr_tgt, n_shldr)
+    shldr_top1 = (shldr_pred_idx == shldr_tgt).float().mean().item()
+
+    cdir_flat = cdir_classes.reshape(-1)
+    cdir_pred = c_logits.reshape(-1, c_logits.size(-1)).argmax(-1)
+    cdir_acc = (cdir_pred == cdir_flat).float().mean().item()
+    cdir_f1, cdir_prec, cdir_rec = _multiclass_prf(cdir_pred, cdir_flat, c_logits.size(-1))
+
+    btn_flat = btn_single.reshape(-1)
+    btn_pred_idx = btn_pred.reshape(-1, btn_pred.size(-1)).argmax(-1)
+    btn_acc = (btn_pred_idx == btn_flat).float().mean().item()
+    btn_f1, btn_prec, btn_rec = _multiclass_prf(btn_pred_idx, btn_flat, btn_pred.size(-1))
+
+    cdir_active_mask = cdir_flat != 0
+    cdir_active_acc = (cdir_pred[cdir_active_mask] == cdir_flat[cdir_active_mask]).float().mean().item() if cdir_active_mask.any() else 0.0
+
+    metrics = {
+        "loss_main": loss_main.item(),
+        "loss_l":    loss_shldr.item(),  # reuse key for compatibility
+        "loss_r":    0.0,
+        "loss_cdir": loss_cdir.item(),
+        "loss_btn":  loss_btn.item(),
+        "cdir_acc":  cdir_acc,
+        "btn_acc":   btn_acc,
+        "btn_f1":       btn_f1,
+        "btn_precision": btn_prec,
+        "btn_recall":    btn_rec,
+        "main_f1":       main_f1,
+        "main_precision": main_prec,
+        "main_recall":    main_rec,
+        "shldr_f1":       shldr_f1,
+        "shldr_precision": shldr_prec,
+        "shldr_recall":    shldr_rec,
+        "cdir_f1":       cdir_f1,
+        "cdir_precision": cdir_prec,
+        "cdir_recall":    cdir_rec,
+        "cdir_active_acc": cdir_active_acc,
+        "main_top1_acc":    main_top1,
+        "shoulder_top1_acc": shldr_top1,
+    }
+    task_losses = (loss_main, loss_shldr, torch.tensor(0.0, device=loss_main.device), loss_cdir, loss_btn)
+    return metrics, task_losses
+
+
+def compute_loss(preds, targets, btn_loss_type="focal", plain_ce=False, hal_mode=False,
+                  shoulder_centers=None):
+    if hal_mode:
+        return _compute_loss_hal(preds, targets, shoulder_centers)
+
     c_logits = preds["c_dir_logits"].float()
     btn_pred = preds["btn_logits"].float()
 
@@ -311,7 +431,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
               btn_loss=None, no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None, n_shoulder_bins=None,
-              n_heads_override=None):
+              n_heads_override=None, hal_mode=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -339,6 +459,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
     overrides["no_self_inputs"] = no_self_inputs
     if n_heads_override:
         overrides["nhead"] = n_heads_override
+    if hal_mode:
+        overrides["hal_mode"] = True
     if n_stick_clusters is not None:
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
@@ -402,7 +524,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           si_drop_start: float = None, si_drop_end: float = None,
           si_drop_max: float = 1.0,
           plain_ce: bool = False,
-          n_heads_override: int = None):
+          n_heads_override: int = None,
+          hal_mode: bool = False,
+          no_amp: bool = False,
+          cosine_min_lr: float = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -424,7 +549,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if not _is_main:
         os.environ["WANDB_MODE"] = "disabled"
 
-    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC, WEIGHT_DECAY, GRAD_CLIP_NORM
+    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC, WEIGHT_DECAY, GRAD_CLIP_NORM, AMP_DTYPE
     if seq_len_override:
         SEQUENCE_LENGTH = seq_len_override
     if batch_size_override:
@@ -433,6 +558,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         VAL_FRAC = val_frac_override
     if weight_decay_override is not None:
         WEIGHT_DECAY = weight_decay_override
+    if no_amp:
+        AMP_DTYPE = torch.float32
     if grad_clip_norm is not None:
         GRAD_CLIP_NORM = grad_clip_norm
 
@@ -502,6 +629,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             f"(checked: {clusters_path}, {data_dir}, data/full/)")
     n_stick_clusters = len(stick_centers_np)
     n_shoulder_bins = len(shoulder_centers_np)
+    _shoulder_centers = torch.tensor(shoulder_centers_np, dtype=torch.float32, device=DEVICE)
     _log(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder")
 
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
@@ -515,7 +643,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            no_self_inputs=no_self_inputs,
                            n_stick_clusters=n_stick_clusters,
                            n_shoulder_bins=n_shoulder_bins,
-                           n_heads_override=n_heads_override)
+                           n_heads_override=n_heads_override,
+                           hal_mode=hal_mode)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -537,16 +666,17 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         fused=True,
     )
 
+    _eta_min = cosine_min_lr if cosine_min_lr is not None else 0.0
     if warmup_steps > 0:
         warmup  = optim.lr_scheduler.LinearLR(
             optimiser, start_factor=0.01, total_iters=warmup_steps)
         cosine  = optim.lr_scheduler.CosineAnnealingLR(
-            optimiser, T_max=max(max_steps - warmup_steps, 1))
+            optimiser, T_max=max(max_steps - warmup_steps, 1), eta_min=_eta_min)
         scheduler = optim.lr_scheduler.SequentialLR(
             optimiser, [warmup, cosine], milestones=[warmup_steps])
     else:
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimiser, T_max=max_steps)
+            optimiser, T_max=max_steps, eta_min=_eta_min)
 
     start_step = 0
     if resume:
@@ -670,9 +800,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             try:
                 btn_tgt = target.get("btns", target.get("btns_float"))
                 with autocast("cuda", dtype=AMP_DTYPE):
-                    preds = model(state, btn_targets=btn_tgt)
+                    preds = model(state, btn_targets=btn_tgt if not hal_mode else None)
                 metrics, task_losses = compute_loss(
-                    preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce)
+                    preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
+                    hal_mode=hal_mode, shoulder_centers=_shoulder_centers)
             except torch.cuda.OutOfMemoryError:
                 mem = torch.cuda.max_memory_allocated() / 1e9
                 _log(f"OOM on rank {rank}, device {DEVICE}: {mem:.1f}GB peak")
@@ -792,7 +923,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     with autocast("cuda", dtype=AMP_DTYPE):
                         vpreds = model(vs)
                     vm, vtl = compute_loss(vpreds, vt,
-                                           btn_loss_type=cfg.btn_loss)
+                                           btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
+                                           hal_mode=hal_mode, shoulder_centers=_shoulder_centers)
                     batch_total = sum(t.item() for t in vtl)
                     if math.isfinite(batch_total):
                         val_sums["total"] += batch_total
@@ -1009,6 +1141,12 @@ if __name__ == "__main__":
                         help="Use plain cross-entropy instead of focal loss for all heads")
     parser.add_argument("--n-heads", type=int, default=None,
                         help="Override number of attention heads")
+    parser.add_argument("--hal-mode", action="store_true",
+                        help="HAL-exact mode: single-label buttons, combined shoulder, LN heads, plain CE")
+    parser.add_argument("--no-amp", action="store_true",
+                        help="Disable AMP (train in FP32)")
+    parser.add_argument("--cosine-min-lr", type=float, default=None,
+                        help="Minimum LR for cosine schedule (default: 0, HAL uses 1e-6)")
     parser.add_argument("--si-drop-start", type=float, default=None,
                         help="Fraction of training where SI dropout begins")
     parser.add_argument("--si-drop-end", type=float, default=None,
@@ -1074,4 +1212,7 @@ if __name__ == "__main__":
         si_drop_max=args.si_drop_max,
         plain_ce=args.plain_ce,
         n_heads_override=args.n_heads,
+        hal_mode=args.hal_mode,
+        no_amp=args.no_amp,
+        cosine_min_lr=args.cosine_min_lr,
     )

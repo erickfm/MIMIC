@@ -65,6 +65,7 @@ class ModelConfig:
     n_stick_clusters: int       = 63
     n_shoulder_bins: int        = 4
     autoregressive_heads: bool  = True
+    hal_mode: bool              = False  # use HAL-style heads (single-label buttons, combined shoulder, LN)
 
     # fixed categorical vocab sizes
     num_stages: int       = len(STAGE_MAP)
@@ -361,6 +362,59 @@ class PredictionHeads(nn.Module):
         return torch.sigmoid(btn_logits) >= self.btn_threshold
 
 
+class HALPredictionHeads(nn.Module):
+    """HAL-style prediction heads: single-label buttons, combined shoulder, LayerNorm.
+
+    Autoregressive chain:
+      shoulder(h) -> cdir(h,S) -> main(h,S,C) -> buttons(h,S,C,M)
+
+    Buttons: 5-class softmax (A, B, jump=X|Y, Z, NO_BUTTON)
+    Shoulder: combined max(L,R) -> 3-class (0.0, 0.4, 1.0)
+    Heads use LayerNorm and hidden=in_dim//2 (matching HAL).
+    """
+
+    # Single-label button classes: A=0, B=1, jump=2, Z=3, NO_BUTTON=4
+    N_BTN_CLASSES = 5
+
+    def __init__(self, d_model: int, n_stick_clusters: int = 63,
+                 n_shoulder_bins: int = 3, n_cdir: int = 5):
+        super().__init__()
+        self.n_stick_clusters = n_stick_clusters
+        self.n_shoulder_bins = n_shoulder_bins
+
+        def _head(in_dim: int, out_dim: int):
+            h = in_dim // 2
+            return nn.Sequential(
+                nn.LayerNorm(in_dim), nn.Linear(in_dim, h), nn.GELU(), nn.Linear(h, out_dim),
+            )
+
+        shldr_out = n_shoulder_bins
+        cdir_out = n_cdir
+        main_out = n_stick_clusters
+        btn_out = self.N_BTN_CLASSES
+
+        self.shoulder_head = _head(d_model, shldr_out)
+        self.cdir_head     = _head(d_model + shldr_out, cdir_out)
+        self.main_head     = _head(d_model + shldr_out + cdir_out, main_out)
+        self.btn_head      = _head(d_model + shldr_out + cdir_out + main_out, btn_out)
+
+    def forward(self, h: torch.Tensor, btn_targets: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+        shoulder = self.shoulder_head(h)
+        ctx = shoulder.detach()
+        cdir = self.cdir_head(torch.cat([h, ctx], dim=-1))
+        ctx = torch.cat([ctx, cdir.detach()], dim=-1)
+        main = self.main_head(torch.cat([h, ctx], dim=-1))
+        ctx = torch.cat([ctx, main.detach()], dim=-1)
+        btn = self.btn_head(torch.cat([h, ctx], dim=-1))
+
+        return dict(
+            main_xy=main,
+            shoulder_val=shoulder,  # combined shoulder (not separate L/R)
+            c_dir_logits=cdir,
+            btn_logits=btn,         # (B, T, 5) single-label logits
+        )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Full model: Encoder → Pos-emb → N×Transformer → Heads
 # ─────────────────────────────────────────────────────────────────────────────
@@ -405,14 +459,21 @@ class FramePredictor(nn.Module):
 
         self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
         self.final_norm = nn.LayerNorm(cfg.d_model)
-        self.heads = PredictionHeads(
-            cfg.d_model,
-            hidden=cfg.head_hidden,
-            stick_loss=cfg.stick_loss,
-            n_stick_clusters=cfg.n_stick_clusters,
-            n_shoulder_bins=cfg.n_shoulder_bins,
-            autoregressive=cfg.autoregressive_heads,
-        )
+        if cfg.hal_mode:
+            self.heads = HALPredictionHeads(
+                cfg.d_model,
+                n_stick_clusters=cfg.n_stick_clusters,
+                n_shoulder_bins=3,  # HAL uses 3-class combined shoulder
+            )
+        else:
+            self.heads = PredictionHeads(
+                cfg.d_model,
+                hidden=cfg.head_hidden,
+                stick_loss=cfg.stick_loss,
+                n_stick_clusters=cfg.n_stick_clusters,
+                n_shoulder_bins=cfg.n_shoulder_bins,
+                autoregressive=cfg.autoregressive_heads,
+            )
 
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * cfg.num_layers)
