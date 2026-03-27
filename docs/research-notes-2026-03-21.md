@@ -275,17 +275,50 @@ The instability was delayed compared to longer-context hybrid16 runs but was alw
 
 ---
 
-## Current experiments (2026-03-24)
+## Finding 9: 88% val btn_f1 ceiling is universal (2026-03-27)
 
-All three active runs use the flat encoder with self-inputs, grad clipping at 1.0, on Falco data.
+Ran 8 single-GPU experiments on Machine F (Fox data) testing every remaining HAL diff individually: plain CE, no label smoothing, no warmup, dropout 0.2, 16 heads, HAL shape (6×512), and full HAL combo. Plus DDP runs on C (HAL shape, Falco) and E (medium, Falco ctx=256).
 
-| Machine | Run | Key difference from F baseline | Status |
-|---------|-----|-------------------------------|--------|
-| **C** | `falco-med-ctx180-si-lr5e4-clip1-flat-drop05-wd1e3-s42` | lr=5e-4, dropout=0.05, wd=1e-3 | just launched |
-| **E** | `falco-med-ctx256-si-lr3e4-clip1-flat-s43` | ctx=256 (HAL's context length) | just launched |
-| **F** | `falco-med-ctx180-si-lr3e4-clip1-flat-s42` | baseline flat run | 88.5% train / 87.8% val, gnorm=0.38, 1.04M steps |
+**Every single configuration landed at 87-88% val btn_f1.** No hyperparameter or architecture change broke through.
 
-Goal: push val btn_f1 above 90%. C tests whether hyperparameter tweaks (higher lr, lower dropout/wd from old sweep) help. E tests whether HAL's longer context improves metrics. Both use the proven-stable flat encoder.
+Val btn_f1 plateaus at the first val checkpoint and never trends upward regardless of:
+- Model shape (4×768, 6×512)
+- Loss function (focal, plain CE)
+- Dropout (0.05, 0.1, 0.2)
+- Context length (180, 256)
+- Character (Fox, Falco)
+- Button head (independent, AR-7, AR-12)
+- Warmup (5%, none)
+- Label smoothing (0, 0.1)
+- Number of heads (8, 16)
+
+Inference test with best checkpoint showed the model learns Fox's common actions (short hop nair, laser) but doesn't react to game context.
+
+---
+
+## HAL-exact replica (2026-03-27)
+
+After reading HAL's actual code (`/home/erick/projects/hal/`), identified several differences not previously tested together:
+
+| | HAL (from code) | Us (before this change) |
+|---|---|---|
+| Loss | Plain `F.cross_entropy` all heads | Focal CE + focal BCE |
+| AMP | None (FP32) | BF16 |
+| Buttons | 5-class single-label softmax | 7 AR binary heads |
+| Shoulders | Combined max(L,R) → 3-class | Separate L, R → 4-class each |
+| Heads | LayerNorm → Linear(in, in//2) → GELU → Linear | Linear(in, 256) → GELU → Linear |
+| Warmup | None | 5% linear |
+| Cosine eta_min | 1e-6 | 0 |
+
+Implemented `--hal-mode` flag (commit `12da90c`) that enables all HAL-matching settings at once. Launched on Machine C with DDP.
+
+### Active runs (2026-03-27)
+
+| Machine | Run | Config |
+|---------|-----|--------|
+| **C** | `falco-hal-exact-ctx256-s42` | HAL-exact: 6×512, flat, FP32, plain CE, single-label 5-class buttons, combined 3-class shoulder, LN heads, no warmup, cosine to 1e-6, dropout 0.2 |
+| **E** | `falco-med-ctx256-si-lr3e4-clip1-flat-arbtn7-s43` | Previous medium run (still going) |
+| **F** | 8× single-GPU Fox sweep | Various configs (all plateaued at 88%) |
 
 ---
 
