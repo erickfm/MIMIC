@@ -155,6 +155,19 @@ class _BaseFrameEncoder(nn.Module):
         has_opp_btn = not self._no_opp_inputs
         if not has_self_btn and not has_opp_btn:
             n -= 2  # buttons, nana_buttons tokens gone entirely
+        if self._lean:
+            # Drop: nana chars/actions (4), nana c_dirs (up to 2), proj categoricals (24),
+            # nana numerics (2), nana analogs (up to 2), proj_num (1), nana_buttons (1), nana_flags (1)
+            n -= 4 + 24 + 2 + 1 + 1 + 1  # = 33 always dropped
+            if not self._no_self_inputs:
+                n -= 1  # self_nana_c_dir
+                n -= 1  # self_nana_analog
+            if not self._no_opp_inputs:
+                n -= 1  # opp_nana_c_dir
+                n -= 1  # opp_nana_analog
+            # nana_buttons: only counted if buttons exist
+            if has_self_btn or has_opp_btn:
+                pass  # already subtracted nana_buttons above (-1 in the 33)
         return n
 
     def _build_raw_tokens(self, seq: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
