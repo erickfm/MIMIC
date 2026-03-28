@@ -66,6 +66,7 @@ class ModelConfig:
     n_shoulder_bins: int        = 4
     autoregressive_heads: bool  = True
     hal_mode: bool              = False  # use HAL-style heads (single-label buttons, combined shoulder, LN)
+    lean_features: bool         = False  # drop nana/projectiles/nana-flags (match HAL's lean feature set)
 
     # fixed categorical vocab sizes
     num_stages: int       = len(STAGE_MAP)
@@ -448,6 +449,7 @@ class FramePredictor(nn.Module):
             num_c_dirs=cfg.num_c_dirs,
             no_opp_inputs=cfg.no_opp_inputs,
             no_self_inputs=cfg.no_self_inputs,
+            lean_features=cfg.lean_features,
         )
 
         if cfg.pos_enc == "learned":

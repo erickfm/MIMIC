@@ -431,7 +431,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
               btn_loss=None, no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None, n_shoulder_bins=None,
-              n_heads_override=None, hal_mode=False):
+              n_heads_override=None, hal_mode=False, lean_features=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -461,6 +461,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["nhead"] = n_heads_override
     if hal_mode:
         overrides["hal_mode"] = True
+    if lean_features:
+        overrides["lean_features"] = True
     if n_stick_clusters is not None:
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
@@ -527,7 +529,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           n_heads_override: int = None,
           hal_mode: bool = False,
           no_amp: bool = False,
-          cosine_min_lr: float = None):
+          cosine_min_lr: float = None,
+          lean_features: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -644,7 +647,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            n_stick_clusters=n_stick_clusters,
                            n_shoulder_bins=n_shoulder_bins,
                            n_heads_override=n_heads_override,
-                           hal_mode=hal_mode)
+                           hal_mode=hal_mode,
+                           lean_features=lean_features)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -1141,6 +1145,8 @@ if __name__ == "__main__":
                         help="Use plain cross-entropy instead of focal loss for all heads")
     parser.add_argument("--n-heads", type=int, default=None,
                         help="Override number of attention heads")
+    parser.add_argument("--lean-features", action="store_true",
+                        help="Drop nana/projectile features to match HAL's lean input set")
     parser.add_argument("--hal-mode", action="store_true",
                         help="HAL-exact mode: single-label buttons, combined shoulder, LN heads, plain CE")
     parser.add_argument("--no-amp", action="store_true",
@@ -1215,4 +1221,5 @@ if __name__ == "__main__":
         hal_mode=args.hal_mode,
         no_amp=args.no_amp,
         cosine_min_lr=args.cosine_min_lr,
+        lean_features=args.lean_features,
     )

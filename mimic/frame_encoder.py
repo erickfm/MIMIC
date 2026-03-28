@@ -93,10 +93,12 @@ class _BaseFrameEncoder(nn.Module):
         scaled_emb: bool = False,
         no_opp_inputs: bool = False,
         no_self_inputs: bool = False,
+        lean_features: bool = False,
     ) -> None:
         super().__init__()
         self._d_intra = d_intra
         self._dropout = dropout
+        self._lean = lean_features
         self._no_opp_inputs = no_opp_inputs
         self._no_self_inputs = no_self_inputs
         self.si_drop_prob: float = 0.0
@@ -192,51 +194,62 @@ class _BaseFrameEncoder(nn.Module):
         if not noi:
             t["opp_c_dir"] = self.cdir_emb(seq["opp_c_dir"])
 
-        t["self_nana_char"]   = self.char_emb(seq["self_nana_character"])
-        t["opp_nana_char"]    = self.char_emb(seq["opp_nana_character"])
-        t["self_nana_action"] = self.act_emb(seq["self_nana_action"])
-        t["opp_nana_action"]  = self.act_emb(seq["opp_nana_action"])
-        if not nsi:
-            t["self_nana_c_dir"] = self.cdir_emb(seq["self_nana_c_dir"])
-        if not noi:
-            t["opp_nana_c_dir"] = self.cdir_emb(seq["opp_nana_c_dir"])
+        if not self._lean:
+            # Full feature set: nana, projectiles, all numerics
+            t["self_nana_char"]   = self.char_emb(seq["self_nana_character"])
+            t["opp_nana_char"]    = self.char_emb(seq["opp_nana_character"])
+            t["self_nana_action"] = self.act_emb(seq["self_nana_action"])
+            t["opp_nana_action"]  = self.act_emb(seq["opp_nana_action"])
+            if not nsi:
+                t["self_nana_c_dir"] = self.cdir_emb(seq["self_nana_c_dir"])
+            if not noi:
+                t["opp_nana_c_dir"] = self.cdir_emb(seq["opp_nana_c_dir"])
 
-        for j in range(self.PROJ_SLOTS):
-            t[f"proj{j}_owner"]   = self.port_emb(seq[f"proj{j}_owner"])
-            t[f"proj{j}_type"]    = self.ptype_emb(seq[f"proj{j}_type"])
-            t[f"proj{j}_subtype"] = self.psub_emb(seq[f"proj{j}_subtype"])
+            for j in range(self.PROJ_SLOTS):
+                t[f"proj{j}_owner"]   = self.port_emb(seq[f"proj{j}_owner"])
+                t[f"proj{j}_type"]    = self.ptype_emb(seq[f"proj{j}_type"])
+                t[f"proj{j}_subtype"] = self.psub_emb(seq[f"proj{j}_subtype"])
 
         t["global_num"]      = self.glob_enc(seq["numeric"])
         t["self_player_num"] = self.player_enc(torch.cat([seq["self_numeric"], seq["self_action_elapsed"].unsqueeze(-1).float()], dim=-1))
         t["opp_player_num"]  = self.player_enc(torch.cat([seq["opp_numeric"], seq["opp_action_elapsed"].unsqueeze(-1).float()], dim=-1))
-        t["self_nana_num"]   = self.nana_enc(torch.cat([seq["self_nana_numeric"], seq["self_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
-        t["opp_nana_num"]    = self.nana_enc(torch.cat([seq["opp_nana_numeric"], seq["opp_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
+
+        if not self._lean:
+            t["self_nana_num"]   = self.nana_enc(torch.cat([seq["self_nana_numeric"], seq["self_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
+            t["opp_nana_num"]    = self.nana_enc(torch.cat([seq["opp_nana_numeric"], seq["opp_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
 
         if not nsi:
             t["self_analog"]      = self.analog_enc(seq["self_analog"])
-            t["self_nana_analog"] = self.analog_enc(seq["self_nana_analog"])
+            if not self._lean:
+                t["self_nana_analog"] = self.analog_enc(seq["self_nana_analog"])
         if not noi:
             t["opp_analog"]      = self.analog_enc(seq["opp_analog"])
-            t["opp_nana_analog"] = self.analog_enc(seq["opp_nana_analog"])
+            if not self._lean:
+                t["opp_nana_analog"] = self.analog_enc(seq["opp_nana_analog"])
 
-        t["proj_num"] = self.proj_num_enc(torch.cat([seq[f"{k}_numeric"] for k in map(str, range(self.PROJ_SLOTS))], dim=-1))
+        if not self._lean:
+            t["proj_num"] = self.proj_num_enc(torch.cat([seq[f"{k}_numeric"] for k in map(str, range(self.PROJ_SLOTS))], dim=-1))
 
         # Buttons: combine whichever sides are present
         has_self_btn = not nsi
         has_opp_btn = not noi
         if has_self_btn and has_opp_btn:
             t["buttons"]      = self.btn_enc(torch.cat([seq["self_buttons"].float(), seq["opp_buttons"].float()], dim=-1))
-            t["nana_buttons"] = self.nana_btn_enc(torch.cat([seq["self_nana_buttons"].float(), seq["opp_nana_buttons"].float()], dim=-1))
+            if not self._lean:
+                t["nana_buttons"] = self.nana_btn_enc(torch.cat([seq["self_nana_buttons"].float(), seq["opp_nana_buttons"].float()], dim=-1))
         elif has_self_btn:
             t["buttons"]      = self.btn_enc(seq["self_buttons"].float())
-            t["nana_buttons"] = self.nana_btn_enc(seq["self_nana_buttons"].float())
+            if not self._lean:
+                t["nana_buttons"] = self.nana_btn_enc(seq["self_nana_buttons"].float())
         elif has_opp_btn:
             t["buttons"]      = self.btn_enc(seq["opp_buttons"].float())
-            t["nana_buttons"] = self.nana_btn_enc(seq["opp_nana_buttons"].float())
+            if not self._lean:
+                t["nana_buttons"] = self.nana_btn_enc(seq["opp_nana_buttons"].float())
         # else: no button tokens at all
 
         t["flags"]      = self.flag_enc(torch.cat([seq["self_flags"].float(), seq["opp_flags"].float()], dim=-1))
-        t["nana_flags"] = self.nana_flag_enc(torch.cat([seq["self_nana_flags"].float(), seq["opp_nana_flags"].float()], dim=-1))
+        if not self._lean:
+            t["nana_flags"] = self.nana_flag_enc(torch.cat([seq["self_nana_flags"].float(), seq["opp_nana_flags"].float()], dim=-1))
 
         return t
 
@@ -598,6 +611,7 @@ def build_encoder(
     scaled_emb: bool = False,
     no_opp_inputs: bool = False,
     no_self_inputs: bool = False,
+    lean_features: bool = False,
     num_stages: int,
     num_ports: int,
     num_characters: int,
@@ -617,7 +631,7 @@ def build_encoder(
         num_actions=num_actions, num_costumes=num_costumes,
         num_proj_types=num_proj_types, num_proj_subtypes=num_proj_subtypes,
         num_c_dirs=num_c_dirs, no_opp_inputs=no_opp_inputs,
-        no_self_inputs=no_self_inputs,
+        no_self_inputs=no_self_inputs, lean_features=lean_features,
     )
 
     common = dict(d_model=d_model, d_intra=d_intra, dropout=dropout, scaled_emb=scaled_emb)
