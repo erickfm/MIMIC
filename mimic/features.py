@@ -61,7 +61,15 @@ def analog_cols(prefix: str) -> List[str]:
             f"{prefix}_l_shldr", f"{prefix}_r_shldr"]
 
 
-def numeric_state(prefix: str) -> List[str]:
+def numeric_state(prefix: str, hal_minimal: bool = False) -> List[str]:
+    if hal_minimal:
+        # HAL uses only these 9 features per player (no speeds, ECB, hitlag/hitstun)
+        return [
+            f"{prefix}_pos_x", f"{prefix}_pos_y",
+            f"{prefix}_percent", f"{prefix}_stock",
+            f"{prefix}_jumps_left",
+            f"{prefix}_invuln_left", f"{prefix}_shield_strength",
+        ]
     base = [
         f"{prefix}_pos_x", f"{prefix}_pos_y",
         f"{prefix}_percent", f"{prefix}_stock",
@@ -93,7 +101,8 @@ def categorical_ids(prefix: str) -> List[str]:
 # Feature-group spec + walking
 # ---------------------------------------------------------------------------
 def build_feature_groups(no_opp_inputs: bool = False,
-                         no_self_inputs: bool = False) -> Dict[str, Dict]:
+                         no_self_inputs: bool = False,
+                         hal_minimal: bool = False) -> Dict[str, Dict]:
     opp_cats = categorical_ids("opp")
     if not no_opp_inputs:
         opp_cats = opp_cats + ["opp_c_dir"]
@@ -105,7 +114,7 @@ def build_feature_groups(no_opp_inputs: bool = False,
     opp_group: Dict[str, Any] = {
         "categorical": opp_cats,
         "flags":   flags("opp"),
-        "numeric": numeric_state("opp"),
+        "numeric": numeric_state("opp", hal_minimal=hal_minimal),
         "action_elapsed": ["opp_action_frame"],
     }
     if not no_opp_inputs:
@@ -133,7 +142,7 @@ def build_feature_groups(no_opp_inputs: bool = False,
     self_group: Dict[str, Any] = {
         "categorical": self_cats,
         "flags":   flags("self"),
-        "numeric": numeric_state("self"),
+        "numeric": numeric_state("self", hal_minimal=hal_minimal),
         "action_elapsed": ["self_action_frame"],
     }
     if not no_self_inputs:

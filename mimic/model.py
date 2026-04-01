@@ -67,6 +67,7 @@ class ModelConfig:
     autoregressive_heads: bool  = True
     hal_mode: bool              = False  # use HAL-style heads (single-label buttons, combined shoulder, LN)
     lean_features: bool         = False  # drop nana/projectiles/nana-flags (match HAL's lean feature set)
+    hal_minimal_features: bool  = False  # drop ECB/speeds/hitlag from numeric (match HAL's exact input set)
 
     # fixed categorical vocab sizes
     num_stages: int       = len(STAGE_MAP)
@@ -450,6 +451,7 @@ class FramePredictor(nn.Module):
             no_opp_inputs=cfg.no_opp_inputs,
             no_self_inputs=cfg.no_self_inputs,
             lean_features=cfg.lean_features,
+            hal_minimal_features=cfg.hal_minimal_features,
         )
 
         if cfg.pos_enc == "learned":

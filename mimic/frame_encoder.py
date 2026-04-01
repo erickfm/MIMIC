@@ -69,6 +69,7 @@ class _GroupAttention(nn.Module):
 class _BaseFrameEncoder(nn.Module):
     GLOBAL_NUM   = 20
     PLAYER_NUM   = 22
+    PLAYER_NUM_HAL_MINIMAL = 7  # HAL uses only 7 numeric per player
     NANA_NUM     = 27
     ANALOG_DIM   = 4
     BTN_DIM      = 12
@@ -94,11 +95,13 @@ class _BaseFrameEncoder(nn.Module):
         no_opp_inputs: bool = False,
         no_self_inputs: bool = False,
         lean_features: bool = False,
+        hal_minimal_features: bool = False,
     ) -> None:
         super().__init__()
         self._d_intra = d_intra
         self._dropout = dropout
         self._lean = lean_features
+        self._hal_minimal = hal_minimal_features
         self._no_opp_inputs = no_opp_inputs
         self._no_self_inputs = no_self_inputs
         self.si_drop_prob: float = 0.0
@@ -125,8 +128,9 @@ class _BaseFrameEncoder(nn.Module):
         self.ptype_emb = cat_block(num_proj_types)
         self.psub_emb  = cat_block(num_proj_subtypes)
 
+        _player_num = self.PLAYER_NUM_HAL_MINIMAL if hal_minimal_features else self.PLAYER_NUM
         self.glob_enc      = _mlp(self.GLOBAL_NUM, d_intra, dropout)
-        self.player_enc    = _mlp(self.PLAYER_NUM + 1, d_intra, dropout)
+        self.player_enc    = _mlp(_player_num + 1, d_intra, dropout)
         self.nana_enc      = _mlp(self.NANA_NUM + 1, d_intra, dropout)
         self.analog_enc    = _mlp(self.ANALOG_DIM, d_intra, dropout)
         self.proj_num_enc  = _mlp(self.PROJ_NUM_PER * self.PROJ_SLOTS, d_intra, dropout)
@@ -625,6 +629,7 @@ def build_encoder(
     no_opp_inputs: bool = False,
     no_self_inputs: bool = False,
     lean_features: bool = False,
+    hal_minimal_features: bool = False,
     num_stages: int,
     num_ports: int,
     num_characters: int,
@@ -645,6 +650,7 @@ def build_encoder(
         num_proj_types=num_proj_types, num_proj_subtypes=num_proj_subtypes,
         num_c_dirs=num_c_dirs, no_opp_inputs=no_opp_inputs,
         no_self_inputs=no_self_inputs, lean_features=lean_features,
+        hal_minimal_features=hal_minimal_features,
     )
 
     common = dict(d_model=d_model, d_intra=d_intra, dropout=dropout, scaled_emb=scaled_emb)

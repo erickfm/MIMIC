@@ -164,7 +164,8 @@ ROLL_WIN = cfg.max_seq_len
 
 # ── Feature spec ─────────────────────────────────────────────────────────
 _fg = F.build_feature_groups(no_opp_inputs=cfg.no_opp_inputs,
-                             no_self_inputs=getattr(cfg, 'no_self_inputs', False))
+                             no_self_inputs=getattr(cfg, 'no_self_inputs', False),
+                             hal_minimal=getattr(cfg, 'hal_minimal_features', False))
 _categorical_cols = F.get_categorical_cols(_fg)
 
 # ── Prediction feedback state ─────────────────────────────────────────────
@@ -451,20 +452,35 @@ def _safe(val: float, default: float = 0.5) -> float:
 def _decode_clusters(pred: Dict[str, torch.Tensor], temperature: float = 1.0):
     """For clusters mode: logits -> continuous (mx, my, l, r) via cluster lookup.
     temperature=1.0 uses argmax; temperature>1 samples from softened distribution."""
+    hal_shoulder = "shoulder_val" in pred
+
     if temperature <= 0 or temperature == 1.0:
         main_idx = int(torch.argmax(pred["main_xy"]))
-        l_idx = int(torch.argmax(pred["L_val"]))
-        r_idx = int(torch.argmax(pred["R_val"]))
+        if hal_shoulder:
+            shldr_idx = int(torch.argmax(pred["shoulder_val"]))
+        else:
+            l_idx = int(torch.argmax(pred["L_val"]))
+            r_idx = int(torch.argmax(pred["R_val"]))
     else:
         main_probs = torch.softmax(pred["main_xy"] / temperature, dim=-1)
         main_idx = int(torch.multinomial(main_probs, 1))
-        l_probs = torch.softmax(pred["L_val"] / temperature, dim=-1)
-        l_idx = int(torch.multinomial(l_probs, 1))
-        r_probs = torch.softmax(pred["R_val"] / temperature, dim=-1)
-        r_idx = int(torch.multinomial(r_probs, 1))
+        if hal_shoulder:
+            shldr_probs = torch.softmax(pred["shoulder_val"] / temperature, dim=-1)
+            shldr_idx = int(torch.multinomial(shldr_probs, 1))
+        else:
+            l_probs = torch.softmax(pred["L_val"] / temperature, dim=-1)
+            l_idx = int(torch.multinomial(l_probs, 1))
+            r_probs = torch.softmax(pred["R_val"] / temperature, dim=-1)
+            r_idx = int(torch.multinomial(r_probs, 1))
+
     mx, my = float(_stick_centers[main_idx][0]), float(_stick_centers[main_idx][1])
-    l_val = float(_shoulder_centers[l_idx])
-    r_val = float(_shoulder_centers[r_idx])
+    if hal_shoulder:
+        hal_centers = [0.0, 0.4, 1.0]
+        l_val = hal_centers[shldr_idx]
+        r_val = 0.0  # HAL combines into max(L,R), apply to L only
+    else:
+        l_val = float(_shoulder_centers[l_idx])
+        r_val = float(_shoulder_centers[r_idx])
     return mx, my, l_val, r_val
 
 
@@ -483,32 +499,60 @@ def press_output(ctrl: melee.Controller,
     ctrl.tilt_analog(melee.enums.Button.BUTTON_MAIN, mx, my)
     ctrl.tilt_analog(melee.enums.Button.BUTTON_C,    cx, cy)
 
-    btn_probs = torch.sigmoid(pred["btn_logits"])
-    pressed = []
-    fired: List[bool] = []
-    BLOCKED_BUTTONS = {melee.enums.Button.BUTTON_START,
-                       melee.enums.Button.BUTTON_D_UP, melee.enums.Button.BUTTON_D_DOWN,
-                       melee.enums.Button.BUTTON_D_LEFT, melee.enums.Button.BUTTON_D_RIGHT}
-    for i, (prob, btn) in enumerate(zip(btn_probs, IDX_TO_BUTTON)):
-        p = prob.item()
-        fire = (random.random() < p) if sample else (p > args.btn_threshold)
-        if btn in BLOCKED_BUTTONS:
-            fire = False
-        fired.append(fire)
-        if fire:
+    # HAL mode: single-label 5-class (A=0, B=1, jump=2, Z=3, none=4)
+    hal_buttons = "shoulder_val" in pred and pred["btn_logits"].shape[-1] == 5
+    HAL_IDX_TO_BUTTON = [
+        melee.enums.Button.BUTTON_A, melee.enums.Button.BUTTON_B,
+        melee.enums.Button.BUTTON_X, melee.enums.Button.BUTTON_Z,
+    ]
+
+    if hal_buttons:
+        btn_idx = int(torch.argmax(pred["btn_logits"]))
+        pressed = []
+        fired = [False] * len(IDX_TO_BUTTON)
+        # Release all first
+        for btn in IDX_TO_BUTTON:
+            ctrl.release_button(btn)
+        # Press the selected button (if not NO_BUTTON=4)
+        if btn_idx < 4:
+            btn = HAL_IDX_TO_BUTTON[btn_idx]
             ctrl.press_button(btn)
             pressed.append(btn.name)
-        else:
-            ctrl.release_button(btn)
+            # Map back to fired list for feedback
+            if btn in IDX_TO_BUTTON:
+                fired[IDX_TO_BUTTON.index(btn)] = True
+    else:
+        btn_probs = torch.sigmoid(pred["btn_logits"])
+        pressed = []
+        fired: List[bool] = []
+        BLOCKED_BUTTONS = {melee.enums.Button.BUTTON_START,
+                           melee.enums.Button.BUTTON_D_UP, melee.enums.Button.BUTTON_D_DOWN,
+                           melee.enums.Button.BUTTON_D_LEFT, melee.enums.Button.BUTTON_D_RIGHT}
+        for i, (prob, btn) in enumerate(zip(btn_probs, IDX_TO_BUTTON)):
+            p = prob.item()
+            fire = (random.random() < p) if sample else (p > args.btn_threshold)
+            if btn in BLOCKED_BUTTONS:
+                fire = False
+            fired.append(fire)
+            if fire:
+                ctrl.press_button(btn)
+                pressed.append(btn.name)
+            else:
+                ctrl.release_button(btn)
 
     ctrl.press_shoulder(melee.enums.Button.BUTTON_L, l_val)
     ctrl.press_shoulder(melee.enums.Button.BUTTON_R, r_val)
 
     ctrl.flush()
 
-    top3 = btn_probs.topk(3)
-    top3_str = " ".join(f"{IDX_TO_BUTTON[i].name}={v:.3f}"
-                        for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
+    if hal_buttons:
+        btn_logits = pred["btn_logits"]
+        top3_str = " ".join(f"{['A','B','X','Z','NONE'][i]}={v:.3f}"
+                            for v, i in zip(*torch.softmax(btn_logits, -1).topk(3)))
+    else:
+        top3 = btn_probs.topk(3)
+        top3_str = " ".join(f"{IDX_TO_BUTTON[i].name}={v:.3f}"
+                            for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
     log.info(
         "MAIN=(%.2f,%.2f) C=%d L=%.2f R=%.2f BTN=%s  top3=[%s]",
         mx, my, dir_idx, l_val, r_val, pressed, top3_str

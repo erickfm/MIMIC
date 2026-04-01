@@ -431,7 +431,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               pos_enc=None, attn_variant=None, n_kv_heads=None,
               btn_loss=None, no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None, n_shoulder_bins=None,
-              n_heads_override=None, hal_mode=False, lean_features=False):
+              n_heads_override=None, hal_mode=False, lean_features=False,
+              hal_minimal_features=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -463,6 +464,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["hal_mode"] = True
     if lean_features:
         overrides["lean_features"] = True
+    if hal_minimal_features:
+        overrides["hal_minimal_features"] = True
     if n_stick_clusters is not None:
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
@@ -655,7 +658,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            n_shoulder_bins=n_shoulder_bins,
                            n_heads_override=n_heads_override,
                            hal_mode=hal_mode,
-                           lean_features=lean_features)
+                           lean_features=lean_features,
+                           hal_minimal_features=hal_minimal_features)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -1178,6 +1182,8 @@ if __name__ == "__main__":
                         help="Disable LR warmup (start at full LR)")
     parser.add_argument("--stick-clusters", type=str, default=None,
                         help="Stick cluster set: 'hal37' for HAL's 37 hand-designed clusters")
+    parser.add_argument("--hal-minimal-features", action="store_true",
+                        help="Use HAL's minimal input set (drop ECB, speeds, hitlag/hitstun from numeric)")
     parser.add_argument("--si-drop-start", type=float, default=None,
                         help="Fraction of training where SI dropout begins")
     parser.add_argument("--si-drop-end", type=float, default=None,
@@ -1249,4 +1255,5 @@ if __name__ == "__main__":
         lean_features=args.lean_features,
         no_warmup=args.no_warmup,
         stick_clusters=args.stick_clusters,
+        hal_minimal_features=args.hal_minimal_features,
     )
