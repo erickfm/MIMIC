@@ -637,7 +637,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     n_stick_clusters = len(stick_centers_np)
     n_shoulder_bins = len(shoulder_centers_np)
     _shoulder_centers = torch.tensor(shoulder_centers_np, dtype=torch.float32, device=DEVICE)
-    _log(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder")
+    _stick_centers = torch.tensor(stick_centers_np, dtype=torch.float32, device=DEVICE)
+    _recluster_sticks = stick_clusters is not None  # re-assign if using non-data clusters
+    _log(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder"
+         f"{'  (re-clustering at runtime)' if _recluster_sticks else ''}")
 
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
                            num_layers_override=num_layers_override,
@@ -806,6 +809,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 target[k] = v.to(DEVICE, non_blocking=True)
 
             try:
+                # Re-assign stick clusters if using non-data clusters (e.g. hal37)
+                if _recluster_sticks and "main_x" in target:
+                    xy = torch.stack([target["main_x"], target["main_y"]], dim=-1)
+                    dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
+                    target["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
+
                 btn_tgt = target.get("btns", target.get("btns_float"))
                 with autocast("cuda", dtype=AMP_DTYPE):
                     preds = model(state, btn_targets=btn_tgt if not hal_mode else None)
@@ -928,6 +937,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         vs[k] = v.to(DEVICE, non_blocking=True)
                     for k, v in vt.items():
                         vt[k] = v.to(DEVICE, non_blocking=True)
+                    if _recluster_sticks and "main_x" in vt:
+                        xy = torch.stack([vt["main_x"], vt["main_y"]], dim=-1)
+                        dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
+                        vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
                     with autocast("cuda", dtype=AMP_DTYPE):
                         vpreds = model(vs)
                     vm, vtl = compute_loss(vpreds, vt,
@@ -1000,6 +1013,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                             vs[k] = v.to(DEVICE, non_blocking=True)
                         for k, v in vt.items():
                             vt[k] = v.to(DEVICE, non_blocking=True)
+                        if _recluster_sticks and "main_x" in vt:
+                            xy = torch.stack([vt["main_x"], vt["main_y"]], dim=-1)
+                            dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
+                            vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
                         with autocast("cuda", dtype=AMP_DTYPE):
                             vpreds = model(vs)
                         vm, vtl = compute_loss(vpreds, vt,
