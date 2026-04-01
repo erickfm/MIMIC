@@ -271,7 +271,10 @@ def load_cluster_centers(data_dir: Path = None, clusters_path: Path = None,
     """
     if stick_clusters == "hal37":
         print(f"  Using HAL's 37 hand-designed stick clusters", flush=True)
-        return HAL_STICK_CLUSTERS_37, np.array([0.0, 0.4, 1.0], dtype=np.float32)
+        # Load shoulder centers from data file (may be 4-bin from preprocessing)
+        _, shoulder_from_data = load_cluster_centers(data_dir=data_dir, clusters_path=clusters_path)
+        shoulder = shoulder_from_data if shoulder_from_data is not None else np.array([0.0, 0.4, 1.0], dtype=np.float32)
+        return HAL_STICK_CLUSTERS_37, shoulder
 
     candidates = []
     if clusters_path is not None:
