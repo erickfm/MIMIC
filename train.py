@@ -530,7 +530,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           hal_mode: bool = False,
           no_amp: bool = False,
           cosine_min_lr: float = None,
-          lean_features: bool = False):
+          lean_features: bool = False,
+          no_warmup: bool = False,
+          stick_clusters: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -613,7 +615,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     val_interval  = intervals["val_interval"]
     ckpt_interval = intervals["ckpt_interval"]
     warmup_steps  = intervals["warmup_steps"]
-    if warmup_steps_override is not None:
+    if no_warmup:
+        warmup_steps = 0
+    elif warmup_steps_override is not None:
         warmup_steps = warmup_steps_override
 
     actual_lr = lr or LEARNING_RATE
@@ -625,7 +629,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     from mimic.features import load_cluster_centers
     _cp = Path(clusters_path) if clusters_path else None
     stick_centers_np, shoulder_centers_np = load_cluster_centers(
-        data_dir=Path(data_dir), clusters_path=_cp)
+        data_dir=Path(data_dir), clusters_path=_cp, stick_clusters=stick_clusters)
     if stick_centers_np is None:
         raise RuntimeError(
             f"No stick_clusters.json found "
@@ -1153,6 +1157,10 @@ if __name__ == "__main__":
                         help="Disable AMP (train in FP32)")
     parser.add_argument("--cosine-min-lr", type=float, default=None,
                         help="Minimum LR for cosine schedule (default: 0, HAL uses 1e-6)")
+    parser.add_argument("--no-warmup", action="store_true",
+                        help="Disable LR warmup (start at full LR)")
+    parser.add_argument("--stick-clusters", type=str, default=None,
+                        help="Stick cluster set: 'hal37' for HAL's 37 hand-designed clusters")
     parser.add_argument("--si-drop-start", type=float, default=None,
                         help="Fraction of training where SI dropout begins")
     parser.add_argument("--si-drop-end", type=float, default=None,
@@ -1222,4 +1230,6 @@ if __name__ == "__main__":
         no_amp=args.no_amp,
         cosine_min_lr=args.cosine_min_lr,
         lean_features=args.lean_features,
+        no_warmup=args.no_warmup,
+        stick_clusters=args.stick_clusters,
     )

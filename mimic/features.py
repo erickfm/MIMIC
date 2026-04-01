@@ -1,12 +1,14 @@
 # features.py
 # ---------------------------------------------------------------------------
 # Single source of truth for MIMIC feature engineering.
-# Used by dataset.py, upload_dataset.py, tensorize.py, and inference.py.
+# Used by dataset.py, upload_dataset.py, tensorize.py, inference.py, and
+# slp_to_shards.py.
 # ---------------------------------------------------------------------------
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -257,14 +259,20 @@ def _finalize_dynamic_maps(
 _DEFAULT_CLUSTERS_PATH = Path("data/full/stick_clusters.json")
 
 
-def load_cluster_centers(data_dir: Path = None, clusters_path: Path = None):
+def load_cluster_centers(data_dir: Path = None, clusters_path: Path = None,
+                         stick_clusters: str = None):
     """Load stick_clusters.json, returning (stick_centers, shoulder_centers) or (None, None).
 
     Resolution order:
+      0. Built-in cluster set if *stick_clusters* is ``"hal37"``
       1. Explicit *clusters_path* if given
       2. ``data_dir / stick_clusters.json``
       3. ``data/full/stick_clusters.json`` (canonical default)
     """
+    if stick_clusters == "hal37":
+        print(f"  Using HAL's 37 hand-designed stick clusters", flush=True)
+        return HAL_STICK_CLUSTERS_37, np.array([0.0, 0.4, 1.0], dtype=np.float32)
+
     candidates = []
     if clusters_path is not None:
         candidates.append(Path(clusters_path))
@@ -281,6 +289,29 @@ def load_cluster_centers(data_dir: Path = None, clusters_path: Path = None):
             print(f"  Loaded clusters from {path}", flush=True)
             return stick, shoulder
     return None, None
+
+
+# ---------------------------------------------------------------------------
+# HAL's hand-designed stick clusters (Melee-mechanical angles)
+# ---------------------------------------------------------------------------
+HAL_STICK_CLUSTERS_37 = np.array([
+    [0.5000, 0.5000],  # neutral
+    [0.6750, 0.5000], [0.3250, 0.5000], [0.5000, 0.6750], [0.5000, 0.3250],  # partial tilts
+    [0.8375, 0.5000], [0.1625, 0.5000], [0.5000, 0.8375], [0.5000, 0.1625],  # full tilts
+    [1.0000, 0.5000], [0.5000, 1.0000], [0.0000, 0.5000], [0.5000, 0.0000],  # full press/dash
+    [0.9750, 0.3500], [0.0250, 0.3500], [0.9750, 0.6500], [0.0250, 0.6500],  # wavedash 17deg
+    [0.9250, 0.2500], [0.9250, 0.7500], [0.0750, 0.2500], [0.0750, 0.7500],  # 30deg
+    [0.8500, 0.1500], [0.1500, 0.1500], [0.8500, 0.8500], [0.1500, 0.8500],  # 45deg shield drop
+    [0.7500, 0.7500], [0.2500, 0.7500], [0.7500, 0.2500], [0.2500, 0.2500],  # angled f-tilts
+    [0.7500, 0.9250], [0.2500, 0.9250], [0.7500, 0.0750], [0.2500, 0.0750],  # 60deg
+    [0.6500, 0.0250], [0.6500, 0.9750], [0.3500, 0.0250], [0.3500, 0.9750],  # 72.5deg
+], dtype=np.float32)
+
+HAL_CSTICK_CLUSTERS_9 = np.array([
+    [0.5000, 0.5000],  # neutral
+    [1.0000, 0.5000], [0.0000, 0.5000], [0.5000, 0.0000], [0.5000, 1.0000],  # cardinals
+    [0.1500, 0.1500], [0.8500, 0.1500], [0.8500, 0.8500], [0.1500, 0.8500],  # diagonals
+], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -460,3 +491,154 @@ def build_targets_batch(
         df[btn_cols("self")].astype("float32").values.copy())
 
     return targets
+
+
+# ---------------------------------------------------------------------------
+# Numpy-native helpers (no pandas)
+# ---------------------------------------------------------------------------
+def encode_cstick_dir_np(
+    cx: np.ndarray, cy: np.ndarray, dead_zone: float = 0.15,
+) -> np.ndarray:
+    """Vectorized c-stick direction from raw float32 arrays. Returns int64."""
+    dx = cx.astype(np.float32) - 0.5
+    dy = cy.astype(np.float32) - 0.5
+    mag = np.hypot(dx, dy)
+    cat = np.zeros(len(cx), dtype=np.int64)
+    alive = mag > dead_zone
+    horiz = alive & (np.abs(dx) >= np.abs(dy))
+    vert  = alive & (np.abs(dy) >  np.abs(dx))
+    cat[horiz & (dx > 0)] = 4
+    cat[horiz & (dx < 0)] = 3
+    cat[vert  & (dy > 0)] = 1
+    cat[vert  & (dy < 0)] = 2
+    return cat
+
+
+def apply_categorical_map_np(
+    values: np.ndarray, mapping: Dict[int, int],
+) -> np.ndarray:
+    """Vectorized categorical mapping using a numpy LUT.
+
+    For maps whose raw keys are small non-negative ints (stage, character,
+    action, projectile type), builds a lookup table for O(1) vectorized
+    mapping.  Falls back to a Python loop for maps with negative or large keys.
+    """
+    if not mapping:
+        return np.zeros_like(values, dtype=np.int64)
+    raw_keys = list(mapping.keys())
+    min_k, max_k = min(raw_keys), max(raw_keys)
+    # Use LUT when range is reasonable and non-negative
+    if min_k >= 0 and (max_k - min_k) < 8192:
+        lut = np.zeros(max_k + 1, dtype=np.int64)
+        for k, v in mapping.items():
+            lut[k] = v
+        ival = values.astype(np.int64)
+        # Clamp out-of-range to 0 (same as dict .get(x, 0))
+        mask = (ival >= 0) & (ival <= max_k)
+        out = np.zeros(len(values), dtype=np.int64)
+        out[mask] = lut[ival[mask]]
+        return out
+    # Fallback: Python loop
+    get = mapping.get
+    return np.array([get(int(v), 0) for v in values], dtype=np.int64)
+
+
+# ---------------------------------------------------------------------------
+# ColumnSchema — maps column names to pre-allocated array positions
+# ---------------------------------------------------------------------------
+@dataclass
+class ColumnSchema:
+    """Maps feature column names to positions in pre-allocated numpy arrays.
+
+    Built from walk_groups() so the array layout exactly matches the tensor
+    dict produced by df_to_state_tensors().
+
+    Categoricals are 1D int64 arrays (one per column).
+    Non-categoricals are always 2D float32 ``(max_frames, width)`` — even for
+    width-1 groups like action_elapsed — so writes can always use
+    ``arrays[key][frame_i, idx]``.  The conversion step squeezes width-1
+    groups back to 1D to match the model's expected shapes.
+    """
+    # key -> (dtype, width)
+    array_specs: Dict[str, Tuple[np.dtype, int]] = field(default_factory=dict)
+    # col_name -> (array_key, col_idx)  col_idx=None for categoricals (1D)
+    col_to_pos: Dict[str, Tuple[str, int | None]] = field(default_factory=dict)
+    # ordered list of all categorical column names
+    categorical_cols: List[str] = field(default_factory=list)
+    # ordered (tensor_key, ftype, cols) for iterating in walk order
+    tensor_layout: List[Tuple[str, str, List[str]]] = field(default_factory=list)
+    # (dst_key, dst_idx, src_key, src_idx) — fill duplicate column positions
+    # (nana numeric groups have 5 duplicated columns each)
+    duplicate_fills: List[Tuple[str, int, str, int]] = field(default_factory=list)
+
+    def allocate(self, max_frames: int) -> Dict[str, np.ndarray]:
+        """Return zero-initialized arrays matching the schema."""
+        arrays: Dict[str, np.ndarray] = {}
+        for key, (dtype, width) in self.array_specs.items():
+            if dtype == np.int64:          # categorical — 1D
+                arrays[key] = np.zeros(max_frames, dtype=dtype)
+            else:                          # grouped — always 2D
+                arrays[key] = np.zeros((max_frames, width), dtype=dtype)
+        return arrays
+
+    def fill_duplicates(self, arrays: Dict[str, np.ndarray], n: int) -> None:
+        """Copy values into duplicate column positions (call after writing)."""
+        for dst_key, dst_idx, src_key, src_idx in self.duplicate_fills:
+            arrays[dst_key][:n, dst_idx] = arrays[src_key][:n, src_idx]
+
+    def arrays_to_state_tensors(
+        self, arrays: Dict[str, np.ndarray], n: int,
+    ) -> Dict[str, torch.Tensor]:
+        """Convert pre-allocated numpy arrays to the state tensor dict."""
+        state: Dict[str, torch.Tensor] = {}
+        for key, ftype, cols in self.tensor_layout:
+            if ftype == "categorical":
+                for col in cols:
+                    state[col] = torch.from_numpy(
+                        arrays[col][:n].copy()).long()
+            else:
+                _, width = self.array_specs[key]
+                if width == 1:
+                    state[key] = torch.from_numpy(
+                        arrays[key][:n, 0].astype(np.float32).copy())
+                else:
+                    state[key] = torch.from_numpy(
+                        arrays[key][:n].astype(np.float32).copy())
+        return state
+
+    def lookup(self, col_name: str) -> Tuple[str, int | None]:
+        """Return (array_key, col_idx) for a column name."""
+        return self.col_to_pos[col_name]
+
+
+def build_column_schema(fg: Dict) -> ColumnSchema:
+    """Build a ColumnSchema from a feature group spec.
+
+    Iterates walk_groups() in the same order as df_to_state_tensors(),
+    guaranteeing identical tensor key names and column ordering.
+    """
+    schema = ColumnSchema()
+    for _, meta in walk_groups(fg, return_meta=True):
+        cols, ftype, entity = meta["cols"], meta["ftype"], meta["entity"]
+        key = f"{entity}_{ftype}" if entity != "global" else ftype
+
+        if ftype == "categorical":
+            for col in cols:
+                schema.array_specs[col] = (np.int64, 1)
+                schema.col_to_pos[col] = (col, None)
+                schema.categorical_cols.append(col)
+            schema.tensor_layout.append((key, ftype, list(cols)))
+        else:
+            width = len(cols)
+            schema.array_specs[key] = (np.float32, width)
+            for i, col in enumerate(cols):
+                if col in schema.col_to_pos:
+                    # Duplicate column (e.g. nana numeric extras that repeat
+                    # fields already in numeric_state).  Record as needing a
+                    # post-extraction copy from the original position.
+                    orig_key, orig_idx = schema.col_to_pos[col]
+                    schema.duplicate_fills.append((key, i, orig_key, orig_idx))
+                else:
+                    schema.col_to_pos[col] = (key, i)
+            schema.tensor_layout.append((key, ftype, list(cols)))
+    return schema
