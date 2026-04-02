@@ -837,9 +837,9 @@ if __name__ == "__main__":
             _diag_all_rows.append(dict(row))
         # Pre-fill context window on first frame (model trained on fixed seq_len)
         if len(rows) == 1 and ROLL_WIN > 1:
-            first = rows[0]
+            first_tensors = _process_one_row(row)
             for _ in range(ROLL_WIN - 1):
-                rows.appendleft(dict(first))
+                _frame_cache.appendleft({k: v.clone() for k, v in first_tensors.items()})
         if len(rows) >= 1:
             pred = run_inference(row)
             _prev_pred = pred
