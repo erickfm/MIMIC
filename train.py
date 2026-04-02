@@ -535,7 +535,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           cosine_min_lr: float = None,
           lean_features: bool = False,
           no_warmup: bool = False,
-          stick_clusters: str = None):
+          stick_clusters: str = None,
+          hal_minimal_features: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
