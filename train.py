@@ -390,7 +390,7 @@ def _compute_intervals(max_steps):
 
 
 def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
-                  rank=0, world_size=1):
+                  rank=0, world_size=1, controller_offset=False):
     _log(f"  Using streaming dataset from {data_dir}")
     train_ds = StreamingMeleeDataset(
         data_dir=data_dir,
@@ -399,6 +399,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         split="train",
         rank=rank,
         world_size=world_size,
+        controller_offset=controller_offset,
     )
     val_ds = StreamingMeleeDataset(
         data_dir=data_dir,
@@ -407,6 +408,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         split="val",
         rank=rank,
         world_size=world_size,
+        controller_offset=controller_offset,
     )
     return train_ds, val_ds
 
@@ -537,7 +539,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           no_warmup: bool = False,
           stick_clusters: str = None,
           hal_minimal_features: bool = False,
-          reaction_delay_override: int = None):
+          reaction_delay_override: int = None,
+          controller_offset: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -587,7 +590,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     _log(f"Loading dataset from {data_dir} ...")
     ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs,
                               no_self_inputs=no_self_inputs,
-                              rank=rank, world_size=world_size)
+                              rank=rank, world_size=world_size,
+                              controller_offset=controller_offset)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
@@ -1112,6 +1116,8 @@ if __name__ == "__main__":
                         help="Override sequence length (default: 60)")
     parser.add_argument("--reaction-delay", type=int, default=None,
                         help="Reaction delay in frames (default: 1, HAL uses 0)")
+    parser.add_argument("--controller-offset", action="store_true",
+                        help="Shift self-controller input by -1 frame (HAL-style: see prev frame's press)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
     parser.add_argument("--encoder",   type=str, default="hybrid16",
@@ -1263,4 +1269,5 @@ if __name__ == "__main__":
         stick_clusters=args.stick_clusters,
         hal_minimal_features=args.hal_minimal_features,
         reaction_delay_override=args.reaction_delay,
+        controller_offset=args.controller_offset,
     )

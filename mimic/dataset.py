@@ -38,6 +38,7 @@ class StreamingMeleeDataset(IterableDataset):
         split: str = "train",
         rank: int = 0,
         world_size: int = 1,
+        controller_offset: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -47,6 +48,7 @@ class StreamingMeleeDataset(IterableDataset):
         self.split           = split
         self._rank           = rank
         self._world_size     = world_size
+        self._controller_offset = controller_offset
 
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
@@ -163,6 +165,14 @@ class StreamingMeleeDataset(IterableDataset):
             for abs_start, _ in window_indices:
                 state = {k: v[abs_start: abs_start + W] for k, v in states.items()}
                 target = {k: v[abs_start + R: abs_start + W + R] for k, v in targets.items()}
+                # HAL-style: shift self-controller by -1 so position i sees frame i-1's controller
+                if self._controller_offset and W > 1:
+                    for ck in ("self_buttons", "self_analog", "self_c_dir"):
+                        if ck in state:
+                            orig = state[ck]
+                            shifted = torch.zeros_like(orig)
+                            shifted[1:] = orig[:-1]
+                            state[ck] = shifted
                 yield state, target
 
     # ------------------------------------------------------------------
