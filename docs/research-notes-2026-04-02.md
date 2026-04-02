@@ -130,3 +130,57 @@ The rd=1 model with sampling actually produced more button presses (148) than th
 2. Fix the identified mismatches
 3. Re-run closed-loop eval
 4. If it works, scale to more data (ranked dataset upload in progress)
+
+---
+
+## Finding 19: Inference pipeline is NOT the problem — confirmed via systematic ablation
+
+Took a training batch (256/256 non-NONE) and replaced individual feature groups with inference values one at a time:
+
+| Replace with inference value | Non-NONE | Delta |
+|-----|------|------|
+| Baseline (all training) | 256/256 | — |
+| self_numeric | 256/256 | 0 |
+| opp_numeric | 256/256 | 0 |
+| numeric (global) | 256/256 | 0 |
+| self_costume | 256/256 | 0 |
+| opp_character | 256/256 | 0 |
+| self_flags | 256/256 | 0 |
+| self_analog | **0/256** | **-256** |
+| **self_action** | **0/256** | **-256** |
+| **self_action_elapsed** | **0/256** | **-256** |
+| All inference values | 0/256 | -256 |
+
+`self_action`, `self_action_elapsed`, and `self_analog` each independently kill predictions. But these differ because they're from different gamestates (different games, different moments). The model is extremely sensitive to action state.
+
+---
+
+## Finding 20: STANDING action makes the model predict NONE — this is correct behavior
+
+On training data, the model predicts non-NONE on only 1.5% of STANDING frames (vs 16.9% of other frames). NONE mean probability during STANDING = 99.9%.
+
+At inference, the character starts in STANDING and stays there because the model predicts NONE during STANDING. This is not a bug — it's what the model learned from the data. During STANDING in replays, players mostly do nothing.
+
+---
+
+## Finding 21: HAL and MIMIC have fundamentally different STANDING calibration
+
+Definitive comparison of button predictions during STANDING:
+
+| Metric | HAL (best checkpoint) | MIMIC (best checkpoint) |
+|--------|----------------------|------------------------|
+| Mean NONE during STANDING | **94.8%** | **99.9%** |
+| Mean X (jump) during STANDING | **4.6%** | **0.0%** |
+| Frames with NONE > 99% | **20.2%** | **99.8%** |
+
+HAL assigns 4.6% to jump during STANDING — enough for ~3 jumps/second via multinomial sampling. MIMIC assigns 0.0% — never jumps. Both trained on the same .slp data.
+
+**This proves the gap is in TRAINING, not inference.** The remaining unmatched training differences (data preprocessing format, total samples, position encoding, input projection, feature set) are the cause.
+
+---
+
+## Updated Next Steps
+
+1. Check how many total training samples MIMIC actually used (2M default may be too few)
+2. Retrain with more samples (16.8M to match HAL)
+3. If still different, start matching remaining architectural differences one by one (position encoding, input projection, feature set)
