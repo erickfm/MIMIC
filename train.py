@@ -839,7 +839,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     preds = model(state, btn_targets=btn_tgt if not hal_mode else None)
                 metrics, task_losses = compute_loss(
                     preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                    hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode or _shoulder_centers)
+                    hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers)
             except torch.cuda.OutOfMemoryError:
                 mem = torch.cuda.max_memory_allocated() / 1e9
                 _log(f"OOM on rank {rank}, device {DEVICE}: {mem:.1f}GB peak")
@@ -964,7 +964,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         vpreds = model(vs)
                     vm, vtl = compute_loss(vpreds, vt,
                                            btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                                           hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode or _shoulder_centers)
+                                           hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers)
                     batch_total = sum(t.item() for t in vtl)
                     if math.isfinite(batch_total):
                         val_sums["total"] += batch_total
