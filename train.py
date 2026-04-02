@@ -646,6 +646,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             f"No stick_clusters.json found "
             f"(checked: {clusters_path}, {data_dir}, data/full/)")
     n_stick_clusters = len(stick_centers_np)
+    if hal_minimal_features:
+        import numpy as _np
+        shoulder_centers_np = _np.array([0.0, 0.4, 1.0], dtype=_np.float32)
     n_shoulder_bins = len(shoulder_centers_np)
     _shoulder_centers = torch.tensor(shoulder_centers_np, dtype=torch.float32, device=DEVICE)
     _stick_centers = torch.tensor(stick_centers_np, dtype=torch.float32, device=DEVICE)

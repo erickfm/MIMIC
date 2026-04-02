@@ -129,7 +129,9 @@ class _BaseFrameEncoder(nn.Module):
         self.psub_emb  = cat_block(num_proj_subtypes)
 
         _player_num = self.PLAYER_NUM_HAL_MINIMAL if hal_minimal_features else self.PLAYER_NUM
-        _player_enc_in = _player_num if hal_minimal_features else _player_num + 1  # +1 for action_elapsed (not used in hal_minimal)
+        # hal_minimal: 7 numeric + 3 flags (on_ground, facing, invulnerable) = 10
+        # normal: 22 numeric + 1 action_elapsed = 23
+        _player_enc_in = _player_num + 3 if hal_minimal_features else _player_num + 1
         self.glob_enc      = _mlp(self.GLOBAL_NUM, d_intra, dropout)
         self.player_enc    = _mlp(_player_enc_in, d_intra, dropout)
         self.nana_enc      = _mlp(self.NANA_NUM + 1, d_intra, dropout)
@@ -162,6 +164,8 @@ class _BaseFrameEncoder(nn.Module):
             n -= 2  # buttons, nana_buttons tokens gone entirely
         if self._hal_minimal:
             n -= 1  # drop global_num token
+            n -= 4  # drop self_port, opp_port, self_costume, opp_costume
+            n -= 1  # drop flags token (folded into player_num)
         if self._lean:
             # Drop: nana chars/actions (4), nana c_dirs (up to 2), proj categoricals (24),
             # nana numerics (2), nana analogs (up to 2), proj_num (1), nana_buttons (1), nana_flags (1)
@@ -201,14 +205,15 @@ class _BaseFrameEncoder(nn.Module):
             seq["self_nana_buttons"] = seq["self_nana_buttons"] * keep_idx.unsqueeze(-1)
 
         t["stage"]        = self.stage_emb(seq["stage"])
-        t["self_port"]    = self.port_emb(seq["self_port"])
-        t["opp_port"]     = self.port_emb(seq["opp_port"])
+        if not self._hal_minimal:
+            t["self_port"]    = self.port_emb(seq["self_port"])
+            t["opp_port"]     = self.port_emb(seq["opp_port"])
+            t["self_costume"] = self.cost_emb(seq["self_costume"])
+            t["opp_costume"]  = self.cost_emb(seq["opp_costume"])
         t["self_char"]    = self.char_emb(seq["self_character"])
         t["opp_char"]     = self.char_emb(seq["opp_character"])
         t["self_action"]  = self.act_emb(seq["self_action"])
         t["opp_action"]   = self.act_emb(seq["opp_action"])
-        t["self_costume"] = self.cost_emb(seq["self_costume"])
-        t["opp_costume"]  = self.cost_emb(seq["opp_costume"])
         if not nsi:
             t["self_c_dir"] = self.cdir_emb(seq["self_c_dir"])
         if not noi:
@@ -231,10 +236,17 @@ class _BaseFrameEncoder(nn.Module):
                 t[f"proj{j}_subtype"] = self.psub_emb(seq[f"proj{j}_subtype"])
 
         if self._hal_minimal:
-            # HAL uses only 7 numeric cols: pos_x(0), pos_y(1), pct(2), stock(3), jumps(4), invuln(12), shield(13)
-            _HAL_IDX = [0, 1, 2, 3, 4, 12, 13]
-            self_num = seq["self_numeric"][..., _HAL_IDX]
-            opp_num = seq["opp_numeric"][..., _HAL_IDX]
+            # HAL uses 7 numeric + 3 flags = 10 per player
+            _HAL_IDX = [0, 1, 2, 3, 4, 12, 13]  # pos_x, pos_y, pct, stock, jumps, invuln, shield
+            _HAL_FLAG_IDX = [0, 2, 3]  # on_ground, facing, invulnerable
+            self_num = torch.cat([
+                seq["self_numeric"][..., _HAL_IDX],
+                seq["self_flags"][..., _HAL_FLAG_IDX].float()
+            ], dim=-1)  # (B, T, 10)
+            opp_num = torch.cat([
+                seq["opp_numeric"][..., _HAL_IDX],
+                seq["opp_flags"][..., _HAL_FLAG_IDX].float()
+            ], dim=-1)  # (B, T, 10)
             t["self_player_num"] = self.player_enc(self_num)
             t["opp_player_num"]  = self.player_enc(opp_num)
         else:
@@ -275,7 +287,8 @@ class _BaseFrameEncoder(nn.Module):
                 t["nana_buttons"] = self.nana_btn_enc(seq["opp_nana_buttons"].float())
         # else: no button tokens at all
 
-        t["flags"]      = self.flag_enc(torch.cat([seq["self_flags"].float(), seq["opp_flags"].float()], dim=-1))
+        if not self._hal_minimal:
+            t["flags"]      = self.flag_enc(torch.cat([seq["self_flags"].float(), seq["opp_flags"].float()], dim=-1))
         if not self._lean:
             t["nana_flags"] = self.nana_flag_enc(torch.cat([seq["self_nana_flags"].float(), seq["opp_nana_flags"].float()], dim=-1))
 
