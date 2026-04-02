@@ -646,11 +646,15 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             f"No stick_clusters.json found "
             f"(checked: {clusters_path}, {data_dir}, data/full/)")
     n_stick_clusters = len(stick_centers_np)
-    if hal_minimal_features:
-        import numpy as _np
-        shoulder_centers_np = _np.array([0.0, 0.4, 1.0], dtype=_np.float32)
-    n_shoulder_bins = len(shoulder_centers_np)
-    _shoulder_centers = torch.tensor(shoulder_centers_np, dtype=torch.float32, device=DEVICE)
+    if hal_minimal_features and hal_mode:
+        # Force 3-class shoulder output, but keep data's centers for decoding
+        _shoulder_centers_for_decode = torch.tensor(shoulder_centers_np, dtype=torch.float32, device=DEVICE)
+        n_shoulder_bins = 3
+    else:
+        _shoulder_centers_for_decode = None
+        n_shoulder_bins = len(shoulder_centers_np)
+    _shoulder_centers = torch.tensor(shoulder_centers_np if not hal_minimal_features else [0.0, 0.4, 1.0],
+                                     dtype=torch.float32, device=DEVICE)
     _stick_centers = torch.tensor(stick_centers_np, dtype=torch.float32, device=DEVICE)
     _recluster_sticks = stick_clusters is not None  # re-assign if using non-data clusters
     _log(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder"
@@ -835,7 +839,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     preds = model(state, btn_targets=btn_tgt if not hal_mode else None)
                 metrics, task_losses = compute_loss(
                     preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                    hal_mode=hal_mode, shoulder_centers=_shoulder_centers)
+                    hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode or _shoulder_centers)
             except torch.cuda.OutOfMemoryError:
                 mem = torch.cuda.max_memory_allocated() / 1e9
                 _log(f"OOM on rank {rank}, device {DEVICE}: {mem:.1f}GB peak")
@@ -960,7 +964,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         vpreds = model(vs)
                     vm, vtl = compute_loss(vpreds, vt,
                                            btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                                           hal_mode=hal_mode, shoulder_centers=_shoulder_centers)
+                                           hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode or _shoulder_centers)
                     batch_total = sum(t.item() for t in vtl)
                     if math.isfinite(batch_total):
                         val_sums["total"] += batch_total
