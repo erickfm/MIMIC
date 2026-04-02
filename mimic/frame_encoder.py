@@ -129,8 +129,9 @@ class _BaseFrameEncoder(nn.Module):
         self.psub_emb  = cat_block(num_proj_subtypes)
 
         _player_num = self.PLAYER_NUM_HAL_MINIMAL if hal_minimal_features else self.PLAYER_NUM
+        _player_enc_in = _player_num if hal_minimal_features else _player_num + 1  # +1 for action_elapsed (not used in hal_minimal)
         self.glob_enc      = _mlp(self.GLOBAL_NUM, d_intra, dropout)
-        self.player_enc    = _mlp(_player_num + 1, d_intra, dropout)
+        self.player_enc    = _mlp(_player_enc_in, d_intra, dropout)
         self.nana_enc      = _mlp(self.NANA_NUM + 1, d_intra, dropout)
         self.analog_enc    = _mlp(self.ANALOG_DIM, d_intra, dropout)
         self.proj_num_enc  = _mlp(self.PROJ_NUM_PER * self.PROJ_SLOTS, d_intra, dropout)
@@ -159,6 +160,8 @@ class _BaseFrameEncoder(nn.Module):
         has_opp_btn = not self._no_opp_inputs
         if not has_self_btn and not has_opp_btn:
             n -= 2  # buttons, nana_buttons tokens gone entirely
+        if self._hal_minimal:
+            n -= 1  # drop global_num token
         if self._lean:
             # Drop: nana chars/actions (4), nana c_dirs (up to 2), proj categoricals (24),
             # nana numerics (2), nana analogs (up to 2), proj_num (1), nana_buttons (1), nana_flags (1)
@@ -227,9 +230,17 @@ class _BaseFrameEncoder(nn.Module):
                 t[f"proj{j}_type"]    = self.ptype_emb(seq[f"proj{j}_type"])
                 t[f"proj{j}_subtype"] = self.psub_emb(seq[f"proj{j}_subtype"])
 
-        t["global_num"]      = self.glob_enc(seq["numeric"])
-        t["self_player_num"] = self.player_enc(torch.cat([seq["self_numeric"], seq["self_action_elapsed"].unsqueeze(-1).float()], dim=-1))
-        t["opp_player_num"]  = self.player_enc(torch.cat([seq["opp_numeric"], seq["opp_action_elapsed"].unsqueeze(-1).float()], dim=-1))
+        if self._hal_minimal:
+            # HAL uses only 7 numeric cols: pos_x(0), pos_y(1), pct(2), stock(3), jumps(4), invuln(12), shield(13)
+            _HAL_IDX = [0, 1, 2, 3, 4, 12, 13]
+            self_num = seq["self_numeric"][..., _HAL_IDX]
+            opp_num = seq["opp_numeric"][..., _HAL_IDX]
+            t["self_player_num"] = self.player_enc(self_num)
+            t["opp_player_num"]  = self.player_enc(opp_num)
+        else:
+            t["global_num"]      = self.glob_enc(seq["numeric"])
+            t["self_player_num"] = self.player_enc(torch.cat([seq["self_numeric"], seq["self_action_elapsed"].unsqueeze(-1).float()], dim=-1))
+            t["opp_player_num"]  = self.player_enc(torch.cat([seq["opp_numeric"], seq["opp_action_elapsed"].unsqueeze(-1).float()], dim=-1))
 
         if not self._lean:
             t["self_nana_num"]   = self.nana_enc(torch.cat([seq["self_nana_numeric"], seq["self_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
