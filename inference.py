@@ -172,6 +172,7 @@ _categorical_cols = F.get_categorical_cols(_fg)
 from typing import Optional
 _prev_pred: Optional[Dict[str, torch.Tensor]] = None
 _prev_btns_fired: Optional[List[bool]] = None
+_prev_sent: Optional[Dict[str, float]] = None  # actual values sent to controller last frame
 
 # ── Inference logger ──────────────────────────────────────────────────────
 class InferenceLogger:
@@ -690,24 +691,18 @@ if __name__ == "__main__":
                             and _prev_pred is not None
                             and not args.no_pred_feedback
                             and not getattr(cfg, 'no_self_inputs', False))
-            # Always use game readback for controller feedback (matches HAL's approach)
-            # The game engine reports what controller state was active, which naturally
-            # provides the 1-frame-delayed feedback the model was trained on.
-            if _use_feedback and not getattr(cfg, 'hal_mode', False):
-                _fb_mx, _fb_my, _fb_l, _fb_r = _decode_clusters(_prev_pred, deterministic=True)
-                row[f"{pref}main_x"] = _fb_mx
-                row[f"{pref}main_y"] = _fb_my
-                row[f"{pref}l_shldr"] = _fb_l
-                row[f"{pref}r_shldr"] = _fb_r
-                _fb_cdir = int(torch.argmax(_prev_pred["c_dir_logits"]))
-                row[f"{pref}c_x"], row[f"{pref}c_y"] = C_DIR_TO_FLOAT.get(_fb_cdir, (0.5, 0.5))
-                if _prev_btns_fired is not None:
-                    for _fired, _btn in zip(_prev_btns_fired, IDX_TO_BUTTON):
-                        row[f"{pref}btn_{_btn.name}"] = int(_fired)
-                else:
-                    _fb_btn_probs = torch.sigmoid(_prev_pred["btn_logits"])
-                    for _bp, _btn in zip(_fb_btn_probs, IDX_TO_BUTTON):
-                        row[f"{pref}btn_{_btn.name}"] = int(_bp.item() > args.btn_threshold)
+            # Feed back what we actually sent to the controller last frame.
+            # ps.controller_state reports neutral for programmatic controllers,
+            # so we track the actual sent values instead.
+            if pref == "self_" and _prev_sent is not None:
+                row[f"{pref}main_x"] = _prev_sent["main_x"]
+                row[f"{pref}main_y"] = _prev_sent["main_y"]
+                row[f"{pref}l_shldr"] = _prev_sent["l_shldr"]
+                row[f"{pref}r_shldr"] = _prev_sent["r_shldr"]
+                row[f"{pref}c_x"] = _prev_sent["c_x"]
+                row[f"{pref}c_y"] = _prev_sent["c_y"]
+                for _btn in IDX_TO_BUTTON:
+                    row[f"{pref}btn_{_btn.name}"] = _prev_sent.get(f"btn_{_btn.name}", 0)
             else:
                 for btn, st in ps.controller_state.button.items():
                     row[f"{pref}btn_{btn.name}"] = int(st)
@@ -866,6 +861,16 @@ if __name__ == "__main__":
             ctrl = controllers[ports[0]]
             _prev_btns_fired, sent_main, sent_cdir, sent_L, sent_R = press_output(
                 ctrl, pred, sample=not args.deterministic)
+
+            # Track what we actually sent for next frame's self-controller feedback
+            _prev_sent = {
+                "main_x": sent_main[0], "main_y": sent_main[1],
+                "l_shldr": sent_L, "r_shldr": sent_R,
+                "c_x": C_DIR_TO_FLOAT.get(sent_cdir, (0.5, 0.5))[0],
+                "c_y": C_DIR_TO_FLOAT.get(sent_cdir, (0.5, 0.5))[1],
+            }
+            for _btn, _fired in zip(IDX_TO_BUTTON, _prev_btns_fired):
+                _prev_sent[f"btn_{_btn.name}"] = int(_fired)
 
             inf_logger.log_frame(
                 row, pred,
