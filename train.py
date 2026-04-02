@@ -536,7 +536,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           lean_features: bool = False,
           no_warmup: bool = False,
           stick_clusters: str = None,
-          hal_minimal_features: bool = False):
+          hal_minimal_features: bool = False,
+          reaction_delay_override: int = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -558,7 +559,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if not _is_main:
         os.environ["WANDB_MODE"] = "disabled"
 
-    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC, WEIGHT_DECAY, GRAD_CLIP_NORM, AMP_DTYPE
+    global SEQUENCE_LENGTH, BATCH_SIZE, VAL_FRAC, WEIGHT_DECAY, GRAD_CLIP_NORM, AMP_DTYPE, REACTION_DELAY
+    if reaction_delay_override is not None:
+        REACTION_DELAY = reaction_delay_override
     if seq_len_override:
         SEQUENCE_LENGTH = seq_len_override
     if batch_size_override:
@@ -1107,6 +1110,8 @@ if __name__ == "__main__":
                         help="Override number of transformer layers")
     parser.add_argument("--seq-len",    type=int, default=None,
                         help="Override sequence length (default: 60)")
+    parser.add_argument("--reaction-delay", type=int, default=None,
+                        help="Reaction delay in frames (default: 1, HAL uses 0)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
     parser.add_argument("--encoder",   type=str, default="hybrid16",
@@ -1257,4 +1262,5 @@ if __name__ == "__main__":
         no_warmup=args.no_warmup,
         stick_clusters=args.stick_clusters,
         hal_minimal_features=args.hal_minimal_features,
+        reaction_delay_override=args.reaction_delay,
     )

@@ -239,7 +239,7 @@ class InferenceLogger:
             "distance":       f"{row.get('distance', 0):.2f}",
         }
         if pred is not None:
-            _lg_mx, _lg_my, _lg_l, _lg_r = _decode_clusters(pred)
+            _lg_mx, _lg_my, _lg_l, _lg_r = _decode_clusters(pred, deterministic=True)
             rec["pred_main_x"] = f"{_lg_mx:.4f}"
             rec["pred_main_y"] = f"{_lg_my:.4f}"
             rec["pred_L"] = f"{_lg_l:.4f}"
@@ -452,29 +452,23 @@ def _safe(val: float, default: float = 0.5) -> float:
     return min(max(val, 0.0), 1.0)
 
 
-def _decode_clusters(pred: Dict[str, torch.Tensor], temperature: float = 1.0):
+def _decode_clusters(pred: Dict[str, torch.Tensor], temperature: float = 1.0,
+                     deterministic: bool = False):
     """For clusters mode: logits -> continuous (mx, my, l, r) via cluster lookup.
-    temperature=1.0 uses argmax; temperature>1 samples from softened distribution."""
+    HAL-style: always multinomial sample from softmax. deterministic=True uses argmax."""
     hal_shoulder = "shoulder_val" in pred
 
-    if temperature <= 0 or temperature == 1.0:
-        main_idx = int(torch.argmax(pred["main_xy"]))
-        if hal_shoulder:
-            shldr_idx = int(torch.argmax(pred["shoulder_val"]))
-        else:
-            l_idx = int(torch.argmax(pred["L_val"]))
-            r_idx = int(torch.argmax(pred["R_val"]))
+    main_probs = torch.softmax(pred["main_xy"].float() / temperature, dim=-1)
+    main_idx = int(torch.argmax(main_probs)) if deterministic else int(torch.multinomial(main_probs, 1))
+
+    if hal_shoulder:
+        shldr_probs = torch.softmax(pred["shoulder_val"].float() / temperature, dim=-1)
+        shldr_idx = int(torch.argmax(shldr_probs)) if deterministic else int(torch.multinomial(shldr_probs, 1))
     else:
-        main_probs = torch.softmax(pred["main_xy"] / temperature, dim=-1)
-        main_idx = int(torch.multinomial(main_probs, 1))
-        if hal_shoulder:
-            shldr_probs = torch.softmax(pred["shoulder_val"] / temperature, dim=-1)
-            shldr_idx = int(torch.multinomial(shldr_probs, 1))
-        else:
-            l_probs = torch.softmax(pred["L_val"] / temperature, dim=-1)
-            l_idx = int(torch.multinomial(l_probs, 1))
-            r_probs = torch.softmax(pred["R_val"] / temperature, dim=-1)
-            r_idx = int(torch.multinomial(r_probs, 1))
+        l_probs = torch.softmax(pred["L_val"].float() / temperature, dim=-1)
+        l_idx = int(torch.argmax(l_probs)) if deterministic else int(torch.multinomial(l_probs, 1))
+        r_probs = torch.softmax(pred["R_val"].float() / temperature, dim=-1)
+        r_idx = int(torch.argmax(r_probs)) if deterministic else int(torch.multinomial(r_probs, 1))
 
     mx, my = float(_stick_centers[main_idx][0]), float(_stick_centers[main_idx][1])
     if hal_shoulder:
@@ -494,7 +488,8 @@ def press_output(ctrl: melee.Controller,
     Returns (fired_buttons, (mx,my), c_dir_idx, l_val, r_val)."""
     import random
 
-    mx, my, l_val, r_val = _decode_clusters(pred, temperature=args.temperature)
+    mx, my, l_val, r_val = _decode_clusters(pred, temperature=args.temperature,
+                                               deterministic=args.deterministic)
 
     dir_idx = int(torch.argmax(pred["c_dir_logits"]))
     cx, cy  = C_DIR_TO_FLOAT.get(dir_idx, (0.5, 0.5))
@@ -510,7 +505,8 @@ def press_output(ctrl: melee.Controller,
     ]
 
     if hal_buttons:
-        btn_idx = int(torch.argmax(pred["btn_logits"]))
+        btn_probs = torch.softmax(pred["btn_logits"].float(), dim=-1)
+        btn_idx = int(torch.multinomial(btn_probs, 1)) if sample else int(torch.argmax(btn_probs))
         pressed = []
         fired = [False] * len(IDX_TO_BUTTON)
         # Release all first
@@ -694,8 +690,11 @@ if __name__ == "__main__":
                             and _prev_pred is not None
                             and not args.no_pred_feedback
                             and not getattr(cfg, 'no_self_inputs', False))
-            if _use_feedback:
-                _fb_mx, _fb_my, _fb_l, _fb_r = _decode_clusters(_prev_pred)
+            # Always use game readback for controller feedback (matches HAL's approach)
+            # The game engine reports what controller state was active, which naturally
+            # provides the 1-frame-delayed feedback the model was trained on.
+            if _use_feedback and not getattr(cfg, 'hal_mode', False):
+                _fb_mx, _fb_my, _fb_l, _fb_r = _decode_clusters(_prev_pred, deterministic=True)
                 row[f"{pref}main_x"] = _fb_mx
                 row[f"{pref}main_y"] = _fb_my
                 row[f"{pref}l_shldr"] = _fb_l
@@ -841,6 +840,11 @@ if __name__ == "__main__":
         rows.append(row)
         if args.diag_log_all:
             _diag_all_rows.append(dict(row))
+        # Pre-fill context window on first frame (model trained on fixed seq_len)
+        if len(rows) == 1 and ROLL_WIN > 1:
+            first = rows[0]
+            for _ in range(ROLL_WIN - 1):
+                rows.appendleft(dict(first))
         if len(rows) >= 1:
             pred = run_inference(row)
             _prev_pred = pred
@@ -848,7 +852,7 @@ if __name__ == "__main__":
             bot_ps = gs.players.get(ports[0])
             if bot_ps and _step_ct % 60 == 0:
                 gm = bot_ps.controller_state.main_stick
-                _dbg_mx, _dbg_my, _dbg_l, _dbg_r = _decode_clusters(pred)
+                _dbg_mx, _dbg_my, _dbg_l, _dbg_r = _decode_clusters(pred, deterministic=True)
                 pm = [_dbg_mx, _dbg_my]
                 pl, pr = _dbg_l, _dbg_r
                 gl = bot_ps.controller_state.l_shoulder
