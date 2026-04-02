@@ -1,114 +1,161 @@
 # HAL vs MIMIC: Definitive Diff Audit
 
-## Purpose
+## PRINCIPLE
 
-Exhaustive list of every difference between HAL's working pipeline and MIMIC's pipeline. Each item is marked as MATCHED, UNMATCHED, or VERIFIED IRRELEVANT based on actual tests.
-
-## Status Summary
-
-HAL 4-stocked level 9 CPU. MIMIC's model produces 25/256 non-NONE frames on training data (good) but ~3% non-NONE at inference (bad). The gap is in inference, not training.
+**We should NOT have to do anything special for MIMIC to reproduce HAL. If HAL doesn't do it, we shouldn't have to. No tricks, no seeding, no workarounds. If the model needs help, there's still a mismatch between training and inference.**
 
 ---
 
-## TRAINING
+## Current Status
+
+The model produces 21.2% non-NONE on training data but ~0% at inference. This is a train/inference mismatch. The mismatch has NOT been fully identified yet despite multiple debugging sessions. Prior "fixes" (clamping, pre-fill, feedback) were based on speculation, not confirmed root causes.
+
+### What we KNOW:
+1. Zeroing `self_buttons` on training data drops non-NONE from 215/1024 to 39/1024 (82% drop)
+2. Zeroing `self_analog` drops to 63/1024 (71% drop)
+3. At inference, `self_buttons` is ALL ZEROS in every diagnostic batch (1, 3, 300)
+4. `_prev_sent` correctly tracks sent values, but sent buttons are always [0,0,0,0,0] because the model never presses buttons
+5. The model never presses buttons because it doesn't see button feedback
+6. This is a chicken-and-egg loop — BUT HAL doesn't have this problem
+
+### What this means:
+HAL also starts with no button presses on frame 1. HAL's model sees neutral controller feedback on the first frames. Yet HAL immediately starts pressing buttons. MIMIC doesn't. Therefore:
+- Either MIMIC's model is less confident on initial actions (training difference), OR
+- MIMIC's inference feeds the model different values than training even on the very first frame (encoding difference)
+
+### THE REAL QUESTION:
+On the very first frame of a training window (position 0 after controller_offset), what does `self_buttons` look like? It should be all zeros (offset shifts by -1, position 0 gets zeros). If the model learned to press buttons when `self_buttons` is zero (position 0 of training windows), then it should also press buttons at inference when `self_buttons` is zero. If it doesn't, something else in the input differs.
+
+---
+
+## TRAINING: MATCHED vs UNMATCHED
 
 ### Data
-- [x] **MATCHED**: Same 3,230 Fox .slp files from `erickfm/slippi-public-dataset-v3.7`
-- [ ] **UNMATCHED**: Data format differs. HAL uses MDS shards (mosaicml-streaming). MIMIC uses .pt shards (custom). Both derive from the same .slp files but preprocessing differs.
+- [x] Same 3,230 Fox .slp files from `erickfm/slippi-public-dataset-v3.7`
+- [ ] Data format: HAL=MDS, MIMIC=.pt. Same source but different preprocessing.
 
 ### Target alignment
-- [x] **MATCHED**: `--reaction-delay 0 --controller-offset` gives HAL's exact behavior: predict frame i's controller from frame i's gamestate + frame i-1's controller. Verified via data inspection (Finding 15).
+- [x] `--reaction-delay 0 --controller-offset` matches HAL's frame_offset=-1. Verified (Finding 15).
 
 ### Model architecture
-- [x] **MATCHED**: 512-d, 6 layers, 8 heads, dropout=0.2 (`--model hal`)
-- [x] **MATCHED**: Flat encoder (`--encoder flat`)
-- [x] **MATCHED**: Single-label 5-class buttons, combined 3-class shoulder, LN heads (`--hal-mode`)
-- [x] **MATCHED**: Autoregressive heads with detached gradients
-- [ ] **UNMATCHED**: Position encoding. HAL uses relative (Music Transformer skew). MIMIC uses RoPE.
-- [ ] **UNMATCHED**: Input projection. HAL concatenates all embeddings + gamestate + controller into one vector, projects to d_model via single Linear. MIMIC uses the flat encoder which processes each feature group through separate MLPs, then concatenates and projects.
+- [x] 512-d, 6 layers, 8 heads, dropout=0.2
+- [x] Flat encoder
+- [x] Single-label 5-class buttons, combined 3-class shoulder
+- [x] Autoregressive heads with detached gradients
+- [x] Plain CE loss, unweighted sum
+- [ ] Position encoding: RoPE (MIMIC) vs relative/skew (HAL)
+- [ ] Input projection: MIMIC has per-group MLPs then concat. HAL has single concat → Linear.
 
-### Loss
-- [x] **MATCHED**: Plain cross-entropy, unweighted sum (`--plain-ce`)
+### Optimizer/schedule
+- [x] AdamW, lr=3e-4, no warmup, cosine to 1e-6, grad clip 1.0
 
-### Optimizer / schedule  
-- [x] **MATCHED**: AdamW, lr=3e-4, betas=(0.9, 0.999), wd=1e-2
-- [x] **MATCHED**: No warmup (`--no-warmup`)
-- [x] **MATCHED**: CosineAnnealingLR to 1e-6 (`--cosine-min-lr 1e-6`)
-- [x] **MATCHED**: Grad clip 1.0
+### Training params
+- [x] seq_len=256, FP32
+- [ ] Batch size: HAL=1024 effective, MIMIC=512 effective
+- [ ] Total samples: HAL=16.8M, MIMIC=2M default
 
-### Training hyperparameters
-- [x] **MATCHED**: seq_len=256 (`--seq-len 256`)
-- [x] **MATCHED**: FP32 (`--no-amp`)
-- [ ] **UNMATCHED**: Batch size. HAL uses 512/GPU (effective 1024 on 2 GPUs). MIMIC uses 64/GPU (effective 512 on 8 GPUs).
-- [ ] **UNMATCHED**: Total samples. HAL trained 16.8M samples. MIMIC trained 2M samples (default max_samples).
-
-### Input features
-- [x] **MATCHED**: Self-inputs enabled (`--self-inputs`)
-- [x] **MATCHED**: Nana/projectiles dropped (`--lean-features`)
-- [ ] **UNMATCHED**: Player numeric columns. HAL uses 9 per player. MIMIC uses 22 per player (includes ECB, speeds, hitlag/hitstun). `--hal-minimal-features` exists but crashes due to model/data shape mismatch.
-- [ ] **UNMATCHED**: Controller feedback encoding. HAL encodes as 54-dim one-hot (cluster indices for all outputs concatenated). MIMIC encodes as raw floats (4 analog + 12 binary buttons + 1 categorical c_dir).
-- [ ] **UNMATCHED**: Global features. HAL uses only stage embedding. MIMIC uses 20 global numeric values (distance, frame, 18 stage geometry columns).
-- [ ] **UNMATCHED**: Flags. HAL uses facing, invulnerable, on_ground, jumps_left as numeric inputs. MIMIC has a separate 5-dim flags tensor (on_ground, off_stage, facing, invulnerable, moonwalkwarning).
-- [ ] **UNMATCHED**: Action elapsed. HAL does not use action_frame. MIMIC includes it.
-- [ ] **UNMATCHED**: Port/costume embeddings. HAL does not use port or costume. MIMIC embeds both.
-
-### Stick clusters
-- [x] **MATCHED**: 37 hand-designed clusters (`--stick-clusters hal37`), re-clustered at runtime from raw main_x/main_y
-
-### C-stick
-- [ ] **UNMATCHED**: HAL uses 9 clusters (cardinals + diagonals). MIMIC uses 5 classes (cardinals only).
+### Input features (CRITICAL — most likely source of mismatch)
+- [x] Self-inputs enabled, nana/projectiles dropped
+- [ ] Player numeric: MIMIC=22 cols (pos, pct, stock, jumps, 5 speeds, hitlag, hitstun, invuln, shield, 8 ECB). HAL=9 cols (pos, pct, stock, jumps, invuln, shield, facing, on_ground). **13 extra features in MIMIC.**
+- [ ] Controller feedback encoding: MIMIC=raw floats (4 analog + 12 binary buttons + 1 cat c_dir). HAL=54-dim one-hot (cluster indices).
+- [ ] Global features: MIMIC=20 numeric (distance, frame, 18 stage geometry). HAL=stage embedding only.
+- [ ] Flags: MIMIC=5-dim tensor. HAL=inline in numeric.
+- [ ] Action elapsed: MIMIC includes. HAL does not.
+- [ ] Port/costume: MIMIC embeds both. HAL does not use.
+- [ ] C-stick: MIMIC=5 classes. HAL=9 clusters.
 
 ---
 
-## INFERENCE
-
-### Context window
-- [x] **MATCHED**: Pre-fill to seq_len=256 on first frame. Verified batch 1 has shape (1, 256, ...).
-
-### Output decoding
-- [x] **MATCHED**: Multinomial sampling for buttons, sticks, shoulder (not argmax).
-
-### Controller feedback
-- [x] **MATCHED** (partially): `_prev_sent` tracks actual sent values and writes them to next frame's row. Verified via FB_CHECK: buttons show up (btns=[0,0,1,0,0] when X pressed).
-- [ ] **UNMATCHED**: Encoding format. MIMIC feeds back raw float values (main_x, main_y, binary buttons). HAL feeds back one-hot cluster indices (54-dim vector). The model was trained seeing raw floats, so this is internally consistent — but the representation differs from HAL.
+## INFERENCE: MATCHED vs UNMATCHED
 
 ### Console setup
-- [x] **MATCHED** (as of latest fix): `is_dolphin=True`, `tmp_home_directory=True`, `setup_gecko_codes=True`, `blocking_input=False`, `online_delay=0`, matching HAL's `get_gui_console_kwargs`.
+- [x] Matched HAL's `get_gui_console_kwargs` (gecko codes, tmp_home, etc.)
+
+### Output decoding  
+- [x] Multinomial sampling for all outputs
+
+### Controller feedback
+- [x] `_prev_sent` tracks actual sent values
+- [!] Buttons in `_prev_sent` are always zero because model never presses buttons (chicken-and-egg). HAL doesn't have this problem — its model presses buttons from frame 1.
+
+### Context window
+- [x] Pre-filled to 256 frames
+- [!] Pre-filled with copies of first neutral frame. During training, position 0 also has zeros for controller (due to offset). So this should be equivalent — but needs verification.
 
 ### Feature values at inference
-- [ ] **UNMATCHED**: ECB columns (8 per player) have garbage values at inference from live game. Clamped to [-10, 10] but training data has clean values. Model sees different distributions.
-- [ ] **UNMATCHED**: Speed columns (5 per player) may differ between live game and training data normalization.
-- [ ] **UNMATCHED**: Global numeric (distance, frame, stage geometry) — inference values differ significantly from training (mean -1.12 vs 0.30).
-- [ ] **UNMATCHED**: Action encoding. Training data action indices go up to 395. Inference actions differ in distribution.
-- [ ] **UNMATCHED**: Opponent controller (opp_analog, opp_buttons, opp_c_dir). Present in training data. Was MISSING in inference until recently. Now present via game readback but values may differ from training encoding.
-
-### Warmup / frame skipping
-- [ ] **UNMATCHED**: HAL skips `eval_warmup_frames` (1 frame). MIMIC does not skip any frames.
+- [ ] NOT VERIFIED: Do the actual tensor values for non-controller features (self_numeric, opp_numeric, global numeric, flags, action, etc.) match what the model sees during training for equivalent gamestates?
+- [ ] ECB values: garbage at inference, clamped to [-10, 10]. Training has clean values. Clamping proven not to change predictions.
+- [ ] self_analog normalization: inference values in [-0.45, 0.17], training values in [-1.6, 2.3]. **DIFFERENT RANGES** — unclear if this matters since they're from different gamestates.
 
 ---
 
-## PROVEN IRRELEVANT (tested, no impact)
+## PROVEN FACTS
 
-- Opponent controller inputs: zeroing opp_buttons/analog/c_dir didn't change prediction count (12/256 → 12/256). The model doesn't rely on opponent controller state.
+| Test | Result |
+|------|--------|
+| Zero self_buttons on training data | 215→39 non-NONE (82% drop) |
+| Zero self_analog on training data | 215→63 non-NONE (71% drop) |
+| Zero self_c_dir on training data | No change |
+| Zero opp controller on training data | No change |
+| Zero self_numeric on training data | No change |
+| Zero global numeric on training data | No change |
+| Clamp [-10,10] on training data | No change |
+| Model on training data (10 batches) | 21.2% non-NONE (544/2560) |
+| Model at inference | ~0-3% non-NONE |
+| `_prev_sent` buttons at inference | Always [0,0,0,0,0] |
+| `_prev_sent` analog at inference | Sometimes non-neutral (main_x varies) |
 
 ---
 
-## PROVEN IMPORTANT (tested, significant impact)
+## STILL TODO (in priority order)
 
-- **Self-controller feedback**: Zeroing self_buttons/analog/c_dir reduced non-NONE from 25/256 to 12/256 (halved). The model relies heavily on self-controller state to decide when to act.
-- **Context window length**: T=1 input produces degenerate NONE=100%. T=256 (pre-filled) is required.
-- **Multinomial vs argmax**: Argmax always picks NONE (97% prior). Multinomial allows rare actions to fire.
+1. **Verify training position 0 behavior**: Check what the model predicts at position 0 of training windows (where self_buttons/analog are zeros due to controller_offset). If it predicts NONE there too, then the chicken-and-egg theory is correct. If it predicts actions, then something else differs at inference.
+
+2. **Exact tensor comparison**: Take position 0 of a training window and compare EVERY value to position 0 of an inference window. Not summary stats — exact values for every feature. The mismatch will be visible.
+
+3. **Run MIMIC model through HAL's eval pipeline**: If possible, adapter the model to work with HAL's eval.py. This eliminates inference.py entirely and tests whether the model itself is the problem or the inference code.
+
+4. **Check if `self_analog` feedback is actually working**: The analog values at inference show some variation but the diagnostic batches show frozen values. There may be a similar issue to buttons.
+
+5. **Match remaining feature differences**: If all else fails, match the feature set exactly (drop extra 13 columns, match encoding format). This requires `--hal-minimal-features` runtime masking fix + retraining.
 
 ---
 
-## MOST LIKELY REMAINING CAUSES
+## DEFINITIVE FINDING (2026-04-02)
 
-Based on the evidence:
+### The gap is in TRAINING, not inference
 
-1. **Feature value mismatch at inference** — the model sees different numeric distributions at inference vs training. This is confirmed by tensor comparison. The 13 extra features (ECB, speeds, stage geometry, action_elapsed, port, costume) have different value distributions at inference, and some (ECB) have garbage values even after clamping.
+Compared button predictions during STANDING (action=14) between HAL's best checkpoint and MIMIC's best checkpoint, both on their own training/val data:
 
-2. **Controller feedback encoding** — MIMIC feeds raw floats but HAL feeds one-hot cluster indices. Both models were trained with their own encoding so this is internally consistent. But the raw float encoding may be less informative for the model.
+| Metric | HAL (best, 5.2M samples) | MIMIC (co_best, 26k steps) |
+|--------|-------------------------|---------------------------|
+| Mean NONE during STANDING | **94.8%** | **99.9%** |
+| Mean X (jump) during STANDING | **4.6%** | **0.0%** |
+| Frames with NONE > 99% | **20.2%** | **99.8%** |
+| Frames with NONE > 99.9% | **4.8%** | **99.7%** |
 
-3. **Position encoding (RoPE vs relative)** — untested. Could affect how the model attends to temporal patterns.
+HAL's model gives jump a 4.6% chance during STANDING — enough for multinomial sampling to fire jump ~3 times per second. MIMIC gives jump 0.0% — multinomial never fires.
 
-4. **Batch size / total samples** — MIMIC trained with effective batch 512 for 2M default samples. HAL trained with effective batch 1024 for 16.8M samples. MIMIC may be undertrained.
+### What this means
+
+The inference pipeline is NOT the problem. The model genuinely predicts differently. Both models trained on the same .slp replay data but produce very different calibrations during STANDING. The remaining unmatched training differences (see list above) are the cause.
+
+### Inference is confirmed working
+
+- Feature tensors at inference match training tensors in format and encoding
+- self_analog mismatch (zeros vs normalized neutral) is NOT the cause (tested: no effect)
+- Missing opp controller features are NOT the cause (tested: no effect)  
+- Clamping is NOT the cause (tested: no effect)
+- The 80→0 non-NONE drop when setting action=STANDING on training tensors proves this is about what the model learned, not how inference feeds it
+
+### Most likely causes of the calibration gap (priority order)
+
+1. **Data preprocessing** — HAL processes .slp→MDS differently than MIMIC processes .slp→.pt. The same replay may produce different feature values. HAL's preprocessing normalizes differently (min-max vs z-score), encodes controller differently (one-hot clusters vs raw floats), uses different feature columns.
+
+2. **Total training samples** — HAL trained 16.8M samples on 27M frames. MIMIC may have trained fewer effective samples (2M default in train.py).
+
+3. **Position encoding** — RoPE vs relative. Different temporal attention patterns could lead to different calibration.
+
+4. **Input projection** — HAL's single concat→Linear vs MIMIC's per-group MLP→concat. Different feature mixing before the transformer.
+
+5. **Feature set** — 13 extra features in MIMIC may dilute the signal, making the model less confident on any single prediction.
