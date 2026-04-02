@@ -286,6 +286,9 @@ def rows_to_state_seq(rows: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     df = pd.DataFrame(rows)
     df = F.preprocess_df(df, _categorical_cols, cat_maps)
     F.apply_normalization(df, norm_stats)
+    # Clamp numeric features to prevent garbage values (e.g. ECB) from corrupting model
+    for col in df.select_dtypes(include=["float32", "float64"]).columns:
+        df[col] = df[col].clip(-10, 10)
     for c in _categorical_cols:
         if c not in df.columns:
             df[c] = 0
@@ -354,7 +357,7 @@ def _process_one_row(row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
             v = r[col]
             if v is None or (isinstance(v, float) and not math.isfinite(v)):
                 v = 0.0
-            r[col] = (float(v) - mean) / std
+            r[col] = max(-10.0, min(10.0, (float(v) - mean) / std))
 
     state: Dict[str, torch.Tensor] = {}
     for key, ftype, cols in _tensor_layout:
