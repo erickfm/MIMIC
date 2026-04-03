@@ -168,3 +168,79 @@ Early metrics at step 806: bf1=92.0%, mf1=42.7%. About 55 minutes remaining.
 2. Check STANDING calibration — compare to HAL's 94.8%
 3. Test closed-loop inference
 4. If still underperforming, implement one-hot controller feedback encoding (item 3 above)
+
+---
+
+## Finding 28: hal_minimal_features did not improve STANDING calibration
+
+Trained `mimic-hal-fox-minimal-rd0` with rd=0, controller_offset, and hal_minimal_features (7 numeric + 3 flags = 10 per player, no port/costume/global_num, 3-bin shoulder). 21.3M params, 10 raw tokens.
+
+STANDING calibration comparison:
+
+| Model | STANDING mean NONE | STANDING NONE<0.99 | STANDING X (jump) |
+|-------|-------------------|-------------------|-------------------|
+| HAL (Gu's code) | **94.8%** | **80%** | **4.6%** |
+| MIMIC rd=0+offset (22 numeric) | 99.9% | 0.2% | 0.0% |
+| MIMIC rd=1+offset (22 numeric) | 95.2% | 59.8% | 3.3% |
+| MIMIC rd=0+offset+minimal (10 per player) | **98.6%** | **1.8%** | **0.7%** |
+
+The minimal features model is slightly better than the non-minimal rd=0 model (98.6% vs 99.9% NONE) but still far from HAL's 94.8%. Reducing the feature set alone doesn't fix the calibration gap.
+
+### Inference bug found and fixed
+
+The `--hal-minimal-features` flag caused a CUDA assert at inference: the encoder tried to index `self_numeric[..., [0,1,2,3,4,12,13]]` but at inference with `hal_minimal=True` in `build_feature_groups`, the numeric tensor only had 7 columns (not 22). Fixed by checking tensor width before indexing (commit `c8ba1bd`).
+
+---
+
+## Finding 29: rd=0 vs rd=1 STANDING calibration
+
+The rd=1+offset model (without minimal features) had the BEST STANDING calibration of any MIMIC run: 95.2% NONE, 59.8% of frames with NONE<0.99, 3.3% jump probability. This closely matched HAL (94.8%, 80%, 4.6%).
+
+But rd=1 has a timing mismatch — it predicts frame i+1's button and applies it on frame i. Despite this, the STANDING calibration was better because the harder prediction task (can't cheat via action) forced the model to rely more on context and less on the action embedding.
+
+rd=0 models (both with and without minimal features) have worse STANDING calibration because they can read the answer from the action state, making them more peaked/confident on the majority class.
+
+### The dilemma
+
+- rd=0: matches inference timing perfectly, but model learns to be reactive (reads action) → poor STANDING calibration
+- rd=1: doesn't match inference timing (off by one), but model is more proactive → better STANDING calibration
+
+HAL uses rd=0-equivalent and ALSO has good STANDING calibration. The remaining architectural differences must be why HAL avoids the over-confidence that MIMIC rd=0 exhibits.
+
+---
+
+## Remaining Unmatched Differences (updated)
+
+| Difference | Status | Likely Impact |
+|-----------|--------|---------------|
+| Position encoding (RoPE vs relative/skew) | Unmatched | Unknown — affects temporal attention patterns |
+| Input projection (per-group MLP vs concat→Linear) | Unmatched | May affect how features mix before transformer |
+| Controller feedback encoding (raw floats vs one-hot clusters) | Unmatched | HAL's discrete encoding may produce cleaner gradients |
+| C-stick (5 classes vs 9 clusters) | Unmatched | Low impact |
+| Feature set (now minimal) | **Matched** | Was not the cause |
+| Shoulder (now 3-bin) | **Matched** | Was not the cause |
+| Port/costume (now dropped) | **Matched** | Was not the cause |
+
+---
+
+## All Training Runs (updated)
+
+| Run | rd | offset | minimal | Val Loss | bf1 | mf1 | STANDING NONE | STANDING X |
+|-----|-----|--------|---------|----------|-----|-----|--------------|------------|
+| HAL (Gu's code) | 0-eq | built-in | native | 0.744 | ~88% | ~50% | **94.8%** | **4.6%** |
+| mimic rd=1, no offset | 1 | No | No | 0.707 | 87.8% | 54.5% | — | — |
+| mimic rd=0, no offset | 0 | No | No | 0.078 | 100% | 87% | — | — |
+| mimic rd=0, offset | 0 | Yes | No | 0.598 | 91.6% | 55.6% | 99.9% | 0.0% |
+| mimic rd=1, offset | 1 | Yes | No | 1.047 | 82.6% | 41.3% | **95.2%** | **3.3%** |
+| mimic rd=0, offset, minimal | 0 | Yes | Yes | ~0.6* | ~91%* | ~45%* | 98.6% | 0.7% |
+| mimic rd=1, offset, minimal | 1 | Yes | Yes | 1.058 | 82.5% | 41.2% | — | — |
+
+*Training still in progress.
+
+---
+
+## Next Steps
+
+1. The three remaining architectural differences (position encoding, input projection, controller encoding) need to be addressed
+2. Controller feedback as one-hot clusters is the most concrete change to implement next
+3. Alternatively, try a simple temperature scaling approach: train with rd=0 but apply a temperature <1.0 at inference to sharpen the distribution — though this is a workaround, not a fix
