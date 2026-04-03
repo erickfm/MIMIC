@@ -239,12 +239,18 @@ class _BaseFrameEncoder(nn.Module):
             # HAL uses 7 numeric + 3 flags = 10 per player
             _HAL_IDX = [0, 1, 2, 3, 4, 12, 13]  # pos_x, pos_y, pct, stock, jumps, invuln, shield
             _HAL_FLAG_IDX = [0, 2, 3]  # on_ground, facing, invulnerable
+            # Select from 22-col data (training) or use as-is if already 7-col (inference)
+            sn = seq["self_numeric"]
+            on = seq["opp_numeric"]
+            if sn.shape[-1] > 7:
+                sn = sn[..., _HAL_IDX]
+                on = on[..., _HAL_IDX]
             self_num = torch.cat([
-                seq["self_numeric"][..., _HAL_IDX],
+                sn,
                 seq["self_flags"][..., _HAL_FLAG_IDX].float()
             ], dim=-1)  # (B, T, 10)
             opp_num = torch.cat([
-                seq["opp_numeric"][..., _HAL_IDX],
+                on,
                 seq["opp_flags"][..., _HAL_FLAG_IDX].float()
             ], dim=-1)  # (B, T, 10)
             t["self_player_num"] = self.player_enc(self_num)
