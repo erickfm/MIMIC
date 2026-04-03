@@ -96,6 +96,8 @@ class _BaseFrameEncoder(nn.Module):
         no_self_inputs: bool = False,
         lean_features: bool = False,
         hal_minimal_features: bool = False,
+        hal_controller_encoding: bool = False,
+        n_controller_combos: int = 5,
     ) -> None:
         super().__init__()
         self._d_intra = d_intra
@@ -104,6 +106,7 @@ class _BaseFrameEncoder(nn.Module):
         self._hal_minimal = hal_minimal_features
         self._no_opp_inputs = no_opp_inputs
         self._no_self_inputs = no_self_inputs
+        self._hal_ctrl_enc = hal_controller_encoding
         self.si_drop_prob: float = 0.0
 
         def _emb_dim(n_vocab: int) -> int:
@@ -140,9 +143,19 @@ class _BaseFrameEncoder(nn.Module):
 
         has_self_btn = not no_self_inputs
         has_opp_btn = not no_opp_inputs
-        btn_parts = int(has_self_btn) + int(has_opp_btn)
-        if btn_parts > 0:
-            self.btn_enc = _mlp(self.BTN_DIM * btn_parts, d_intra, dropout)
+        if hal_controller_encoding and has_self_btn:
+            # HAL-style: single MLP for concatenated one-hot controller vector
+            controller_dim = 37 + 9 + n_controller_combos + 3  # stick + cstick + combos + shoulder
+            self.controller_enc = _mlp(controller_dim, d_intra, dropout)
+            # With no_opp_inputs=True (standard), no separate btn_enc needed.
+            # With no_opp_inputs=False, opp buttons still need the old encoder.
+            if has_opp_btn:
+                self.btn_enc = _mlp(self.BTN_DIM, d_intra, dropout)
+            btn_parts = 0  # for nana logic below
+        else:
+            btn_parts = int(has_self_btn) + int(has_opp_btn)
+            if btn_parts > 0:
+                self.btn_enc = _mlp(self.BTN_DIM * btn_parts, d_intra, dropout)
         nana_btn_parts = int(has_self_btn) + int(has_opp_btn)
         if nana_btn_parts > 0:
             self.nana_btn_enc = _mlp(self.BTN_DIM * nana_btn_parts, d_intra, dropout)
@@ -179,6 +192,11 @@ class _BaseFrameEncoder(nn.Module):
             # nana_buttons: only counted if buttons exist
             if has_self_btn or has_opp_btn:
                 pass  # already subtracted nana_buttons above (-1 in the 33)
+        if self._hal_ctrl_enc and not self._no_self_inputs:
+            # Replaces 3 tokens (self_analog, self_c_dir, buttons) with 1 (self_controller)
+            # Net: -2 tokens.  If no_opp_inputs=True, buttons token was self-only.
+            # If no_opp_inputs=False, buttons token remains for opp, so only -2 (analog + c_dir - controller).
+            n -= 2
         return n
 
     def _build_raw_tokens(self, seq: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -190,19 +208,30 @@ class _BaseFrameEncoder(nn.Module):
         # -- Curriculum: stochastic self-input masking --
         if not nsi and self.si_drop_prob > 0:
             seq = dict(seq)  # shallow copy to avoid mutating caller's dict
-            B = seq["self_analog"].shape[0]
-            device = seq["self_analog"].device
+            _ref = seq.get("self_controller") if self._hal_ctrl_enc else seq.get("self_analog")
+            if _ref is not None:
+                B = _ref.shape[0]
+                device = _ref.device
+            else:
+                B = seq["self_numeric"].shape[0]
+                device = seq["self_numeric"].device
             if self.training and self.si_drop_prob < 1.0:
                 keep = (torch.rand(B, 1, 1, device=device) >= self.si_drop_prob).float()
             else:
                 keep = torch.zeros(B, 1, 1, device=device)
             keep_idx = keep.squeeze(-1).long()  # (B, 1) for index tensors
-            seq["self_analog"] = seq["self_analog"] * keep
-            seq["self_nana_analog"] = seq["self_nana_analog"] * keep
-            seq["self_c_dir"] = seq["self_c_dir"] * keep_idx
-            seq["self_nana_c_dir"] = seq["self_nana_c_dir"] * keep_idx
-            seq["self_buttons"] = seq["self_buttons"] * keep_idx.unsqueeze(-1)
-            seq["self_nana_buttons"] = seq["self_nana_buttons"] * keep_idx.unsqueeze(-1)
+            if self._hal_ctrl_enc and "self_controller" in seq:
+                seq["self_controller"] = seq["self_controller"] * keep
+            else:
+                seq["self_analog"] = seq["self_analog"] * keep
+                seq["self_c_dir"] = seq["self_c_dir"] * keep_idx
+                seq["self_buttons"] = seq["self_buttons"] * keep_idx.unsqueeze(-1)
+            if "self_nana_analog" in seq:
+                seq["self_nana_analog"] = seq["self_nana_analog"] * keep
+            if "self_nana_c_dir" in seq:
+                seq["self_nana_c_dir"] = seq["self_nana_c_dir"] * keep_idx
+            if "self_nana_buttons" in seq:
+                seq["self_nana_buttons"] = seq["self_nana_buttons"] * keep_idx.unsqueeze(-1)
 
         t["stage"]        = self.stage_emb(seq["stage"])
         if not self._hal_minimal:
@@ -214,7 +243,7 @@ class _BaseFrameEncoder(nn.Module):
         t["opp_char"]     = self.char_emb(seq["opp_character"])
         t["self_action"]  = self.act_emb(seq["self_action"])
         t["opp_action"]   = self.act_emb(seq["opp_action"])
-        if not nsi:
+        if not nsi and not self._hal_ctrl_enc:
             t["self_c_dir"] = self.cdir_emb(seq["self_c_dir"])
         if not noi:
             t["opp_c_dir"] = self.cdir_emb(seq["opp_c_dir"])
@@ -265,7 +294,10 @@ class _BaseFrameEncoder(nn.Module):
             t["opp_nana_num"]    = self.nana_enc(torch.cat([seq["opp_nana_numeric"], seq["opp_nana_action_elapsed"].unsqueeze(-1).float()], dim=-1))
 
         if not nsi:
-            t["self_analog"]      = self.analog_enc(seq["self_analog"])
+            if self._hal_ctrl_enc:
+                t["self_controller"] = self.controller_enc(seq["self_controller"])
+            else:
+                t["self_analog"] = self.analog_enc(seq["self_analog"])
             if not self._lean:
                 t["self_nana_analog"] = self.analog_enc(seq["self_nana_analog"])
         if not noi:
@@ -279,7 +311,14 @@ class _BaseFrameEncoder(nn.Module):
         # Buttons: combine whichever sides are present
         has_self_btn = not nsi
         has_opp_btn = not noi
-        if has_self_btn and has_opp_btn:
+        if self._hal_ctrl_enc and has_self_btn:
+            # Self buttons are inside self_controller; only opp needs separate encoding
+            if has_opp_btn:
+                t["buttons"] = self.btn_enc(seq["opp_buttons"].float())
+            # else: no separate buttons token (self is in controller, opp is excluded)
+            if not self._lean:
+                t["nana_buttons"] = self.nana_btn_enc(seq["self_nana_buttons"].float())
+        elif has_self_btn and has_opp_btn:
             t["buttons"]      = self.btn_enc(torch.cat([seq["self_buttons"].float(), seq["opp_buttons"].float()], dim=-1))
             if not self._lean:
                 t["nana_buttons"] = self.nana_btn_enc(torch.cat([seq["self_nana_buttons"].float(), seq["opp_nana_buttons"].float()], dim=-1))
@@ -636,6 +675,111 @@ class HybridFrameEncoder(_BaseFrameEncoder):
 
 
 # ---------------------------------------------------------------------------
+# HAL-exact encoder: concat all raw features → single Linear (no per-group MLPs)
+# ---------------------------------------------------------------------------
+
+class HALFlatEncoder(nn.Module):
+    """Match HAL's input projection exactly.
+
+    Per frame:
+      concat([stage_emb(4), char_emb(12)*2, action_emb(32)*2,
+              gamestate(numeric), controller(one-hot)]) → Linear → d_model
+
+    No per-group MLPs. Categorical embeddings are small (HAL sizes).
+    Requires --hal-minimal-features and --hal-controller-encoding.
+    """
+
+    # HAL's exact embedding sizes
+    STAGE_EMB_DIM = 4
+    CHAR_EMB_DIM = 12
+    ACTION_EMB_DIM = 32
+
+    def __init__(
+        self,
+        *,
+        d_model: int = 512,
+        dropout: float = 0.0,
+        num_stages: int,
+        num_characters: int,
+        num_actions: int,
+        hal_minimal_features: bool = True,
+        hal_controller_encoding: bool = True,
+        n_controller_combos: int = 5,
+        no_self_inputs: bool = False,
+        **kwargs,  # absorb unused params from build_encoder
+    ) -> None:
+        super().__init__()
+        self._no_self_inputs = no_self_inputs
+        self._hal_ctrl_enc = hal_controller_encoding
+        self.si_drop_prob: float = 0.0
+
+        # Categorical embeddings (HAL sizes)
+        self.stage_emb = nn.Embedding(num_stages, self.STAGE_EMB_DIM)
+        self.char_emb = nn.Embedding(num_characters, self.CHAR_EMB_DIM)
+        self.action_emb = nn.Embedding(num_actions, self.ACTION_EMB_DIM)
+
+        # Compute total input dimension
+        emb_dim = self.STAGE_EMB_DIM + 2 * self.CHAR_EMB_DIM + 2 * self.ACTION_EMB_DIM
+        # = 4 + 24 + 64 = 92
+
+        # Gamestate: hal_minimal = 7 numeric + 3 flags = 10 per player × 2
+        numeric_dim = 10 * 2  # = 20
+
+        # Controller: one-hot vector (37 stick + 9 cstick + N combos + 3 shoulder)
+        ctrl_dim = 0
+        if hal_controller_encoding and not no_self_inputs:
+            ctrl_dim = 37 + 9 + n_controller_combos + 3
+
+        self._input_dim = emb_dim + numeric_dim + ctrl_dim
+
+        # Single projection (matching HAL's proj_down)
+        self.proj = nn.Linear(self._input_dim, d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
+        # Stochastic self-input masking
+        if not self._no_self_inputs and self.si_drop_prob > 0 and self._hal_ctrl_enc:
+            if "self_controller" in seq:
+                seq = dict(seq)
+                B = seq["self_controller"].shape[0]
+                device = seq["self_controller"].device
+                if self.training and self.si_drop_prob < 1.0:
+                    keep = (torch.rand(B, 1, 1, device=device) >= self.si_drop_prob).float()
+                else:
+                    keep = torch.zeros(B, 1, 1, device=device)
+                seq["self_controller"] = seq["self_controller"] * keep
+
+        # Categorical embeddings
+        stage = self.stage_emb(seq["stage"])                    # (B, T, 4)
+        self_char = self.char_emb(seq["self_character"])        # (B, T, 12)
+        opp_char = self.char_emb(seq["opp_character"])          # (B, T, 12)
+        self_action = self.action_emb(seq["self_action"])       # (B, T, 32)
+        opp_action = self.action_emb(seq["opp_action"])         # (B, T, 32)
+
+        # Numeric gamestate: 7 numeric + 3 flags = 10 per player
+        _HAL_IDX = [0, 1, 2, 3, 4, 12, 13]
+        _HAL_FLAG_IDX = [0, 2, 3]
+        sn = seq["self_numeric"]
+        on = seq["opp_numeric"]
+        if sn.shape[-1] > 7:
+            sn = sn[..., _HAL_IDX]
+            on = on[..., _HAL_IDX]
+        self_num = torch.cat([sn, seq["self_flags"][..., _HAL_FLAG_IDX].float()], dim=-1)
+        opp_num = torch.cat([on, seq["opp_flags"][..., _HAL_FLAG_IDX].float()], dim=-1)
+
+        parts = [stage, self_char, opp_char, self_action, opp_action,
+                 self_num, opp_num]
+
+        # Controller one-hot
+        if self._hal_ctrl_enc and not self._no_self_inputs and "self_controller" in seq:
+            parts.append(seq["self_controller"])
+
+        # Concat everything → single projection
+        combined = torch.cat(parts, dim=-1)     # (B, T, input_dim)
+        return self.drop(self.proj(combined))    # (B, T, d_model)
+
+
+# ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
@@ -644,6 +788,7 @@ ENCODER_REGISTRY = {
     "flat": FlatFrameEncoder,
     "composite8": CompositeFrameEncoder,
     "hybrid16": HybridFrameEncoder,
+    "hal_flat": HALFlatEncoder,
 }
 
 
@@ -660,6 +805,8 @@ def build_encoder(
     no_self_inputs: bool = False,
     lean_features: bool = False,
     hal_minimal_features: bool = False,
+    hal_controller_encoding: bool = False,
+    n_controller_combos: int = 5,
     num_stages: int,
     num_ports: int,
     num_characters: int,
@@ -681,11 +828,15 @@ def build_encoder(
         num_c_dirs=num_c_dirs, no_opp_inputs=no_opp_inputs,
         no_self_inputs=no_self_inputs, lean_features=lean_features,
         hal_minimal_features=hal_minimal_features,
+        hal_controller_encoding=hal_controller_encoding,
+        n_controller_combos=n_controller_combos,
     )
 
     common = dict(d_model=d_model, d_intra=d_intra, dropout=dropout, scaled_emb=scaled_emb)
 
-    if encoder_type == "flat":
+    if encoder_type == "hal_flat":
+        return cls(d_model=d_model, dropout=dropout, **vocab_kwargs)
+    elif encoder_type == "flat":
         return cls(**common, **vocab_kwargs)
     else:
         return cls(**common, nlayers=nlayers, k_query=k_query, **vocab_kwargs)

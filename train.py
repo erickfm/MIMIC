@@ -168,6 +168,41 @@ def _multi_hot_to_single_label(btn_tgt):
     return single
 
 
+# Module-level state for combo encoding (set by train() when --hal-controller-encoding)
+_combo_map: dict = None
+_combo_lookup: torch.Tensor = None  # vectorized lookup table: combo_int → class_idx
+
+
+def _build_combo_lookup(combo_map: dict, device: torch.device = None) -> torch.Tensor:
+    """Build a vectorized lookup table from combo_map.
+    Encodes (a,b,jump,z,shoulder) as int: a*16 + b*8 + jump*4 + z*2 + shoulder.
+    Returns tensor of shape (32,) mapping combo_int → class_idx."""
+    table = torch.zeros(32, dtype=torch.long, device=device)
+    for combo, idx in combo_map.items():
+        combo_int = combo[0]*16 + combo[1]*8 + combo[2]*4 + combo[3]*2 + combo[4]
+        table[combo_int] = idx
+    return table
+
+
+def _multi_hot_to_combo_label(btn_tgt):
+    """Convert multi-hot (B, T, 12) button targets to combo class indices.
+    Uses vectorized lookup — no per-frame Python loop."""
+    shape = btn_tgt.shape[:-1]
+    flat = btn_tgt.reshape(-1, 12)
+    # Collapse: X|Y→Jump, L|R→Shoulder
+    a = (flat[:, 0] > 0.5).long()
+    b = (flat[:, 1] > 0.5).long()
+    jump = ((flat[:, 2] > 0.5) | (flat[:, 3] > 0.5)).long()
+    z = (flat[:, 4] > 0.5).long()
+    shoulder = ((flat[:, 5] > 0.5) | (flat[:, 6] > 0.5)).long()
+    # Encode as integer and lookup
+    combo_int = a * 16 + b * 8 + jump * 4 + z * 2 + shoulder
+    global _combo_lookup
+    if _combo_lookup is None or _combo_lookup.device != combo_int.device:
+        _combo_lookup = _build_combo_lookup(_combo_map, device=combo_int.device)
+    return _combo_lookup[combo_int].reshape(shape)
+
+
 def _combine_shoulder_targets(l_bin, r_bin, shoulder_centers):
     """Combine separate L/R shoulder bin targets into max(L,R) mapped to 3 classes.
     HAL uses centers [0.0, 0.4, 1.0]."""
@@ -211,8 +246,11 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None):
     cdir_classes = cdir_tgt.argmax(dim=-1)
     loss_cdir = F.cross_entropy(c_logits.reshape(-1, c_logits.size(-1)), cdir_classes.reshape(-1))
 
-    # Single-label buttons
-    btn_single = _multi_hot_to_single_label(btn_tgt)
+    # Single-label buttons (combo-based if controller encoding, else priority-based)
+    if _combo_map is not None:
+        btn_single = _multi_hot_to_combo_label(btn_tgt)
+    else:
+        btn_single = _multi_hot_to_single_label(btn_tgt)
     loss_btn = F.cross_entropy(btn_pred.reshape(-1, btn_pred.size(-1)), btn_single.reshape(-1))
 
     # Metrics
@@ -390,8 +428,15 @@ def _compute_intervals(max_steps):
 
 
 def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
-                  rank=0, world_size=1, controller_offset=False):
+                  rank=0, world_size=1, controller_offset=False,
+                  hal_controller_encoding=False,
+                  controller_combo_map=None, n_controller_combos=5):
     _log(f"  Using streaming dataset from {data_dir}")
+    ctrl_kw = dict(
+        hal_controller_encoding=hal_controller_encoding,
+        controller_combo_map=controller_combo_map,
+        n_controller_combos=n_controller_combos,
+    )
     train_ds = StreamingMeleeDataset(
         data_dir=data_dir,
         sequence_length=SEQUENCE_LENGTH,
@@ -400,6 +445,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         rank=rank,
         world_size=world_size,
         controller_offset=controller_offset,
+        **ctrl_kw,
     )
     val_ds = StreamingMeleeDataset(
         data_dir=data_dir,
@@ -409,6 +455,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         rank=rank,
         world_size=world_size,
         controller_offset=controller_offset,
+        **ctrl_kw,
     )
     return train_ds, val_ds
 
@@ -434,7 +481,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               btn_loss=None, no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None, n_shoulder_bins=None,
               n_heads_override=None, hal_mode=False, lean_features=False,
-              hal_minimal_features=False):
+              hal_minimal_features=False,
+              hal_controller_encoding=False, n_controller_combos=5):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -468,6 +516,9 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["lean_features"] = True
     if hal_minimal_features:
         overrides["hal_minimal_features"] = True
+    if hal_controller_encoding:
+        overrides["hal_controller_encoding"] = True
+        overrides["n_controller_combos"] = n_controller_combos
     if n_stick_clusters is not None:
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
@@ -540,7 +591,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           stick_clusters: str = None,
           hal_minimal_features: bool = False,
           reaction_delay_override: int = None,
-          controller_offset: bool = False):
+          controller_offset: bool = False,
+          hal_controller_encoding: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -587,11 +639,30 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if eff_batch > 512:
         _log(f"  WARNING: eff batch {eff_batch} > 512 — known to plateau on full Melee data")
 
+    # --- Controller combo loading ---
+    global _combo_map
+    _combo_map = None
+    _n_combos = 5  # default (HAL's A, B, Jump, Z, NONE)
+    if hal_controller_encoding:
+        from mimic.features import load_controller_combos
+        combos_path = Path(data_dir) / "controller_combos.json"
+        if combos_path.exists():
+            combos, _combo_map = load_controller_combos(data_dir)
+            _n_combos = len(combos)
+            _log(f"  Controller encoding: {_n_combos} button combos from {combos_path}")
+        else:
+            raise RuntimeError(
+                f"--hal-controller-encoding requires controller_combos.json in {data_dir}. "
+                f"Run: python tools/build_controller_combos.py --data-dir {data_dir}")
+
     _log(f"Loading dataset from {data_dir} ...")
     ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs,
                               no_self_inputs=no_self_inputs,
                               rank=rank, world_size=world_size,
-                              controller_offset=controller_offset)
+                              controller_offset=controller_offset,
+                              hal_controller_encoding=hal_controller_encoding,
+                              controller_combo_map=_combo_map,
+                              n_controller_combos=_n_combos)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
@@ -674,7 +745,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            n_heads_override=n_heads_override,
                            hal_mode=hal_mode,
                            lean_features=lean_features,
-                           hal_minimal_features=hal_minimal_features)
+                           hal_minimal_features=hal_minimal_features,
+                           hal_controller_encoding=hal_controller_encoding,
+                           n_controller_combos=_n_combos)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
@@ -1004,6 +1077,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                             best_ckpt["stick_centers"] = stick_centers_np.tolist()
                         if shoulder_centers_np is not None:
                             best_ckpt["shoulder_centers"] = shoulder_centers_np.tolist()
+                        if hal_controller_encoding and _combo_map:
+                            best_ckpt["controller_combos"] = [list(c) for c in sorted(_combo_map.keys(), key=_combo_map.get)]
                         torch.save(best_ckpt, best_path)
                         _log(f"  -- new best val f1={cur_val_f1:.1%} → {best_path}")
                 if target_val_f1 and cur_val_f1 >= target_val_f1:
@@ -1075,6 +1150,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     ckpt_data["stick_centers"] = stick_centers_np.tolist()
                 if shoulder_centers_np is not None:
                     ckpt_data["shoulder_centers"] = shoulder_centers_np.tolist()
+                if hal_controller_encoding and _combo_map:
+                    ckpt_data["controller_combos"] = [list(c) for c in sorted(_combo_map.keys(), key=_combo_map.get)]
                 torch.save(ckpt_data, ckpt_path)
                 _log(f"  -- saved {ckpt_path}")
             if is_distributed:
@@ -1128,7 +1205,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
     parser.add_argument("--encoder",   type=str, default="hybrid16",
-                        choices=["default", "flat", "composite8", "hybrid16"],
+                        choices=["default", "flat", "composite8", "hybrid16", "hal_flat"],
                         help="Frame encoder variant (default: hybrid16)")
     parser.add_argument("--d-intra",   type=int, default=None,
                         help="Intra-frame encoder width (default: 256)")
@@ -1203,6 +1280,8 @@ if __name__ == "__main__":
                         help="Stick cluster set: 'hal37' for HAL's 37 hand-designed clusters")
     parser.add_argument("--hal-minimal-features", action="store_true",
                         help="Use HAL's minimal input set (drop ECB, speeds, hitlag/hitstun from numeric)")
+    parser.add_argument("--hal-controller-encoding", action="store_true",
+                        help="Use HAL-style one-hot controller feedback encoding (requires controller_combos.json)")
     parser.add_argument("--si-drop-start", type=float, default=None,
                         help="Fraction of training where SI dropout begins")
     parser.add_argument("--si-drop-end", type=float, default=None,
@@ -1277,4 +1356,5 @@ if __name__ == "__main__":
         hal_minimal_features=args.hal_minimal_features,
         reaction_delay_override=args.reaction_delay,
         controller_offset=args.controller_offset,
+        hal_controller_encoding=args.hal_controller_encoding,
     )

@@ -325,6 +325,156 @@ HAL_CSTICK_CLUSTERS_9 = np.array([
     [0.1500, 0.1500], [0.8500, 0.1500], [0.8500, 0.8500], [0.1500, 0.8500],  # diagonals
 ], dtype=np.float32)
 
+HAL_SHOULDER_CLUSTERS_3 = np.array([0.0, 0.4, 1.0], dtype=np.float32)
+
+# Map 5-class c_dir → 9-cluster index (verified against HAL_CSTICK_CLUSTERS_9):
+#   0(neutral)→0, 1(up)→4, 2(down)→3, 3(left)→2, 4(right)→1
+CDIR_5_TO_9_MAP = np.array([0, 4, 3, 2, 1], dtype=np.int64)
+
+
+# ---------------------------------------------------------------------------
+# HAL-style controller encoding
+# ---------------------------------------------------------------------------
+
+def load_controller_combos(data_dir: Path):
+    """Load controller_combos.json → (combo_list, combo_to_idx dict)."""
+    path = Path(data_dir) / "controller_combos.json"
+    with open(path) as f:
+        data = json.load(f)
+    combos = [tuple(c) for c in data["combos"]]
+    combo_to_idx = {c: i for i, c in enumerate(combos)}
+    return combos, combo_to_idx
+
+
+def _nearest_2d(points: np.ndarray, centers: np.ndarray) -> np.ndarray:
+    """Nearest cluster index for each (x,y) point. points: (N,2), centers: (C,2) → (N,)."""
+    dists = np.sum((points[:, np.newaxis, :] - centers[np.newaxis, :, :]) ** 2, axis=-1)
+    return np.argmin(dists, axis=1)
+
+
+def _nearest_1d(values: np.ndarray, centers: np.ndarray) -> np.ndarray:
+    """Nearest cluster index for 1D values. values: (N,), centers: (C,) → (N,)."""
+    dists = (values[:, np.newaxis] - centers[np.newaxis, :]) ** 2
+    return np.argmin(dists, axis=1)
+
+
+def _collapse_buttons_np(btns: np.ndarray) -> np.ndarray:
+    """Collapse 12-dim raw buttons to 5-dim logical: [A, B, Jump, Z, Shoulder].
+
+    Input cols: A=0, B=1, X=2, Y=3, Z=4, L=5, R=6, ...
+    """
+    a = btns[:, 0] > 0.5
+    b = btns[:, 1] > 0.5
+    jump = (btns[:, 2] > 0.5) | (btns[:, 3] > 0.5)
+    z = btns[:, 4] > 0.5
+    shoulder = (btns[:, 5] > 0.5) | (btns[:, 6] > 0.5)
+    return np.stack([a, b, jump, z, shoulder], axis=-1).astype(np.int32)
+
+
+def encode_controller_onehot(
+    buttons: np.ndarray,
+    analog: np.ndarray,
+    c_dir: np.ndarray,
+    combo_to_idx: dict,
+    n_combos: int,
+    norm_stats: dict = None,
+) -> np.ndarray:
+    """Encode controller state as HAL-style one-hot vector.
+
+    Args:
+        buttons: (T, 12) binary float — raw button states
+        analog: (T, 4) float — [main_x, main_y, l_shldr, r_shldr], possibly normalized
+        c_dir: (T,) int64 — 5-class c-stick direction
+        combo_to_idx: dict mapping (int,...) tuples to class indices
+        n_combos: total number of button combo classes
+        norm_stats: if provided, denormalize analog cols {col_name: (mean, std)}
+
+    Returns:
+        (T, 37 + 9 + n_combos + 3) float32 one-hot vector
+    """
+    T = len(buttons)
+    analog = analog.copy().astype(np.float32)
+
+    # Denormalize analog if needed
+    if norm_stats is not None:
+        for i, col in enumerate(["self_main_x", "self_main_y", "self_l_shldr", "self_r_shldr"]):
+            if col in norm_stats:
+                mean, std = norm_stats[col]
+                analog[:, i] = analog[:, i] * std + mean
+
+    # 1. Main stick → nearest of 37 clusters → 37-dim one-hot
+    main_xy = analog[:, 0:2]
+    main_idx = _nearest_2d(main_xy, HAL_STICK_CLUSTERS_37)
+    main_onehot = np.eye(37, dtype=np.float32)[main_idx]
+
+    # 2. C-stick → 5-class→9-cluster mapping → 9-dim one-hot
+    c_idx = CDIR_5_TO_9_MAP[c_dir.astype(np.int64)]
+    c_onehot = np.eye(9, dtype=np.float32)[c_idx]
+
+    # 3. Buttons → collapse → lookup combo → n_combos-dim one-hot
+    collapsed = _collapse_buttons_np(buttons)
+    btn_indices = np.zeros(T, dtype=np.int64)
+    for t in range(T):
+        combo = tuple(collapsed[t].tolist())
+        btn_indices[t] = combo_to_idx.get(combo, 0)  # default to NONE
+    btn_onehot = np.eye(n_combos, dtype=np.float32)[btn_indices]
+
+    # 4. Shoulder → max(L,R) → nearest of [0.0, 0.4, 1.0] → 3-dim one-hot
+    shldr_max = np.maximum(analog[:, 2], analog[:, 3])
+    shldr_idx = _nearest_1d(shldr_max, HAL_SHOULDER_CLUSTERS_3)
+    shldr_onehot = np.eye(3, dtype=np.float32)[shldr_idx]
+
+    return np.concatenate([main_onehot, c_onehot, btn_onehot, shldr_onehot], axis=-1)
+
+
+def encode_controller_onehot_single(
+    main_x: float, main_y: float,
+    c_x: float, c_y: float,
+    l_shldr: float, r_shldr: float,
+    buttons: dict,
+    combo_to_idx: dict,
+    n_combos: int,
+) -> np.ndarray:
+    """Encode a single frame's controller state (for inference).
+
+    Args:
+        main_x, main_y: main stick position [0, 1]
+        c_x, c_y: c-stick position [0, 1]
+        l_shldr, r_shldr: shoulder values [0, 1]
+        buttons: dict {button_name: 0/1} with keys like "BUTTON_A", etc.
+        combo_to_idx: combo tuple → class index mapping
+        n_combos: total number of combo classes
+
+    Returns:
+        (37 + 9 + n_combos + 3,) float32 one-hot vector
+    """
+    # 1. Main stick
+    main_xy = np.array([[main_x, main_y]], dtype=np.float32)
+    main_idx = _nearest_2d(main_xy, HAL_STICK_CLUSTERS_37)[0]
+    main_onehot = np.eye(37, dtype=np.float32)[main_idx]
+
+    # 2. C-stick — use raw (c_x, c_y) at inference for better accuracy
+    c_xy = np.array([[c_x, c_y]], dtype=np.float32)
+    c_idx = _nearest_2d(c_xy, HAL_CSTICK_CLUSTERS_9)[0]
+    c_onehot = np.eye(9, dtype=np.float32)[c_idx]
+
+    # 3. Buttons — collapse and lookup combo
+    a = int(buttons.get("BUTTON_A", 0))
+    b = int(buttons.get("BUTTON_B", 0))
+    jump = int(buttons.get("BUTTON_X", 0) or buttons.get("BUTTON_Y", 0))
+    z = int(buttons.get("BUTTON_Z", 0))
+    shoulder = int(buttons.get("BUTTON_L", 0) or buttons.get("BUTTON_R", 0))
+    combo = (a, b, jump, z, shoulder)
+    btn_idx = combo_to_idx.get(combo, 0)
+    btn_onehot = np.eye(n_combos, dtype=np.float32)[btn_idx]
+
+    # 4. Shoulder
+    shldr_max = max(l_shldr, r_shldr)
+    shldr_idx = _nearest_1d(np.array([shldr_max]), HAL_SHOULDER_CLUSTERS_3)[0]
+    shldr_onehot = np.eye(3, dtype=np.float32)[shldr_idx]
+
+    return np.concatenate([main_onehot, c_onehot, btn_onehot, shldr_onehot])
+
 
 # ---------------------------------------------------------------------------
 # C-stick direction encoding

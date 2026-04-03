@@ -68,6 +68,8 @@ class ModelConfig:
     hal_mode: bool              = False  # use HAL-style heads (single-label buttons, combined shoulder, LN)
     lean_features: bool         = False  # drop nana/projectiles/nana-flags (match HAL's lean feature set)
     hal_minimal_features: bool  = False  # drop ECB/speeds/hitlag from numeric (match HAL's exact input set)
+    hal_controller_encoding: bool = False  # one-hot controller feedback (stick clusters + button combos)
+    n_controller_combos: int    = 5       # number of button combo classes (from controller_combos.json)
 
     # fixed categorical vocab sizes
     num_stages: int       = len(STAGE_MAP)
@@ -379,10 +381,12 @@ class HALPredictionHeads(nn.Module):
     N_BTN_CLASSES = 5
 
     def __init__(self, d_model: int, n_stick_clusters: int = 63,
-                 n_shoulder_bins: int = 3, n_cdir: int = 5):
+                 n_shoulder_bins: int = 3, n_cdir: int = 5,
+                 n_btn_classes: int = 5):
         super().__init__()
         self.n_stick_clusters = n_stick_clusters
         self.n_shoulder_bins = n_shoulder_bins
+        self.n_btn_classes = n_btn_classes
 
         def _head(in_dim: int, out_dim: int):
             h = in_dim // 2
@@ -393,7 +397,7 @@ class HALPredictionHeads(nn.Module):
         shldr_out = n_shoulder_bins
         cdir_out = n_cdir
         main_out = n_stick_clusters
-        btn_out = self.N_BTN_CLASSES
+        btn_out = n_btn_classes
 
         self.shoulder_head = _head(d_model, shldr_out)
         self.cdir_head     = _head(d_model + shldr_out, cdir_out)
@@ -452,6 +456,8 @@ class FramePredictor(nn.Module):
             no_self_inputs=cfg.no_self_inputs,
             lean_features=cfg.lean_features,
             hal_minimal_features=cfg.hal_minimal_features,
+            hal_controller_encoding=cfg.hal_controller_encoding,
+            n_controller_combos=cfg.n_controller_combos,
         )
 
         if cfg.pos_enc == "learned":
@@ -468,6 +474,7 @@ class FramePredictor(nn.Module):
                 cfg.d_model,
                 n_stick_clusters=cfg.n_stick_clusters,
                 n_shoulder_bins=3,  # HAL uses 3-class combined shoulder
+                n_btn_classes=cfg.n_controller_combos if cfg.hal_controller_encoding else 5,
             )
         else:
             self.heads = PredictionHeads(

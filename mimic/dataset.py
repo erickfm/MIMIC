@@ -20,6 +20,8 @@ from typing import Dict, List, Tuple
 import torch
 from torch.utils.data import IterableDataset, get_worker_info
 
+from .features import encode_controller_onehot
+
 
 class StreamingMeleeDataset(IterableDataset):
     """Streams pretokenized .pt shards for training.
@@ -39,6 +41,9 @@ class StreamingMeleeDataset(IterableDataset):
         rank: int = 0,
         world_size: int = 1,
         controller_offset: bool = False,
+        hal_controller_encoding: bool = False,
+        controller_combo_map: dict = None,
+        n_controller_combos: int = 5,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -49,6 +54,9 @@ class StreamingMeleeDataset(IterableDataset):
         self._rank           = rank
         self._world_size     = world_size
         self._controller_offset = controller_offset
+        self._hal_ctrl_enc   = hal_controller_encoding
+        self._combo_map      = controller_combo_map
+        self._n_combos       = n_controller_combos
 
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
@@ -117,6 +125,23 @@ class StreamingMeleeDataset(IterableDataset):
             for i in indices:
                 state = {k: v[i] for k, v in shard["states"].items()}
                 target = {k: v[i] for k, v in shard["targets"].items()}
+
+                # HAL-style: encode controller as one-hot vector
+                if self._hal_ctrl_enc and self._combo_map is not None:
+                    if "self_buttons" in state and "self_analog" in state:
+                        onehot = encode_controller_onehot(
+                            state["self_buttons"].numpy(),
+                            state["self_analog"].numpy(),
+                            state["self_c_dir"].numpy(),
+                            self._combo_map,
+                            self._n_combos,
+                            norm_stats=self.norm_stats,
+                        )
+                        state["self_controller"] = torch.from_numpy(onehot)
+                        del state["self_buttons"]
+                        del state["self_analog"]
+                        del state["self_c_dir"]
+
                 yield state, target
 
     # ------------------------------------------------------------------
@@ -173,6 +198,23 @@ class StreamingMeleeDataset(IterableDataset):
                             shifted = torch.zeros_like(orig)
                             shifted[1:] = orig[:-1]
                             state[ck] = shifted
+
+                # HAL-style: encode controller as one-hot vector
+                if self._hal_ctrl_enc and self._combo_map is not None:
+                    if "self_buttons" in state and "self_analog" in state:
+                        onehot = encode_controller_onehot(
+                            state["self_buttons"].numpy(),
+                            state["self_analog"].numpy(),
+                            state["self_c_dir"].numpy(),
+                            self._combo_map,
+                            self._n_combos,
+                            norm_stats=self.norm_stats,
+                        )
+                        state["self_controller"] = torch.from_numpy(onehot)
+                        del state["self_buttons"]
+                        del state["self_analog"]
+                        del state["self_c_dir"]
+
                 yield state, target
 
     # ------------------------------------------------------------------

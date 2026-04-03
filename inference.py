@@ -16,7 +16,8 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+import random
 
 import melee
 import numpy as np
@@ -112,14 +113,14 @@ if "stick_centers" in ckpt:
     log.info("Loaded cluster centers from checkpoint: %d stick, %d shoulder",
              len(_stick_centers), len(_shoulder_centers))
 else:
-    import json as _json
+    import json
     _cluster_dirs = [Path(args.data_dir)] if args.data_dir else []
     _cluster_dirs += [Path("./data/full"), Path("./data"), Path("./data/subset")]
     for _sd in _cluster_dirs:
         _sc_path = _sd / "stick_clusters.json"
         if _sc_path.exists():
             with open(_sc_path) as _fh:
-                _sc_raw = _json.load(_fh)
+                _sc_raw = json.load(_fh)
             _stick_centers = np.array(_sc_raw["stick_centers"], dtype=np.float32)
             _shoulder_centers = np.array(_sc_raw["shoulder_centers"], dtype=np.float32)
             log.info("Loaded cluster centers from %s: %d stick, %d shoulder",
@@ -129,8 +130,35 @@ else:
         log.error("No cluster centers found in checkpoint or data dir")
         sys.exit(1)
 
+# ── HAL controller encoding ──────────────────────────────────────────────
+_hal_ctrl_enc = getattr(cfg, 'hal_controller_encoding', False)
+_ctrl_combo_map: Dict[tuple, int] = {}
+_ctrl_combos: list = []
+_n_ctrl_combos: int = getattr(cfg, 'n_controller_combos', 5)
+
+if _hal_ctrl_enc:
+    # Load combo map from checkpoint or data dir
+    if "controller_combos" in ckpt:
+        _ctrl_combos = [tuple(c) for c in ckpt["controller_combos"]]
+        _ctrl_combo_map = {c: i for i, c in enumerate(_ctrl_combos)}
+        _n_ctrl_combos = len(_ctrl_combos)
+    else:
+        _combo_dirs = [Path(args.data_dir)] if args.data_dir else []
+        _combo_dirs += [Path("./data"), Path("./data/full")]
+        for _cd in _combo_dirs:
+            _cc_path = _cd / "controller_combos.json"
+            if _cc_path.exists():
+                _ctrl_combos, _ctrl_combo_map = F.load_controller_combos(_cd)
+                _n_ctrl_combos = len(_ctrl_combos)
+                log.info("Loaded %d controller combos from %s", _n_ctrl_combos, _cc_path)
+                break
+    if not _ctrl_combo_map:
+        log.error("--hal-controller-encoding but no controller_combos.json found")
+        sys.exit(1)
+    log.info("HAL controller encoding: %d button combos, dim=%d",
+             _n_ctrl_combos, 37 + 9 + _n_ctrl_combos + 3)
+
 # ── Normalization stats + categorical maps ───────────────────────────────
-import json
 
 _SEARCH_DIRS = [Path(args.data_dir)] if args.data_dir else []
 _SEARCH_DIRS += [Path("./data"), Path("./data/subset"), Path("./data/full")]
@@ -169,7 +197,6 @@ _fg = F.build_feature_groups(no_opp_inputs=cfg.no_opp_inputs,
 _categorical_cols = F.get_categorical_cols(_fg)
 
 # ── Prediction feedback state ─────────────────────────────────────────────
-from typing import Optional
 _prev_pred: Optional[Dict[str, torch.Tensor]] = None
 _prev_btns_fired: Optional[List[bool]] = None
 _prev_sent: Optional[Dict[str, float]] = None  # actual values sent to controller last frame
@@ -248,11 +275,25 @@ class InferenceLogger:
             c_probs = torch.softmax(pred["c_dir_logits"], dim=-1)
             rec["pred_c_dir"] = int(torch.argmax(c_probs))
             rec["pred_c_dir_probs"] = " ".join(f"{p:.3f}" for p in c_probs.tolist())
-            btn_p = torch.sigmoid(pred["btn_logits"])
-            rec["pred_btn_probs"] = " ".join(
-                f"{IDX_TO_BUTTON[i].name}={p:.3f}"
-                for i, p in enumerate(btn_p.tolist())
-            )
+            if _hal_ctrl_enc:
+                btn_p = torch.softmax(pred["btn_logits"].float(), dim=-1)
+                NAMES = ["A", "B", "Jump", "Z", "Shoulder"]
+                parts = []
+                for i, p in enumerate(btn_p.tolist()):
+                    if i < len(_ctrl_combos):
+                        combo = _ctrl_combos[i]
+                        pressed = [NAMES[j] for j, v in enumerate(combo) if v]
+                        label = "+".join(pressed) if pressed else "NONE"
+                    else:
+                        label = f"cls{i}"
+                    parts.append(f"{label}={p:.3f}")
+                rec["pred_btn_probs"] = " ".join(parts)
+            else:
+                btn_p = torch.sigmoid(pred["btn_logits"])
+                rec["pred_btn_probs"] = " ".join(
+                    f"{IDX_TO_BUTTON[i].name}={p:.3f}"
+                    for i, p in enumerate(btn_p.tolist())
+                )
         if sent_main is not None:
             rec["sent_main_x"] = f"{sent_main[0]:.4f}"
             rec["sent_main_y"] = f"{sent_main[1]:.4f}"
@@ -347,6 +388,18 @@ def _process_one_row(row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
     r["self_nana_present"] = 1.0 if r.get("self_nana_character", 0) and r["self_nana_character"] > 0 else 0.0
     r["opp_nana_present"] = 1.0 if r.get("opp_nana_character", 0) and r["opp_nana_character"] > 0 else 0.0
 
+    # Capture raw controller values BEFORE normalization for HAL encoding
+    if _hal_ctrl_enc:
+        _raw_mx = float(r.get("self_main_x", 0.5) or 0.5)
+        _raw_my = float(r.get("self_main_y", 0.5) or 0.5)
+        _raw_cx = float(r.get("self_c_x", 0.5) or 0.5)
+        _raw_cy = float(r.get("self_c_y", 0.5) or 0.5)
+        _raw_ls = float(r.get("self_l_shldr", 0.0) or 0.0)
+        _raw_rs = float(r.get("self_r_shldr", 0.0) or 0.0)
+        _raw_btns = {}
+        for _b in F.BTN:
+            _raw_btns[_b] = int(r.get(f"self_btn_{_b}", 0) or 0)
+
     for col, m in _enum_maps.items():
         raw = r.get(col, 0)
         if raw is None or (isinstance(raw, float) and not math.isfinite(raw)):
@@ -379,6 +432,18 @@ def _process_one_row(row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
                 state[key] = torch.tensor(vals, dtype=torch.float32)
             else:
                 state[key] = torch.tensor([vals], dtype=torch.float32)
+
+    # HAL controller encoding: replace self_buttons/self_analog/self_c_dir with self_controller
+    if _hal_ctrl_enc:
+        onehot = F.encode_controller_onehot_single(
+            _raw_mx, _raw_my, _raw_cx, _raw_cy, _raw_ls, _raw_rs,
+            _raw_btns, _ctrl_combo_map, _n_ctrl_combos,
+        )
+        state["self_controller"] = torch.from_numpy(onehot).unsqueeze(0)
+        state.pop("self_analog", None)
+        state.pop("self_c_dir", None)
+        state.pop("self_buttons", None)
+
     return state
 
 
@@ -487,7 +552,6 @@ def press_output(ctrl: melee.Controller,
                  sample: bool = True) -> tuple[List[bool], tuple[float, float], int, float, float]:
     """Send model predictions to the controller (HAL-style explicit press/release).
     Returns (fired_buttons, (mx,my), c_dir_idx, l_val, r_val)."""
-    import random
 
     mx, my, l_val, r_val = _decode_clusters(pred, temperature=args.temperature,
                                                deterministic=args.deterministic)
@@ -498,27 +562,43 @@ def press_output(ctrl: melee.Controller,
     ctrl.tilt_analog(melee.enums.Button.BUTTON_MAIN, mx, my)
     ctrl.tilt_analog(melee.enums.Button.BUTTON_C,    cx, cy)
 
-    # HAL mode: single-label 5-class (A=0, B=1, jump=2, Z=3, none=4)
-    hal_buttons = "shoulder_val" in pred and pred["btn_logits"].shape[-1] == 5
-    HAL_IDX_TO_BUTTON = [
+    # Combo bit index → melee button enum
+    COMBO_BTN_MAP = {
+        0: melee.enums.Button.BUTTON_A,
+        1: melee.enums.Button.BUTTON_B,
+        2: melee.enums.Button.BUTTON_X,  # Jump
+        3: melee.enums.Button.BUTTON_Z,
+        4: melee.enums.Button.BUTTON_L,  # Shoulder
+    }
+    # Legacy 5-class HAL: A=0, B=1, Jump=2, Z=3, NONE=4
+    LEGACY_HAL_BUTTONS = [
         melee.enums.Button.BUTTON_A, melee.enums.Button.BUTTON_B,
         melee.enums.Button.BUTTON_X, melee.enums.Button.BUTTON_Z,
     ]
+
+    hal_buttons = _hal_ctrl_enc or ("shoulder_val" in pred and pred["btn_logits"].shape[-1] != 12)
 
     if hal_buttons:
         btn_probs = torch.softmax(pred["btn_logits"].float(), dim=-1)
         btn_idx = int(torch.multinomial(btn_probs, 1)) if sample else int(torch.argmax(btn_probs))
         pressed = []
         fired = [False] * len(IDX_TO_BUTTON)
-        # Release all first
         for btn in IDX_TO_BUTTON:
             ctrl.release_button(btn)
-        # Press the selected button (if not NO_BUTTON=4)
-        if btn_idx < 4:
-            btn = HAL_IDX_TO_BUTTON[btn_idx]
+
+        if _hal_ctrl_enc and btn_idx < len(_ctrl_combos):
+            combo = _ctrl_combos[btn_idx]
+            for bit_idx, pressed_bit in enumerate(combo):
+                if pressed_bit and bit_idx in COMBO_BTN_MAP:
+                    btn = COMBO_BTN_MAP[bit_idx]
+                    ctrl.press_button(btn)
+                    pressed.append(btn.name)
+                    if btn in IDX_TO_BUTTON:
+                        fired[IDX_TO_BUTTON.index(btn)] = True
+        elif btn_idx < len(LEGACY_HAL_BUTTONS):
+            btn = LEGACY_HAL_BUTTONS[btn_idx]
             ctrl.press_button(btn)
             pressed.append(btn.name)
-            # Map back to fired list for feedback
             if btn in IDX_TO_BUTTON:
                 fired[IDX_TO_BUTTON.index(btn)] = True
     else:
@@ -545,12 +625,26 @@ def press_output(ctrl: melee.Controller,
 
     ctrl.flush()
 
+    # Top-3 logging
+    btn_logits = pred["btn_logits"]
+    k = min(3, btn_logits.shape[-1])
     if hal_buttons:
-        btn_logits = pred["btn_logits"]
-        top3_str = " ".join(f"{['A','B','X','Z','NONE'][i]}={v:.3f}"
-                            for v, i in zip(*torch.softmax(btn_logits, -1).topk(3)))
+        probs = torch.softmax(btn_logits.float(), dim=-1)
+        topv, topi = probs.topk(k)
+        NAMES = ["A", "B", "Jump", "Z", "Shoulder"]
+        parts = []
+        for v, i in zip(topv.tolist(), topi.tolist()):
+            if _hal_ctrl_enc and i < len(_ctrl_combos):
+                combo = _ctrl_combos[i]
+                lbl = "+".join(NAMES[j] for j, b in enumerate(combo) if b) or "NONE"
+            elif i < 4:
+                lbl = ["A", "B", "Jump", "Z"][i]
+            else:
+                lbl = "NONE"
+            parts.append(f"{lbl}={v:.3f}")
+        top3_str = " ".join(parts)
     else:
-        top3 = btn_probs.topk(3)
+        top3 = btn_probs.topk(k)
         top3_str = " ".join(f"{IDX_TO_BUTTON[i].name}={v:.3f}"
                             for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
     log.info(
@@ -577,11 +671,19 @@ if __name__ == "__main__":
 
     console = melee.Console(
         path=DOLPHIN_APP,
-        slippi_address="127.0.0.1",
+        is_dolphin=True,
+        tmp_home_directory=True,
+        copy_home_directory=False,
+        blocking_input=False,
+        online_delay=0,
+        setup_gecko_codes=True,
         fullscreen=False,
-        blocking_input=True,
+        gfx_backend="",
+        disable_audio=False,
+        use_exi_inputs=False,
+        enable_ffw=False,
     )
-    ports = [1, 4]
+    ports = [1, 2]
     controllers = {p: melee.Controller(console, p) for p in ports}
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -840,7 +942,16 @@ if __name__ == "__main__":
             first_tensors = _process_one_row(row)
             for _ in range(ROLL_WIN - 1):
                 _frame_cache.appendleft({k: v.clone() for k, v in first_tensors.items()})
+            log.info("Pre-filled _frame_cache to %d frames", len(_frame_cache))
         if len(rows) >= 1:
+            if _step_ct % 120 == 0:
+                fb_btns = [row.get(f"self_btn_{b.name}", -1) for b in IDX_TO_BUTTON[:5]]
+                fb_mx = row.get("self_main_x", -999)
+                ps_btns = "n/a"
+                if _prev_sent is not None:
+                    ps_btns = [_prev_sent.get(f"btn_{b.name}", -1) for b in IDX_TO_BUTTON[:5]]
+                log.info("FB_CHECK step=%d: row_btns=%s row_mx=%.4f _prev_sent_btns=%s",
+                         _step_ct, fb_btns, fb_mx, ps_btns)
             pred = run_inference(row)
             _prev_pred = pred
 
