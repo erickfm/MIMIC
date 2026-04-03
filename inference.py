@@ -8,16 +8,17 @@
 
 import argparse
 import csv
+import json
 import logging
 import math
 import os
+import random
 import signal
 import sys
 import time
 from collections import deque
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-import random
 
 import melee
 import numpy as np
@@ -113,7 +114,6 @@ if "stick_centers" in ckpt:
     log.info("Loaded cluster centers from checkpoint: %d stick, %d shoulder",
              len(_stick_centers), len(_shoulder_centers))
 else:
-    import json
     _cluster_dirs = [Path(args.data_dir)] if args.data_dir else []
     _cluster_dirs += [Path("./data/full"), Path("./data"), Path("./data/subset")]
     for _sd in _cluster_dirs:
