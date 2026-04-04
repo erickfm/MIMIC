@@ -61,6 +61,8 @@ parser.add_argument("--deterministic", action="store_true",
                     help="Use threshold-based button firing instead of stochastic sampling")
 parser.add_argument("--data-dir", type=str, default=None,
                     help="Directory for cat_maps.json / norm_stats.json / stick_clusters.json")
+parser.add_argument("--hal-stats", type=str, default=None,
+                    help="Path to HAL's stats.json for exact HAL normalization with player-specific values")
 parser.add_argument("--diag-log-all", action="store_true",
                     help="Save every raw row dict to a pickle for closedloop_debug Phase 2")
 args = parser.parse_args()
@@ -139,37 +141,93 @@ _ctrl_combos: list = []
 _n_ctrl_combos: int = getattr(cfg, 'n_controller_combos', 5)
 
 if _hal_ctrl_enc:
-    # Load combo map from checkpoint or data dir
-    if "controller_combos" in ckpt:
-        _ctrl_combos = [tuple(c) for c in ckpt["controller_combos"]]
-        _ctrl_combo_map = {c: i for i, c in enumerate(_ctrl_combos)}
-        _n_ctrl_combos = len(_ctrl_combos)
+    if args.hal_stats:
+        # HAL exact mode: use HAL's 5-class button ordering (A=0, B=1, Jump=2, Z=3, NONE=4)
+        _ctrl_combo_map = {
+            (1,0,0,0,0): 0, (0,1,0,0,0): 1, (0,0,1,0,0): 2, (0,0,0,1,0): 3,
+            (0,0,0,0,0): 4, (0,0,0,0,1): 4,  # shoulder-only → NONE
+            (1,0,0,0,1): 0, (0,1,0,0,1): 1, (0,0,1,0,1): 2, (0,0,0,1,1): 3,
+        }
+        _ctrl_combos = [(1,0,0,0,0), (0,1,0,0,0), (0,0,1,0,0), (0,0,0,1,0), (0,0,0,0,0)]
+        _n_ctrl_combos = 5
+        log.info("HAL exact button ordering: A=0, B=1, Jump=2, Z=3, NONE=4")
     else:
-        _combo_dirs = [Path(args.data_dir)] if args.data_dir else []
-        _combo_dirs += [Path("./data"), Path("./data/full")]
-        for _cd in _combo_dirs:
-            _cc_path = _cd / "controller_combos.json"
-            if _cc_path.exists():
-                _ctrl_combos, _ctrl_combo_map = F.load_controller_combos(_cd)
-                _n_ctrl_combos = len(_ctrl_combos)
-                log.info("Loaded %d controller combos from %s", _n_ctrl_combos, _cc_path)
-                break
-    if not _ctrl_combo_map:
-        log.error("--hal-controller-encoding but no controller_combos.json found")
-        sys.exit(1)
+        # Load combo map from checkpoint or data dir
+        if "controller_combos" in ckpt:
+            _ctrl_combos = [tuple(c) for c in ckpt["controller_combos"]]
+            _ctrl_combo_map = {c: i for i, c in enumerate(_ctrl_combos)}
+            _n_ctrl_combos = len(_ctrl_combos)
+        else:
+            _combo_dirs = [Path(args.data_dir)] if args.data_dir else []
+            _combo_dirs += [Path("./data"), Path("./data/full")]
+            for _cd in _combo_dirs:
+                _cc_path = _cd / "controller_combos.json"
+                if _cc_path.exists():
+                    _ctrl_combos, _ctrl_combo_map = F.load_controller_combos(_cd)
+                    _n_ctrl_combos = len(_ctrl_combos)
+                    log.info("Loaded %d controller combos from %s", _n_ctrl_combos, _cc_path)
+                    break
+        if not _ctrl_combo_map:
+            log.error("--hal-controller-encoding but no controller_combos.json found")
+            sys.exit(1)
     log.info("HAL controller encoding: %d button combos, dim=%d",
              _n_ctrl_combos, 37 + 9 + _n_ctrl_combos + 3)
 
 # ── HAL normalization ────────────────────────────────────────────────────
-_hal_norm: dict = None
-if getattr(cfg, 'encoder_type', '') == 'hal_flat':
+# Two modes:
+#   --hal-stats <path>  → Load HAL's actual stats.json with player-specific values
+#                         and exact per-feature transforms (best for HAL compatibility)
+#   (fallback)          → Load hal_norm.json via features.load_hal_norm() (legacy)
+
+_hal_norm: dict = None           # Legacy: {feature: {transform, min, max, mean, std}}
+_hal_stats_p1: dict = None       # New: player-1 stats for self features
+_hal_stats_p2: dict = None       # New: player-2 stats for opp features
+_hal_use_exact_stats = False     # Flag: use HAL's exact player-specific normalization
+
+# HAL's exact transform per feature (from hal/preprocess/input_configs.py baseline())
+_HAL_TRANSFORMS = {
+    "percent": "normalize", "stock": "normalize", "facing": "normalize",
+    "invulnerable": "normalize", "jumps_left": "normalize",
+    "on_ground": "normalize", "shield_strength": "invert_normalize",
+    "pos_x": "standardize", "pos_y": "standardize",
+    "position_x": "standardize", "position_y": "standardize",
+    "invuln_left": "normalize",
+}
+
+def _hal_exact_transform(val: float, stats: dict, feature: str) -> float:
+    """Apply HAL's exact normalization transform for a feature."""
+    t = _HAL_TRANSFORMS.get(feature)
+    if t == "normalize":
+        return 2.0 * (val - stats["min"]) / (stats["max"] - stats["min"]) - 1.0 if stats["max"] != stats["min"] else 0.0
+    elif t == "invert_normalize":
+        return 2.0 * (stats["max"] - val) / (stats["max"] - stats["min"]) - 1.0 if stats["max"] != stats["min"] else 0.0
+    elif t == "standardize":
+        return (val - stats["mean"]) / stats["std"] if stats["std"] != 0 else 0.0
+    return val
+
+if args.hal_stats:
+    _hal_stats_path = Path(args.hal_stats)
+    if _hal_stats_path.exists():
+        with open(_hal_stats_path) as _f:
+            _raw_hal_stats = json.load(_f)
+        _hal_stats_p1 = {k.removeprefix("p1_"): _raw_hal_stats[k]
+                         for k in _raw_hal_stats if k.startswith("p1_")}
+        _hal_stats_p2 = {k.removeprefix("p2_"): _raw_hal_stats[k]
+                         for k in _raw_hal_stats if k.startswith("p2_")}
+        _hal_use_exact_stats = True
+        log.info("Loaded HAL exact stats from %s (%d p1, %d p2 features)",
+                 _hal_stats_path, len(_hal_stats_p1), len(_hal_stats_p2))
+    else:
+        log.error("--hal-stats path not found: %s", _hal_stats_path)
+        sys.exit(1)
+elif getattr(cfg, 'encoder_type', '') == 'hal_flat':
     _search = [Path(args.data_dir)] if args.data_dir else []
     _search += [Path("./data"), Path("./data/full"), Path("./data/fox_public_shards")]
     for _sd in _search:
         _hn_path = _sd / "hal_norm.json"
         if _hn_path.exists():
             _hal_norm = F.load_hal_norm(_sd)
-            log.info("Loaded HAL normalization for %d features from %s",
+            log.info("Loaded HAL normalization for %d features from %s (legacy mode)",
                      len(_hal_norm), _hn_path)
             break
     if _hal_norm is None:
@@ -423,38 +481,50 @@ def _process_one_row(row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
             raw = 0
         r[col] = m.get(raw, m.get(int(raw), 0))
 
-    for col, (mean, std) in norm_stats.items():
-        if col in r:
-            v = r[col]
-            if v is None or (isinstance(v, float) and not math.isfinite(v)):
-                v = 0.0
-            v = float(v)
-            # Use HAL normalization for matching columns
-            if _hal_norm:
+    if _hal_use_exact_stats:
+        # HAL exact mode: use player-specific stats with correct per-feature transforms
+        for col in list(r.keys()):
+            for prefix, stats_dict in (("self_", _hal_stats_p1), ("opp_", _hal_stats_p2)):
+                if col.startswith(prefix):
+                    suffix = col[len(prefix):]
+                    if suffix in stats_dict and suffix in _HAL_TRANSFORMS:
+                        v = r[col]
+                        if v is not None and isinstance(v, (int, float)) and math.isfinite(v):
+                            r[col] = _hal_exact_transform(float(v), stats_dict[suffix], suffix)
+                    break
+    else:
+        for col, (mean, std) in norm_stats.items():
+            if col in r:
+                v = r[col]
+                if v is None or (isinstance(v, float) and not math.isfinite(v)):
+                    v = 0.0
+                v = float(v)
+                # Use HAL normalization for matching columns
+                if _hal_norm:
+                    for prefix in ("self_", "opp_"):
+                        if col.startswith(prefix):
+                            suffix = col[len(prefix):]
+                            if suffix in _hal_norm:
+                                r[col] = F.hal_normalize(v, _hal_norm[suffix])
+                                break
+                    else:
+                        r[col] = max(-10.0, min(10.0, (v - mean) / std))
+                else:
+                    r[col] = max(-10.0, min(10.0, (v - mean) / std))
+
+        # HAL normalization for columns NOT in norm_stats (e.g. flags: on_ground, facing, invulnerable)
+        if _hal_norm:
+            for col in list(r.keys()):
+                if col in norm_stats:
+                    continue  # already handled above
                 for prefix in ("self_", "opp_"):
                     if col.startswith(prefix):
                         suffix = col[len(prefix):]
                         if suffix in _hal_norm:
-                            r[col] = F.hal_normalize(v, _hal_norm[suffix])
-                            break
-                else:
-                    r[col] = max(-10.0, min(10.0, (v - mean) / std))
-            else:
-                r[col] = max(-10.0, min(10.0, (v - mean) / std))
-
-    # HAL normalization for columns NOT in norm_stats (e.g. flags: on_ground, facing, invulnerable)
-    if _hal_norm:
-        for col in list(r.keys()):
-            if col in norm_stats:
-                continue  # already handled above
-            for prefix in ("self_", "opp_"):
-                if col.startswith(prefix):
-                    suffix = col[len(prefix):]
-                    if suffix in _hal_norm:
-                        v = r[col]
-                        if v is not None and isinstance(v, (int, float)) and math.isfinite(v):
-                            r[col] = F.hal_normalize(float(v), _hal_norm[suffix])
-                    break
+                            v = r[col]
+                            if v is not None and isinstance(v, (int, float)) and math.isfinite(v):
+                                r[col] = F.hal_normalize(float(v), _hal_norm[suffix])
+                        break
 
     state: Dict[str, torch.Tensor] = {}
     for key, ftype, cols in _tensor_layout:
