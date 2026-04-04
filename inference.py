@@ -37,7 +37,7 @@ parser.add_argument("--dolphin-path", type=str,
 parser.add_argument("--iso-path", type=str,
                     default=os.getenv("ISO_PATH", ""),
                     help="Path to Melee ISO")
-parser.add_argument("--cpu-level", type=int, default=7,
+parser.add_argument("--cpu-level", type=int, default=9,
                     help="CPU level for opponent (0 = human/bot, 1-9 = CPU)")
 parser.add_argument("--character", type=str, default="FALCO",
                     help="Bot character (e.g. FALCO, FOX, MARTH)")
@@ -53,6 +53,8 @@ parser.add_argument("--no-pred-feedback", action="store_true",
                     help="Use game controller readback instead of model predictions for feedback")
 parser.add_argument("--temperature", type=float, default=1.0,
                     help="Temperature for stick/shoulder cluster sampling (1.0=argmax, <1=sharper, >1=softer)")
+parser.add_argument("--btn-temperature", type=float, default=1.0,
+                    help="Temperature for button softmax (>1=flatter, helps break NONE equilibrium)")
 parser.add_argument("--btn-threshold", type=float, default=0.2,
                     help="Sigmoid threshold for button presses (default: 0.2)")
 parser.add_argument("--deterministic", action="store_true",
@@ -157,6 +159,21 @@ if _hal_ctrl_enc:
         sys.exit(1)
     log.info("HAL controller encoding: %d button combos, dim=%d",
              _n_ctrl_combos, 37 + 9 + _n_ctrl_combos + 3)
+
+# ── HAL normalization ────────────────────────────────────────────────────
+_hal_norm: dict = None
+if getattr(cfg, 'encoder_type', '') == 'hal_flat':
+    _search = [Path(args.data_dir)] if args.data_dir else []
+    _search += [Path("./data"), Path("./data/full"), Path("./data/fox_public_shards")]
+    for _sd in _search:
+        _hn_path = _sd / "hal_norm.json"
+        if _hn_path.exists():
+            _hal_norm = F.load_hal_norm(_sd)
+            log.info("Loaded HAL normalization for %d features from %s",
+                     len(_hal_norm), _hn_path)
+            break
+    if _hal_norm is None:
+        log.warning("hal_flat encoder but no hal_norm.json found — using z-score normalization")
 
 # ── Normalization stats + categorical maps ───────────────────────────────
 
@@ -411,7 +428,33 @@ def _process_one_row(row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
             v = r[col]
             if v is None or (isinstance(v, float) and not math.isfinite(v)):
                 v = 0.0
-            r[col] = max(-10.0, min(10.0, (float(v) - mean) / std))
+            v = float(v)
+            # Use HAL normalization for matching columns
+            if _hal_norm:
+                for prefix in ("self_", "opp_"):
+                    if col.startswith(prefix):
+                        suffix = col[len(prefix):]
+                        if suffix in _hal_norm:
+                            r[col] = F.hal_normalize(v, _hal_norm[suffix])
+                            break
+                else:
+                    r[col] = max(-10.0, min(10.0, (v - mean) / std))
+            else:
+                r[col] = max(-10.0, min(10.0, (v - mean) / std))
+
+    # HAL normalization for columns NOT in norm_stats (e.g. flags: on_ground, facing, invulnerable)
+    if _hal_norm:
+        for col in list(r.keys()):
+            if col in norm_stats:
+                continue  # already handled above
+            for prefix in ("self_", "opp_"):
+                if col.startswith(prefix):
+                    suffix = col[len(prefix):]
+                    if suffix in _hal_norm:
+                        v = r[col]
+                        if v is not None and isinstance(v, (int, float)) and math.isfinite(v):
+                            r[col] = F.hal_normalize(float(v), _hal_norm[suffix])
+                    break
 
     state: Dict[str, torch.Tensor] = {}
     for key, ftype, cols in _tensor_layout:
@@ -579,7 +622,7 @@ def press_output(ctrl: melee.Controller,
     hal_buttons = _hal_ctrl_enc or ("shoulder_val" in pred and pred["btn_logits"].shape[-1] != 12)
 
     if hal_buttons:
-        btn_probs = torch.softmax(pred["btn_logits"].float(), dim=-1)
+        btn_probs = torch.softmax(pred["btn_logits"].float() / args.btn_temperature, dim=-1)
         btn_idx = int(torch.multinomial(btn_probs, 1)) if sample else int(torch.argmax(btn_probs))
         pressed = []
         fired = [False] * len(IDX_TO_BUTTON)

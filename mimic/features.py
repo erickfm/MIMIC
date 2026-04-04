@@ -333,6 +333,53 @@ CDIR_5_TO_9_MAP = np.array([0, 4, 3, 2, 1], dtype=np.int64)
 
 
 # ---------------------------------------------------------------------------
+# HAL-style normalization
+# ---------------------------------------------------------------------------
+
+def load_hal_norm(data_dir: Path) -> dict:
+    """Load hal_norm.json → dict of {feature_suffix: {transform, min, max, mean, std}}."""
+    path = Path(data_dir) / "hal_norm.json"
+    with open(path) as f:
+        return json.load(f)["features"]
+
+
+def hal_normalize(raw_value: float, params: dict) -> float:
+    """Apply HAL's normalization to a raw value."""
+    t = params["transform"]
+    if t == "standardize":
+        return (raw_value - params["mean"]) / params["std"] if params["std"] else 0.0
+    elif t == "normalize":
+        rng = params["max"] - params["min"]
+        return 2 * (raw_value - params["min"]) / rng - 1 if rng else 0.0
+    elif t == "invert_normalize":
+        rng = params["max"] - params["min"]
+        return 2 * (params["max"] - raw_value) / rng - 1 if rng else 0.0
+    return raw_value
+
+
+def hal_normalize_array(values: np.ndarray, params: dict) -> np.ndarray:
+    """Vectorized HAL normalization for a 1D array."""
+    t = params["transform"]
+    mn, mx = float(params["min"]), float(params["max"])
+    rng = mx - mn
+    if t == "standardize":
+        std = float(params["std"])
+        return (values - float(params["mean"])) / std if std else np.zeros_like(values)
+    elif t == "normalize":
+        return 2 * (values - mn) / rng - 1 if rng else np.zeros_like(values)
+    elif t == "invert_normalize":
+        return 2 * (mx - values) / rng - 1 if rng else np.zeros_like(values)
+    return values
+
+
+# Column suffixes in the order they appear in self_numeric (hal_minimal=True)
+HAL_NUMERIC_COLS = ["pos_x", "pos_y", "percent", "stock", "jumps_left",
+                    "invuln_left", "shield_strength"]
+# Flag indices [0, 2, 3] from the 5-flag tensor → on_ground, facing, invulnerable
+HAL_FLAG_COLS = ["on_ground", "facing", "invulnerable"]
+
+
+# ---------------------------------------------------------------------------
 # HAL-style controller encoding
 # ---------------------------------------------------------------------------
 

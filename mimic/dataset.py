@@ -126,21 +126,22 @@ class StreamingMeleeDataset(IterableDataset):
                 state = {k: v[i] for k, v in shard["states"].items()}
                 target = {k: v[i] for k, v in shard["targets"].items()}
 
-                # HAL-style: encode controller as one-hot vector
-                if self._hal_ctrl_enc and self._combo_map is not None:
-                    if "self_buttons" in state and "self_analog" in state:
-                        onehot = encode_controller_onehot(
-                            state["self_buttons"].numpy(),
-                            state["self_analog"].numpy(),
-                            state["self_c_dir"].numpy(),
-                            self._combo_map,
-                            self._n_combos,
-                            norm_stats=self.norm_stats,
-                        )
-                        state["self_controller"] = torch.from_numpy(onehot)
-                        del state["self_buttons"]
-                        del state["self_analog"]
-                        del state["self_c_dir"]
+                # HAL-style: encode controller as one-hot vector (only if not pre-encoded)
+                if (self._hal_ctrl_enc and self._combo_map is not None
+                        and "self_controller" not in state
+                        and "self_buttons" in state and "self_analog" in state):
+                    onehot = encode_controller_onehot(
+                        state["self_buttons"].numpy(),
+                        state["self_analog"].numpy(),
+                        state["self_c_dir"].numpy(),
+                        self._combo_map,
+                        self._n_combos,
+                        norm_stats=self.norm_stats,
+                    )
+                    state["self_controller"] = torch.from_numpy(onehot)
+                    del state["self_buttons"]
+                    del state["self_analog"]
+                    del state["self_c_dir"]
 
                 yield state, target
 
@@ -192,28 +193,32 @@ class StreamingMeleeDataset(IterableDataset):
                 target = {k: v[abs_start + R: abs_start + W + R] for k, v in targets.items()}
                 # HAL-style: shift self-controller by -1 so position i sees frame i-1's controller
                 if self._controller_offset and W > 1:
-                    for ck in ("self_buttons", "self_analog", "self_c_dir"):
+                    # Shift whichever controller keys exist (raw or pre-encoded)
+                    ctrl_keys = (["self_controller"] if "self_controller" in state
+                                 else ["self_buttons", "self_analog", "self_c_dir"])
+                    for ck in ctrl_keys:
                         if ck in state:
                             orig = state[ck]
                             shifted = torch.zeros_like(orig)
                             shifted[1:] = orig[:-1]
                             state[ck] = shifted
 
-                # HAL-style: encode controller as one-hot vector
-                if self._hal_ctrl_enc and self._combo_map is not None:
-                    if "self_buttons" in state and "self_analog" in state:
-                        onehot = encode_controller_onehot(
-                            state["self_buttons"].numpy(),
-                            state["self_analog"].numpy(),
-                            state["self_c_dir"].numpy(),
-                            self._combo_map,
-                            self._n_combos,
-                            norm_stats=self.norm_stats,
-                        )
-                        state["self_controller"] = torch.from_numpy(onehot)
-                        del state["self_buttons"]
-                        del state["self_analog"]
-                        del state["self_c_dir"]
+                # HAL-style: encode controller as one-hot vector (only if not pre-encoded in shard)
+                if (self._hal_ctrl_enc and self._combo_map is not None
+                        and "self_controller" not in state
+                        and "self_buttons" in state and "self_analog" in state):
+                    onehot = encode_controller_onehot(
+                        state["self_buttons"].numpy(),
+                        state["self_analog"].numpy(),
+                        state["self_c_dir"].numpy(),
+                        self._combo_map,
+                        self._n_combos,
+                        norm_stats=self.norm_stats,
+                    )
+                    state["self_controller"] = torch.from_numpy(onehot)
+                    del state["self_buttons"]
+                    del state["self_analog"]
+                    del state["self_c_dir"]
 
                 yield state, target
 

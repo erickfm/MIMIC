@@ -435,7 +435,8 @@ def preprocess_arrays(
     norm_stats: Dict[str, Tuple[float, float]],
     cat_maps: Dict[str, Dict[int, int]],
     n: int,
-) -> None:
+    hal_norm: Dict = None,
+) -> Optional[Dict]:
     """In-place preprocessing on pre-allocated arrays (replaces preprocess_df +
     apply_normalization).
 
@@ -494,10 +495,57 @@ def preprocess_arrays(
                 arrays[char_col][:n] > 0
             ).astype(np.float32)
 
+    # 5.5. Save raw analog/button/c_dir for controller encoding (before normalization)
+    _raw_ctrl_data = None
+    if hal_norm is not None:
+        _raw_ctrl_data = {}
+        for prefix in ("self", "opp"):
+            btn_key = f"{prefix}_buttons"
+            analog_cols = [f"{prefix}_main_x", f"{prefix}_main_y",
+                          f"{prefix}_l_shldr", f"{prefix}_r_shldr"]
+            cdir_col = f"{prefix}_c_dir"
+
+            if btn_key in arrays:
+                _raw_ctrl_data[f"{prefix}_buttons"] = arrays[btn_key][:n].copy()
+
+            analog_raw = np.zeros((n, 4), dtype=np.float32)
+            for i, col in enumerate(analog_cols):
+                if col in schema.col_to_pos:
+                    key, idx = schema.col_to_pos[col]
+                    analog_raw[:, i] = arrays[key][:n, idx].copy()
+            _raw_ctrl_data[f"{prefix}_analog"] = analog_raw
+
+            if cdir_col in arrays:
+                _raw_ctrl_data[f"{prefix}_c_dir"] = arrays[cdir_col][:n].copy()
+
     # 6. Normalization
     for col, (mean, std) in norm_stats.items():
-        if col in schema.col_to_pos:
-            key, idx = schema.col_to_pos[col]
+        if col not in schema.col_to_pos:
+            continue
+        key, idx = schema.col_to_pos[col]
+
+        # Check if HAL normalization applies to this column
+        hal_params = None
+        if hal_norm:
+            # col is like "self_pos_x" or "opp_facing" — strip prefix to match hal_norm keys
+            for prefix in ("self_", "opp_", "self_nana_", "opp_nana_"):
+                if col.startswith(prefix):
+                    suffix = col[len(prefix):]
+                    if suffix in hal_norm:
+                        hal_params = hal_norm[suffix]
+                    break
+
+        if hal_params is not None:
+            from mimic.features import hal_normalize_array
+            if idx is not None:
+                arrays[key][:n, idx] = hal_normalize_array(
+                    arrays[key][:n, idx].astype(np.float32), hal_params
+                ).astype(np.float32)
+            else:
+                arrays[key][:n] = hal_normalize_array(
+                    arrays[key][:n].astype(np.float32), hal_params
+                ).astype(np.float32)
+        else:
             if idx is not None:
                 arrays[key][:n, idx] = (
                     (arrays[key][:n, idx] - mean) / std
@@ -506,6 +554,8 @@ def preprocess_arrays(
                 arrays[key][:n] = (
                     (arrays[key][:n].astype(np.float32) - mean) / std
                 ).astype(np.float32)
+
+    return _raw_ctrl_data
 
 
 # --- Target building --------------------------------------------------------
@@ -577,6 +627,9 @@ def extract_replay(
     cat_maps: Dict[str, Dict[int, int]],
     stick_centers: Optional[np.ndarray],
     shoulder_centers: Optional[np.ndarray],
+    hal_norm: Dict = None,
+    combo_map: Dict = None,
+    n_combos: int = 5,
 ) -> Optional[List[Tuple[Dict[str, torch.Tensor],
                           Dict[str, torch.Tensor], int]]]:
     """Extract a single .slp replay into two perspective tensor tuples.
@@ -586,13 +639,15 @@ def extract_replay(
     try:
         return _extract_replay_inner(
             slp_path, schema, norm_stats, cat_maps,
-            stick_centers, shoulder_centers)
+            stick_centers, shoulder_centers, hal_norm,
+            combo_map, n_combos)
     except Exception:
         return None
 
 
 def _extract_replay_inner(
     slp_path, schema, norm_stats, cat_maps, stick_centers, shoulder_centers,
+    hal_norm=None, combo_map=None, n_combos=5,
 ):
     console = Console(is_dolphin=False, path=slp_path, allow_old_version=True)
     console.connect()
@@ -771,20 +826,43 @@ def _extract_replay_inner(
 
     # Preprocess both perspectives (before filling duplicates, so that
     # duplicate columns get the already-normalized values)
-    preprocess_arrays(p1_arrays, p1_c_tmps, schema, norm_stats, cat_maps, n_frames)
-    preprocess_arrays(p2_arrays, p2_c_tmps, schema, norm_stats, cat_maps, n_frames)
+    p1_raw_ctrl = preprocess_arrays(p1_arrays, p1_c_tmps, schema, norm_stats, cat_maps, n_frames, hal_norm)
+    p2_raw_ctrl = preprocess_arrays(p2_arrays, p2_c_tmps, schema, norm_stats, cat_maps, n_frames, hal_norm)
 
     # Fill duplicate column positions (nana numeric extras — copies the
     # normalized values from the original positions)
     schema.fill_duplicates(p1_arrays, n_frames)
     schema.fill_duplicates(p2_arrays, n_frames)
 
+    # Controller combo map: prefer parameter, fall back to worker state
+    _combo_map_local = combo_map
+    _n_combos_local = n_combos
+    if _combo_map_local is None and _W:
+        _combo_map_local = _W.get("combo_map")
+        _n_combos_local = _W.get("n_combos", 5)
+
     # Convert to tensors
     results = []
-    for arr_set, c_tmps in [(p1_arrays, p1_c_tmps), (p2_arrays, p2_c_tmps)]:
+    for arr_set, c_tmps, raw_ctrl in [(p1_arrays, p1_c_tmps, p1_raw_ctrl),
+                                       (p2_arrays, p2_c_tmps, p2_raw_ctrl)]:
         states = schema.arrays_to_state_tensors(arr_set, n_frames)
         targets = build_targets_from_arrays(
             arr_set, schema, norm_stats, stick_centers, shoulder_centers, n_frames)
+
+        # Bake controller encoding into state tensors
+        if raw_ctrl is not None and _combo_map_local is not None:
+            from mimic.features import encode_controller_onehot
+            onehot = encode_controller_onehot(
+                raw_ctrl["self_buttons"],
+                raw_ctrl["self_analog"],
+                raw_ctrl["self_c_dir"],
+                _combo_map_local, _n_combos_local,
+                norm_stats=None,  # values are already raw
+            )
+            states["self_controller"] = torch.from_numpy(onehot)
+            for k in ("self_buttons", "self_analog", "self_c_dir"):
+                states.pop(k, None)
+
         results.append((states, targets, n_frames))
 
     return results
@@ -821,7 +899,8 @@ def flush_shard(buf_states, buf_targets, buf_offsets, prefix, shard_idx,
 _W: Dict = {}
 
 
-def _init_worker(schema, norm_stats, cat_maps, stick_centers, shoulder_centers):
+def _init_worker(schema, norm_stats, cat_maps, stick_centers, shoulder_centers,
+                  hal_norm=None, combo_map=None, n_combos=5):
     import resource
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
     resource.setrlimit(resource.RLIMIT_NOFILE, (min(hard, 65536), hard))
@@ -830,6 +909,9 @@ def _init_worker(schema, norm_stats, cat_maps, stick_centers, shoulder_centers):
     _W["cat_maps"] = cat_maps
     _W["stick_centers"] = stick_centers
     _W["shoulder_centers"] = shoulder_centers
+    _W["hal_norm"] = hal_norm
+    _W["combo_map"] = combo_map
+    _W["n_combos"] = n_combos
 
 
 def _worker_fn(slp_path: str):
@@ -840,7 +922,8 @@ def _worker_fn(slp_path: str):
     """
     result = extract_replay(
         slp_path, _W["schema"], _W["norm_stats"], _W["cat_maps"],
-        _W["stick_centers"], _W["shoulder_centers"],
+        _W["stick_centers"], _W["shoulder_centers"], _W.get("hal_norm"),
+        _W.get("combo_map"), _W.get("n_combos", 5),
     )
     if result is None:
         return None
@@ -868,14 +951,16 @@ def _numpy_to_torch(result):
 
 @contextmanager
 def _make_result_iter(slp_files, schema, norm_stats, cat_maps,
-                      stick_centers, shoulder_centers, n_workers):
+                      stick_centers, shoulder_centers, n_workers,
+                      hal_norm=None, combo_map=None, n_combos=5):
     """Yield an iterator of extract_replay results."""
     if n_workers > 1:
         pool = mp.Pool(
             n_workers,
             initializer=_init_worker,
             initargs=(schema, norm_stats, cat_maps,
-                      stick_centers, shoulder_centers),
+                      stick_centers, shoulder_centers, hal_norm,
+                      combo_map, n_combos),
             maxtasksperchild=500,
         )
         try:
@@ -888,7 +973,8 @@ def _make_result_iter(slp_files, schema, norm_stats, cat_maps,
             for path in slp_files:
                 yield extract_replay(
                     path, schema, norm_stats, cat_maps,
-                    stick_centers, shoulder_centers,
+                    stick_centers, shoulder_centers, hal_norm,
+                    combo_map, n_combos,
                 )
         yield _serial()
 
@@ -1015,12 +1101,24 @@ def create_tensor_shards(
     val_frac: float,
     seed: int,
     n_workers: int = 0,
+    hal_norm: Dict = None,
 ) -> Dict:
     schema, norm_stats, cat_maps, stick_centers, shoulder_centers = (
         _load_prereqs(meta_dir))
     splits = _get_split_files(slp_files, val_frac, seed)
     staging_dir.mkdir(parents=True, exist_ok=True)
     shard_bytes = int(shard_gb * 1e9)
+
+    # Load controller combos if using HAL normalization
+    combo_map_local = None
+    n_combos_local = 5
+    if hal_norm is not None:
+        cc_path = meta_dir / "controller_combos.json"
+        if cc_path.exists():
+            from mimic.features import load_controller_combos
+            _, combo_map_local = load_controller_combos(meta_dir)
+            n_combos_local = len(combo_map_local)
+            print(f"  Controller encoding: {n_combos_local} combos from {cc_path}")
 
     results = {}
     for split, split_files in splits.items():
@@ -1032,7 +1130,7 @@ def create_tensor_shards(
         shard_infos = _tensorize_split(
             split_files, split, staging_dir, shard_bytes,
             schema, norm_stats, cat_maps, stick_centers, shoulder_centers,
-            n_workers,
+            n_workers, hal_norm, combo_map_local, n_combos_local,
         )
         results[split] = shard_infos
 
@@ -1046,6 +1144,7 @@ def create_tensor_shards(
 def _tensorize_split(
     split_files, split, out_dir, shard_bytes,
     schema, norm_stats, cat_maps, stick_centers, shoulder_centers, n_workers,
+    hal_norm=None, combo_map=None, n_combos=5,
 ):
     buf_states: List = []
     buf_targets: List = []
@@ -1058,7 +1157,8 @@ def _tensorize_split(
 
     with _make_result_iter(
         split_files, schema, norm_stats, cat_maps,
-        stick_centers, shoulder_centers, n_workers,
+        stick_centers, shoulder_centers, n_workers, hal_norm,
+        combo_map, n_combos,
     ) as result_iter:
         for raw_result in result_iter:
             result = _numpy_to_torch(raw_result) if n_workers > 1 else raw_result
@@ -1112,6 +1212,7 @@ def create_and_stream_upload(
     clean: bool,
     n_workers: int = 0,
     resume: bool = False,
+    hal_norm: Dict = None,
 ) -> Dict:
     from huggingface_hub import HfApi
     api = HfApi()
@@ -1129,6 +1230,15 @@ def create_and_stream_upload(
 
     staging_dir.mkdir(parents=True, exist_ok=True)
     shard_bytes = int(shard_gb * 1e9)
+
+    combo_map_local = None
+    n_combos_local = 5
+    if hal_norm is not None:
+        cc_path = meta_dir / "controller_combos.json"
+        if cc_path.exists():
+            from mimic.features import load_controller_combos
+            _, combo_map_local = load_controller_combos(meta_dir)
+            n_combos_local = len(combo_map_local)
 
     if not resume:
         print(f"\n=== Uploading metadata ===")
@@ -1245,7 +1355,8 @@ def _tensorize_split_streaming(
 
     with _make_result_iter(
         split_files, schema, norm_stats, cat_maps,
-        stick_centers, shoulder_centers, n_workers,
+        stick_centers, shoulder_centers, n_workers, hal_norm,
+        combo_map_local, n_combos_local,
     ) as result_iter:
         t_split = time.time()
         for raw_result in result_iter:
@@ -1347,6 +1458,8 @@ def main():
                         help="Resume an interrupted --stream run")
     parser.add_argument("--workers", type=int, default=0,
                         help="Parallel workers (0=auto)")
+    parser.add_argument("--hal-norm", type=str, default=None,
+                        help="Path to hal_norm.json for HAL-style normalization")
     args = parser.parse_args()
 
     if args.resume and args.clean:
@@ -1384,6 +1497,12 @@ def main():
         slp_files = _find_slp_files(args.slp_dir)
         print(f"Found {len(slp_files)} .slp files in {args.slp_dir}")
 
+        hal_norm = None
+        if args.hal_norm:
+            with open(args.hal_norm) as f:
+                hal_norm = json.load(f)["features"]
+            print(f"  HAL normalization: {len(hal_norm)} features from {args.hal_norm}")
+
         if not slp_files:
             print("No .slp files found. Exiting.")
             return
@@ -1393,13 +1512,13 @@ def main():
             create_and_stream_upload(
                 slp_files, meta_dir, staging_dir, args.shard_gb,
                 args.val_frac, args.seed, args.repo, args.clean, n_workers,
-                resume=args.resume,
+                resume=args.resume, hal_norm=hal_norm,
             )
         else:
             print(f"\n=== Creating tensor shards ===")
             manifest = create_tensor_shards(
                 slp_files, meta_dir, staging_dir, args.shard_gb,
-                args.val_frac, args.seed, n_workers,
+                args.val_frac, args.seed, n_workers, hal_norm,
             )
             print(f"\n=== Staging metadata ===")
             stage_metadata(meta_dir, staging_dir)
