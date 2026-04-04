@@ -185,19 +185,58 @@ model.load_state_dict(state_dict)
 model.eval()
 log.info("Model loaded: %d params", sum(p.numel() for p in model.parameters()))
 
-# ── Load HAL normalization + action mapping ──────────────────────────────────
+# ── Load HAL's actual normalization stats ─────────────────────────────────────
 
-hal_norm = load_hal_norm(Path(args.data_dir))
-log.info("HAL normalization: %d features", len(hal_norm))
+# Load HAL's own stats.json — the EXACT stats used during training.
+# Previously we used hal_norm.json which had wrong values (Fox-only data).
+HAL_STATS_PATH = Path("/home/erick/projects/hal/hal/data/stats.json")
+with open(HAL_STATS_PATH) as _f:
+    _raw_stats = json.load(_f)
 
-# HAL action mapping: same as MIMIC (melee.Action enum → dense index)
-from mimic.cat_maps import ACTION_MAP, CHARACTER_MAP, STAGE_MAP
+class _Stats:
+    """Mimics HAL's FeatureStats(mean, std, min, max)."""
+    def __init__(self, d):
+        self.mean = d["mean"]
+        self.std = d["std"]
+        self.min = d["min"]
+        self.max = d["max"]
 
-# HAL uses its own character/stage mappings — but they should be compatible
-# HAL: IDX_BY_CHARACTER = {char: i for i, char in enumerate(char for char in Character if char.name in INCLUDED_CHARACTERS)}
-# MIMIC: CHARACTER_MAP = {c.value: i for i, c in enumerate(Character)}
-# These differ! HAL only includes 27 characters, MIMIC includes all.
-# We need HAL's mapping.
+# Player-specific stats — HAL uses p1 stats for ego, p2 stats for opponent
+HAL_P1_STATS = {k.removeprefix("p1_"): _Stats(_raw_stats[k])
+                for k in _raw_stats if k.startswith("p1_")}
+HAL_P2_STATS = {k.removeprefix("p2_"): _Stats(_raw_stats[k])
+                for k in _raw_stats if k.startswith("p2_")}
+
+# HAL's exact transforms per feature (from hal/preprocess/input_configs.py baseline())
+def _hal_normalize(val, stats):
+    """normalize: [-1, 1]"""
+    return 2.0 * (val - stats.min) / (stats.max - stats.min) - 1.0
+
+def _hal_invert_normalize(val, stats):
+    """invert_and_normalize: [-1, 1] inverted"""
+    return 2.0 * (stats.max - val) / (stats.max - stats.min) - 1.0
+
+def _hal_standardize(val, stats):
+    """standardize: zero mean, unit variance"""
+    return (val - stats.mean) / stats.std
+
+# Which transform each feature uses (from HAL's input_configs.py baseline())
+HAL_TRANSFORM = {
+    "percent": _hal_normalize,
+    "stock": _hal_normalize,
+    "facing": _hal_normalize,
+    "invulnerable": _hal_normalize,
+    "jumps_left": _hal_normalize,
+    "on_ground": _hal_normalize,
+    "shield_strength": _hal_invert_normalize,
+    "position_x": _hal_standardize,
+    "position_y": _hal_standardize,
+}
+
+log.info("Loaded HAL stats from %s (%d p1 features, %d p2 features)",
+         HAL_STATS_PATH, len(HAL_P1_STATS), len(HAL_P2_STATS))
+
+# ── HAL categorical mappings ─────────────────────────────────────────────────
 
 from melee.enums import Character, Action, Stage
 
@@ -215,17 +254,27 @@ HAL_STAGES = ["FINAL_DESTINATION", "BATTLEFIELD", "POKEMON_STADIUM",
 HAL_STAGE_MAP = {stage: i for i, stage in enumerate(
     s for s in Stage if s.name in HAL_STAGES)}
 
-# Actions: HAL uses all actions like MIMIC
+# Actions: HAL uses all actions (melee.Action enum → dense index)
 HAL_ACTION_MAP = {a: i for i, a in enumerate(Action)}
 
 # ── Preprocessing ────────────────────────────────────────────────────────────
 
+# HAL's button class ordering: A=0, B=1, Jump=2, Z=3, NONE=4
+# (from encode_buttons_one_hot_no_shoulder: stacked = [a, b, jump, z, no_button])
+# The 5th combo element is shoulder — HAL treats shoulder-only as NONE for buttons.
 COMBO_MAP = {
-    (0,0,0,0,0): 0,  # NONE
-    (1,0,0,0,0): 1,  # A
-    (0,1,0,0,0): 2,  # B
-    (0,0,1,0,0): 3,  # Jump
-    (0,0,0,1,0): 4,  # Z
+    (1, 0, 0, 0, 0): 0,  # A
+    (0, 1, 0, 0, 0): 1,  # B
+    (0, 0, 1, 0, 0): 2,  # Jump
+    (0, 0, 0, 1, 0): 3,  # Z
+    (0, 0, 0, 0, 0): 4,  # NONE
+    # Shoulder-only combos → NONE for button section (shoulder is separate)
+    (0, 0, 0, 0, 1): 4,  # shoulder only → NONE
+    # Combined button + shoulder → use the button class
+    (1, 0, 0, 0, 1): 0,  # A + shoulder → A
+    (0, 1, 0, 0, 1): 1,  # B + shoulder → B
+    (0, 0, 1, 0, 1): 2,  # Jump + shoulder → Jump
+    (0, 0, 0, 1, 1): 3,  # Z + shoulder → Z
 }
 N_COMBOS = 5
 
@@ -248,40 +297,36 @@ def build_frame(gs, prev_sent):
     # Stage
     stage_idx = HAL_STAGE_MAP.get(gs.stage, 0)
 
-    # Per player: normalize with HAL transforms
-    def player_features(ps, prefix, is_ego):
+    # Per player: normalize with HAL's exact transforms and player-specific stats
+    def player_features(ps, is_ego):
         char_idx = HAL_CHAR_MAP.get(ps.character, 0)
         action_idx = HAL_ACTION_MAP.get(ps.action, 0)
+        stats = HAL_P1_STATS if is_ego else HAL_P2_STATS
 
-        # 9 numeric features (HAL's gamestate per player)
+        # 9 numeric features in HAL's exact order (from input_configs.py baseline())
+        # Order: percent, stock, facing, invulnerable, jumps_left, on_ground,
+        #        shield_strength, position_x, position_y
         raw = {
             "percent": float(ps.percent),
-            "stock": ps.stock,
+            "stock": float(ps.stock),
             "facing": float(ps.facing),
             "invulnerable": float(ps.invulnerable),
-            "jumps_left": ps.jumps_left,
+            "jumps_left": float(ps.jumps_left),
             "on_ground": float(ps.on_ground),
             "shield_strength": float(ps.shield_strength),
-            "pos_x": float(ps.position.x),
-            "pos_y": float(ps.position.y),
+            "position_x": float(ps.position.x),
+            "position_y": float(ps.position.y),
         }
         normed = []
         for feat in ["percent", "stock", "facing", "invulnerable", "jumps_left",
-                      "on_ground", "shield_strength"]:
-            if feat in hal_norm:
-                normed.append(hal_normalize(raw[feat], hal_norm[feat]))
-            else:
-                normed.append(raw[feat])
-        for feat in ["pos_x", "pos_y"]:
-            if feat in hal_norm:
-                normed.append(hal_normalize(raw[feat], hal_norm[feat]))
-            else:
-                normed.append(raw[feat])
+                      "on_ground", "shield_strength", "position_x", "position_y"]:
+            transform = HAL_TRANSFORM[feat]
+            normed.append(transform(raw[feat], stats[feat]))
 
         return char_idx, action_idx, normed
 
-    ego_char, ego_action, ego_nums = player_features(ps1, "self", True)
-    opp_char, opp_action, opp_nums = player_features(ps2, "opp", False)
+    ego_char, ego_action, ego_nums = player_features(ps1, is_ego=True)
+    opp_char, opp_action, opp_nums = player_features(ps2, is_ego=False)
 
     # Controller: from prev_sent (HAL's frame_offset=-1)
     if prev_sent is not None:
