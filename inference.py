@@ -662,7 +662,9 @@ def _decode_clusters(pred: Dict[str, torch.Tensor], temperature: float = 1.0,
 
 def press_output(ctrl: melee.Controller,
                  pred: Dict[str, torch.Tensor],
-                 sample: bool = True) -> tuple[List[bool], tuple[float, float], int, float, float]:
+                 sample: bool = True,
+                 row: Dict[str, Any] | None = None,
+                 ) -> tuple[List[bool], tuple[float, float], int, float, float]:
     """Send model predictions to the controller (HAL-style explicit press/release).
     Returns (fired_buttons, (mx,my), c_dir_idx, l_val, r_val)."""
 
@@ -760,9 +762,17 @@ def press_output(ctrl: melee.Controller,
         top3 = btn_probs.topk(k)
         top3_str = " ".join(f"{IDX_TO_BUTTON[i].name}={v:.3f}"
                             for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
+    # Include stocks/percent for gameplay health tracking
+    gs_str = ""
+    if row is not None:
+        sp = row.get("self_percent", 0)
+        op = row.get("opp_percent", 0)
+        ss = row.get("self_stock", 0)
+        os_ = row.get("opp_stock", 0)
+        gs_str = f"  S={ss}({sp:.0f}%) O={os_}({op:.0f}%)"
     log.info(
-        "MAIN=(%.2f,%.2f) C=%d L=%.2f R=%.2f BTN=%s  top3=[%s]",
-        mx, my, dir_idx, l_val, r_val, pressed, top3_str
+        "MAIN=(%.2f,%.2f) C=%d L=%.2f R=%.2f BTN=%s  top3=[%s]%s",
+        mx, my, dir_idx, l_val, r_val, pressed, top3_str, gs_str
     )
     return fired, (mx, my), dir_idx, l_val, r_val
 
@@ -1084,7 +1094,7 @@ if __name__ == "__main__":
 
             ctrl = controllers[ports[0]]
             _prev_btns_fired, sent_main, sent_cdir, sent_L, sent_R = press_output(
-                ctrl, pred, sample=not args.deterministic)
+                ctrl, pred, sample=not args.deterministic, row=row)
 
             # Track what we actually sent for next frame's self-controller feedback
             _prev_sent = {

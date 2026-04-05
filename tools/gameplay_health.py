@@ -57,43 +57,66 @@ class HealthCheck:
 
 
 def parse_log(lines: List[str]) -> List[dict]:
-    """Parse MAIN/C/L/BTN/top3 lines into frame dicts."""
+    """Parse MAIN/C/L/BTN/top3 lines into frame dicts.
+    Supports both log formats:
+      run_hal_model.py: MAIN=(x,y) C=(x,y) L=v BTN=[...] top3=[...] S=n(p%) O=n(p%)
+      inference.py:     MAIN=(x,y) C=d L=v R=v BTN=[...] top3=[...] S=n(p%) O=n(p%)
+    """
     pattern = re.compile(
         r"MAIN=\(([0-9.]+),([0-9.]+)\) "
-        r"C=\(([0-9.]+),([0-9.]+)\) "
-        r"L=([0-9.]+) "
+        r"C=(?:\(([0-9.]+),([0-9.]+)\)|(\d+)) "
+        r"L=([0-9.]+)"
+        r"(?: R=[0-9.]+)? "
         r"BTN=\[([^\]]*)\] +"
-        r"top3=\[(.+)\]"
+        r"top3=\[(.+?)\]"
     )
+    gs_pattern = re.compile(r"S=(\d+)\((\d+)%\) O=(\d+)\((\d+)%\)")
     frames = []
     for line in lines:
         m = pattern.search(line)
         if not m:
             continue
-        btn_str = m.group(6).strip()
+        # C-stick: either (x,y) format or integer direction
+        if m.group(3) is not None:
+            cx, cy = float(m.group(3)), float(m.group(4))
+        else:
+            cx, cy = 0.5, 0.5  # direction index — treat as neutral for health check
+        l_val = float(m.group(6))
+        btn_str = m.group(7).strip()
         btns = [b.strip().strip("'") for b in btn_str.split(",") if b.strip()] if btn_str else []
 
         probs = {}
-        for part in m.group(7).split():
+        for part in m.group(8).split():
             if "=" in part:
                 name, val = part.split("=")
                 probs[name] = float(val)
 
+        # Parse gamestate (stocks/percent) if present
+        gs_m = gs_pattern.search(line)
+        self_stock = int(gs_m.group(1)) if gs_m else None
+        self_pct = int(gs_m.group(2)) if gs_m else None
+        opp_stock = int(gs_m.group(3)) if gs_m else None
+        opp_pct = int(gs_m.group(4)) if gs_m else None
+
         frames.append({
             "mx": float(m.group(1)),
             "my": float(m.group(2)),
-            "cx": float(m.group(3)),
-            "cy": float(m.group(4)),
-            "l": float(m.group(5)),
+            "cx": cx,
+            "cy": cy,
+            "l": l_val,
             "btns": btns,
             "probs": probs,
             "none_prob": probs.get("NONE", 0.0),
+            "self_stock": self_stock,
+            "self_pct": self_pct,
+            "opp_stock": opp_stock,
+            "opp_pct": opp_pct,
         })
     return frames
 
 
 def compute_health(frames: List[dict]) -> List[HealthCheck]:
-    """Compute 8 gameplay health metrics."""
+    """Compute gameplay health metrics focused on distinguishing intentional play from mashing."""
     n = len(frames)
     if n == 0:
         return []
@@ -141,24 +164,46 @@ def compute_health(frames: List[dict]) -> List[HealthCheck]:
     l_vals = np.array([f["l"] for f in frames])
     shoulder_pct = 100.0 * (l_vals > 0.01).sum() / n
 
-    return [
-        HealthCheck("Button press rate", "btn_press_rate",
-                    btn_initiations / duration_sec, 0.5, ">=", "/sec"),
-        HealthCheck("Unique buttons", "btn_variety",
-                    btn_variety, 3, ">=", "count"),
-        HealthCheck("Stick at neutral", "stick_neutral_pct",
-                    stick_neutral_pct, 80.0, "<=", "%"),
-        HealthCheck("Unique stick positions", "stick_unique",
-                    len(stick_positions), 10, ">=", "count"),
-        HealthCheck("Mean NONE prob", "none_mean",
-                    none_mean, 0.95, "<=", ""),
-        HealthCheck("NONE < 0.99", "none_below_99_pct",
-                    none_below_99, 10.0, ">=", "%"),
+    # ── Damage / stock metrics (requires gamestate in log) ──
+    has_gs = frames[0]["self_stock"] is not None
+    dmg_dealt = 0.0
+    dmg_taken = 0.0
+    stocks_taken = 0
+    stocks_lost = 0
+    if has_gs:
+        for i in range(1, n):
+            prev, cur = frames[i - 1], frames[i]
+            # Damage dealt: opponent percent increased (same stock)
+            if cur["opp_stock"] == prev["opp_stock"] and cur["opp_pct"] > prev["opp_pct"]:
+                dmg_dealt += cur["opp_pct"] - prev["opp_pct"]
+            # Damage taken: self percent increased (same stock)
+            if cur["self_stock"] == prev["self_stock"] and cur["self_pct"] > prev["self_pct"]:
+                dmg_taken += cur["self_pct"] - prev["self_pct"]
+            # Stocks taken: opponent stock decreased
+            if cur["opp_stock"] < prev["opp_stock"]:
+                stocks_taken += prev["opp_stock"] - cur["opp_stock"]
+            # Stocks lost: self stock decreased
+            if cur["self_stock"] < prev["self_stock"]:
+                stocks_lost += prev["self_stock"] - cur["self_stock"]
+
+    checks = [
+        # Intentionality metrics (distinguishes purposeful play from mashing)
         HealthCheck("Non-NONE top pred", "action_initiation_pct",
                     action_pct, 5.0, ">=", "%"),
-        HealthCheck("Shoulder active", "shoulder_active_pct",
-                    shoulder_pct, 1.0, ">=", "%"),
+        HealthCheck("Stick at neutral", "stick_neutral_pct",
+                    stick_neutral_pct, 15.0, ">=", "%"),
+        HealthCheck("Button press rate", "btn_press_rate",
+                    btn_initiations / duration_sec, 0.5, ">=", "/sec"),
+        HealthCheck("Mean NONE prob", "none_mean",
+                    none_mean, 0.95, "<=", ""),
     ]
+
+    if has_gs:
+        checks.append(
+            HealthCheck("Damage dealt", "dmg_dealt",
+                        dmg_dealt, 50.0, ">=", "raw"))
+
+    return checks
 
 
 def print_report(frames: List[dict], checks: List[HealthCheck]) -> bool:
@@ -167,14 +212,40 @@ def print_report(frames: List[dict], checks: List[HealthCheck]) -> bool:
     duration = n / 60.0
     passed = sum(1 for c in checks if c.passed)
     all_pass = passed == len(checks)
+    has_gs = frames[0]["self_stock"] is not None
 
     print(f"Frames: {n}  Duration: {duration:.1f}s")
     print()
+
+    # Checks table
     print(f"{'Metric':<26s} {'Value':<14s} {'Threshold':<14s} {'Status'}")
     print("-" * 64)
     for c in checks:
         status = "PASS" if c.passed else "FAIL"
         print(f"  {c.name:<24s} {c.fmt_value():<14s} {c.fmt_threshold():<14s} {status}")
+
+    # Gamestate summary (always shown if available, not pass/fail)
+    if has_gs:
+        # Recompute here for display
+        dmg_dealt = dmg_taken = 0.0
+        stocks_taken = stocks_lost = 0
+        for i in range(1, n):
+            prev, cur = frames[i - 1], frames[i]
+            if cur["opp_stock"] == prev["opp_stock"] and cur["opp_pct"] > prev["opp_pct"]:
+                dmg_dealt += cur["opp_pct"] - prev["opp_pct"]
+            if cur["self_stock"] == prev["self_stock"] and cur["self_pct"] > prev["self_pct"]:
+                dmg_taken += cur["self_pct"] - prev["self_pct"]
+            if cur["opp_stock"] < prev["opp_stock"]:
+                stocks_taken += prev["opp_stock"] - cur["opp_stock"]
+            if cur["self_stock"] < prev["self_stock"]:
+                stocks_lost += prev["self_stock"] - cur["self_stock"]
+
+        final_self_stock = frames[-1]["self_stock"]
+        final_opp_stock = frames[-1]["opp_stock"]
+        print()
+        print("Game result:")
+        print(f"  Stocks:  self={final_self_stock}  opp={final_opp_stock}  (took {stocks_taken}, lost {stocks_lost})")
+        print(f"  Damage:  dealt={dmg_dealt:.0f}%  taken={dmg_taken:.0f}%  ratio={dmg_dealt/max(dmg_taken,1):.2f}")
 
     print()
     print(f"Result: {passed}/{len(checks)} checks passed", end="")

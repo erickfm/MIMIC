@@ -386,7 +386,7 @@ INCLUDED_BUTTONS_NO_SHOULDER = [
 ]
 
 
-def decode_and_press(ctrl, preds, temperature=1.0):
+def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
     """Decode model predictions and press controller buttons."""
     global _prev_sent
 
@@ -439,8 +439,14 @@ def decode_and_press(ctrl, preds, temperature=1.0):
     top3 = btn_probs.topk(min(3, len(btn_probs)))
     NAMES = ["A", "B", "Jump", "Z", "NONE"]
     top3_str = " ".join(f"{NAMES[i]}={v:.3f}" for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
-    log.info("MAIN=(%.2f,%.2f) C=(%.2f,%.2f) L=%.2f BTN=%s  top3=[%s]",
-             mx, my, cx, cy, shldr, pressed, top3_str)
+    gs_str = ""
+    if gs is not None:
+        players = list(gs.players.items())
+        if len(players) >= 2:
+            ps1, ps2 = players[0][1], players[1][1]
+            gs_str = f"  S={ps1.stock}({ps1.percent:.0f}%) O={ps2.stock}({ps2.percent:.0f}%)"
+    log.info("MAIN=(%.2f,%.2f) C=(%.2f,%.2f) L=%.2f BTN=%s  top3=[%s]%s",
+             mx, my, cx, cy, shldr, pressed, top3_str, gs_str)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -520,5 +526,5 @@ while True:
             batch["gamestate"], batch["controller"],
         )
 
-    decode_and_press(ego_ctrl, preds, temperature=args.temperature)
+    decode_and_press(ego_ctrl, preds, gs=gs, temperature=args.temperature)
     step += 1
