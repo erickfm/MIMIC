@@ -497,8 +497,12 @@ def _process_one_row(row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
                     suffix = col[len(prefix):]
                     if suffix in stats_dict and suffix in _HAL_TRANSFORMS:
                         v = r[col]
-                        if v is not None and isinstance(v, (int, float)) and math.isfinite(v):
-                            r[col] = _hal_exact_transform(float(v), stats_dict[suffix], suffix)
+                        try:
+                            v = float(v)
+                        except (TypeError, ValueError):
+                            break
+                        if math.isfinite(v):
+                            r[col] = _hal_exact_transform(v, stats_dict[suffix], suffix)
                     break
     else:
         for col, (mean, std) in norm_stats.items():
@@ -530,8 +534,10 @@ def _process_one_row(row: Dict[str, Any]) -> Dict[str, torch.Tensor]:
                         suffix = col[len(prefix):]
                         if suffix in _hal_norm:
                             v = r[col]
-                            if v is not None and isinstance(v, (int, float)) and math.isfinite(v):
+                            try:
                                 r[col] = F.hal_normalize(float(v), _hal_norm[suffix])
+                            except (TypeError, ValueError):
+                                pass
                         break
 
     state: Dict[str, torch.Tensor] = {}
