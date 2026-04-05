@@ -53,6 +53,7 @@ class StreamingMeleeDataset(IterableDataset):
         self.split           = split
         self._rank           = rank
         self._world_size     = world_size
+        self._distributed    = kwargs.pop("distributed", True)
         self._controller_offset = controller_offset
         self._hal_ctrl_enc   = hal_controller_encoding
         self._combo_map      = controller_combo_map
@@ -101,7 +102,7 @@ class StreamingMeleeDataset(IterableDataset):
     # ------------------------------------------------------------------
     def _shard_files(self, files):
         worker_info = get_worker_info()
-        if self._world_size > 1:
+        if self._world_size > 1 and self._distributed:
             files = files[self._rank :: self._world_size]
         if worker_info is not None:
             files = files[worker_info.id :: worker_info.num_workers]

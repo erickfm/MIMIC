@@ -461,6 +461,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         rank=rank,
         world_size=world_size,
         controller_offset=controller_offset,
+        distributed=False,  # all ranks see all val data — prevents DDP deadlock
         **ctrl_kw,
     )
     return train_ds, val_ds
@@ -1044,7 +1045,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
                         vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
                     with autocast("cuda", dtype=AMP_DTYPE):
-                        vpreds = model(vs)
+                        vpreds = _raw_model(vs)  # unwrapped — no DDP collectives during eval
                     vm, vtl = compute_loss(vpreds, vt,
                                            btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
                                            hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
@@ -1123,7 +1124,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                             dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
                             vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
                         with autocast("cuda", dtype=AMP_DTYPE):
-                            vpreds = model(vs)
+                            vpreds = _raw_model(vs)  # unwrapped — no DDP collectives during eval
                         vm, vtl = compute_loss(vpreds, vt,
                                                btn_loss_type=cfg.btn_loss, plain_ce=plain_ce)
                         batch_total = sum(t.item() for t in vtl)
