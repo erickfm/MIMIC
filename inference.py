@@ -685,8 +685,14 @@ def press_output(ctrl: melee.Controller,
     mx, my, l_val, r_val = _decode_clusters(pred, temperature=args.temperature,
                                                deterministic=args.deterministic)
 
-    dir_idx = int(torch.argmax(pred["c_dir_logits"]))
-    cx, cy  = C_DIR_TO_FLOAT.get(dir_idx, (0.5, 0.5))
+    n_cdir = pred["c_dir_logits"].shape[-1]
+    if n_cdir == 9:
+        c_probs = torch.softmax(pred["c_dir_logits"].float() / args.temperature, dim=-1)
+        c_idx = int(torch.argmax(c_probs)) if args.deterministic else int(torch.multinomial(c_probs, 1))
+        cx, cy = float(F.HAL_CSTICK_CLUSTERS_9[c_idx][0]), float(F.HAL_CSTICK_CLUSTERS_9[c_idx][1])
+    else:
+        dir_idx = int(torch.argmax(pred["c_dir_logits"]))
+        cx, cy  = C_DIR_TO_FLOAT.get(dir_idx, (0.5, 0.5))
 
     ctrl.tilt_analog(melee.enums.Button.BUTTON_MAIN, mx, my)
     ctrl.tilt_analog(melee.enums.Button.BUTTON_C,    cx, cy)

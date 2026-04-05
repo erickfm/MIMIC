@@ -216,7 +216,11 @@ def _combine_shoulder_targets(l_bin, r_bin, shoulder_centers):
     return dists.argmin(dim=-1)
 
 
-def _compute_loss_hal(preds, targets, shoulder_centers=None):
+# 5-class c_dir → 9-cluster mapping: neutral→0, up→4, down→3, left→2, right→1
+_CDIR_5_TO_9 = torch.tensor([0, 4, 3, 2, 1], dtype=torch.long)
+
+
+def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5):
     """HAL-style loss: plain CE on all heads, single-label buttons, combined shoulder."""
     main_pred = preds["main_xy"].float()
     shldr_pred = preds["shoulder_val"].float()
@@ -242,8 +246,10 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None):
         shldr_tgt = l_bin_tgt.reshape(-1)  # fallback
     loss_shldr = F.cross_entropy(shldr_pred.reshape(-1, n_shldr), shldr_tgt)
 
-    # C-dir
+    # C-dir (remap 5-class → 9-cluster if needed)
     cdir_classes = cdir_tgt.argmax(dim=-1)
+    if n_cdir == 9:
+        cdir_classes = _CDIR_5_TO_9.to(cdir_classes.device)[cdir_classes]
     loss_cdir = F.cross_entropy(c_logits.reshape(-1, c_logits.size(-1)), cdir_classes.reshape(-1))
 
     # Single-label buttons (combo-based if controller encoding, else priority-based)
@@ -306,9 +312,9 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None):
 
 
 def compute_loss(preds, targets, btn_loss_type="focal", plain_ce=False, hal_mode=False,
-                  shoulder_centers=None):
+                  shoulder_centers=None, n_cdir=5):
     if hal_mode:
-        return _compute_loss_hal(preds, targets, shoulder_centers)
+        return _compute_loss_hal(preds, targets, shoulder_centers, n_cdir=n_cdir)
 
     c_logits = preds["c_dir_logits"].float()
     btn_pred = preds["btn_logits"].float()
@@ -523,7 +529,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
         overrides["n_shoulder_bins"] = n_shoulder_bins
-    cfg = ModelConfig(max_seq_len=SEQUENCE_LENGTH, **overrides)
+    seq_len = overrides.pop("max_seq_len", SEQUENCE_LENGTH)
+    cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
         model = torch.compile(model)
@@ -619,6 +626,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         REACTION_DELAY = reaction_delay_override
     if seq_len_override:
         SEQUENCE_LENGTH = seq_len_override
+    elif model_preset == "hal":
+        SEQUENCE_LENGTH = 256
     if batch_size_override:
         BATCH_SIZE = batch_size_override
     if val_frac_override is not None:
@@ -912,7 +921,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     preds = model(state, btn_targets=btn_tgt if not hal_mode else None)
                 metrics, task_losses = compute_loss(
                     preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                    hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers)
+                    hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                    n_cdir=cfg.num_c_dirs)
             except torch.cuda.OutOfMemoryError:
                 mem = torch.cuda.max_memory_allocated() / 1e9
                 _log(f"OOM on rank {rank}, device {DEVICE}: {mem:.1f}GB peak")
@@ -1037,7 +1047,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         vpreds = model(vs)
                     vm, vtl = compute_loss(vpreds, vt,
                                            btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                                           hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers)
+                                           hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                                           n_cdir=cfg.num_c_dirs)
                     batch_total = sum(t.item() for t in vtl)
                     if math.isfinite(batch_total):
                         val_sums["total"] += batch_total

@@ -85,7 +85,10 @@ class ModelConfig:
 MODEL_PRESETS = {
     "tiny":         dict(d_model=256,  nhead=4,  num_layers=4, dim_feedforward=1024),
     "small":        dict(d_model=512,  nhead=8,  num_layers=4, dim_feedforward=2048),
-    "hal":          dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048),
+    "hal":          dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=256, pos_enc="relpos",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
     "medium":       dict(d_model=768,  nhead=8,  num_layers=4, dim_feedforward=3072),
     "base":         dict(d_model=1024, nhead=8,  num_layers=4, dim_feedforward=4096),
     "shallow":      dict(d_model=1024, nhead=8,  num_layers=2, dim_feedforward=4096),
@@ -147,6 +150,87 @@ def _sliding_window_mask(T: int, window: int, device: torch.device) -> torch.Ten
     col = torch.arange(T, device=device).unsqueeze(0)
     mask = (col <= row) & (row - col < window)
     return mask.float().log()  # 0 for valid, -inf for masked
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2b. HAL's relative-position attention (skew-based, Shaw et al. 2018)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _skew(QEr: torch.Tensor) -> torch.Tensor:
+    """Efficient relative-position skew trick (Music Transformer / Shaw 2018)."""
+    padded = Fn.pad(QEr, (1, 0))
+    B, nh, nr, nc = padded.shape
+    reshaped = padded.reshape(B, nh, nc, nr)
+    return reshaped[:, :, 1:, :]
+
+
+class CausalSelfAttentionRelPos(nn.Module):
+    """HAL's relative-position causal self-attention.
+
+    Uses combined QKV projection, learnable relative position table Er,
+    and the skew trick for efficient relative-position bias computation.
+    """
+
+    def __init__(self, n_embd: int = 512, n_head: int = 8,
+                 block_size: int = 1024, dropout: float = 0.2):
+        super().__init__()
+        self.n_head = n_head
+        self.hs = n_embd // n_head
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd)
+        self.c_proj = nn.Linear(n_embd, n_embd)
+        self.Er = nn.Parameter(torch.randn(block_size, self.hs))
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+        self.register_buffer("bias",
+            torch.tril(torch.ones(block_size, block_size)).view(
+                1, 1, block_size, block_size))
+        self.block_size = block_size
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.size()
+        q, k, v = self.c_attn(x).split(D, dim=2)
+        k = k.view(B, L, self.n_head, self.hs).transpose(1, 2)
+        q = q.view(B, L, self.n_head, self.hs).transpose(1, 2)
+        v = v.view(B, L, self.n_head, self.hs).transpose(1, 2)
+
+        start = self.block_size - L
+        Er_t = self.Er[start:, :].transpose(0, 1)
+        QEr = q @ Er_t
+        Srel = _skew(QEr)
+
+        QK_t = q @ k.transpose(-2, -1)
+        scale = 1.0 / math.sqrt(k.size(-1))
+        att = (QK_t + Srel) * scale
+        att = att.masked_fill(self.bias[:, :, :L, :L] == 0, float("-inf"))
+        att = Fn.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        y = att @ v
+        y = y.transpose(1, 2).contiguous().view(B, L, D)
+        return self.resid_dropout(self.c_proj(y))
+
+
+class HALTransformerBlock(nn.Module):
+    """HAL's pre-norm Transformer block with relative-position attention."""
+
+    def __init__(self, cfg: ModelConfig):
+        super().__init__()
+        self.ln_1 = nn.LayerNorm(cfg.d_model)
+        self.self_attn = CausalSelfAttentionRelPos(
+            n_embd=cfg.d_model, n_head=cfg.nhead,
+            block_size=1024, dropout=cfg.dropout)
+        self.ln_2 = nn.LayerNorm(cfg.d_model)
+        self.mlp = nn.ModuleDict(dict(
+            c_fc=nn.Linear(cfg.d_model, cfg.dim_feedforward),
+            c_proj=nn.Linear(cfg.dim_feedforward, cfg.d_model),
+        ))
+        self.dropout = nn.Dropout(cfg.dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x + self.self_attn(self.ln_1(x))
+        h = self.mlp.c_fc(self.ln_2(x))
+        h = Fn.gelu(h)
+        h = self.dropout(self.mlp.c_proj(h))
+        return x + h
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -465,15 +549,20 @@ class FramePredictor(nn.Module):
         elif cfg.pos_enc == "sinusoidal":
             self.register_buffer("pos_emb", _sinusoidal_embeddings(cfg.max_seq_len, cfg.d_model))
         else:
-            self.pos_emb = None
+            self.pos_emb = None  # relpos / rope / alibi have no separate pos_emb
 
-        self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
+        use_hal_block = (cfg.pos_enc == "relpos")
+        if use_hal_block:
+            self.blocks = nn.ModuleList([HALTransformerBlock(cfg) for _ in range(cfg.num_layers)])
+        else:
+            self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
         self.final_norm = nn.LayerNorm(cfg.d_model)
         if cfg.hal_mode:
             self.heads = HALPredictionHeads(
                 cfg.d_model,
                 n_stick_clusters=cfg.n_stick_clusters,
                 n_shoulder_bins=3,  # HAL uses 3-class combined shoulder
+                n_cdir=cfg.num_c_dirs,
                 n_btn_classes=cfg.n_controller_combos if cfg.hal_controller_encoding else 5,
             )
         else:
@@ -489,8 +578,12 @@ class FramePredictor(nn.Module):
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * cfg.num_layers)
         for blk in self.blocks:
-            nn.init.normal_(blk.self_attn.out_proj.weight, std=residual_std)
-            nn.init.normal_(blk.ff[-1].weight, std=residual_std)
+            if use_hal_block:
+                nn.init.normal_(blk.self_attn.c_proj.weight, std=residual_std)
+                nn.init.normal_(blk.mlp.c_proj.weight, std=residual_std)
+            else:
+                nn.init.normal_(blk.self_attn.out_proj.weight, std=residual_std)
+                nn.init.normal_(blk.ff[-1].weight, std=residual_std)
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:

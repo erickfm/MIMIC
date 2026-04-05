@@ -722,8 +722,8 @@ class HALFlatEncoder(nn.Module):
         emb_dim = self.STAGE_EMB_DIM + 2 * self.CHAR_EMB_DIM + 2 * self.ACTION_EMB_DIM
         # = 4 + 24 + 64 = 92
 
-        # Gamestate: hal_minimal = 7 numeric + 3 flags = 10 per player × 2
-        numeric_dim = 10 * 2  # = 20
+        # Gamestate: 9 features per player in HAL's order × 2
+        numeric_dim = 9 * 2  # = 18
 
         # Controller: one-hot vector (37 stick + 9 cstick + N combos + 3 shoulder)
         ctrl_dim = 0
@@ -750,22 +750,42 @@ class HALFlatEncoder(nn.Module):
                 seq["self_controller"] = seq["self_controller"] * keep
 
         # Categorical embeddings
-        stage = self.stage_emb(seq["stage"])                    # (B, T, 4)
+        # Stage remap: MIMIC shards use NO_STAGE=0, so tournament stages are 1-6.
+        # HAL expects 0-5. Subtract 1 and clamp to handle the offset.
+        stage_idx = seq["stage"]
+        if self.stage_emb.num_embeddings == 6:
+            stage_idx = (stage_idx - 1).clamp(min=0)
+        stage = self.stage_emb(stage_idx)                      # (B, T, 4)
         self_char = self.char_emb(seq["self_character"])        # (B, T, 12)
         opp_char = self.char_emb(seq["opp_character"])          # (B, T, 12)
         self_action = self.action_emb(seq["self_action"])       # (B, T, 32)
         opp_action = self.action_emb(seq["opp_action"])         # (B, T, 32)
 
-        # Numeric gamestate: 7 numeric + 3 flags = 10 per player
-        _HAL_IDX = [0, 1, 2, 3, 4, 12, 13]
-        _HAL_FLAG_IDX = [0, 2, 3]
+        # Numeric gamestate: 9 features per player in HAL's exact order:
+        # percent, stock, facing, invulnerable, jumps_left, on_ground, shield, pos_x, pos_y
         sn = seq["self_numeric"]
         on = seq["opp_numeric"]
         if sn.shape[-1] > 7:
-            sn = sn[..., _HAL_IDX]
-            on = on[..., _HAL_IDX]
-        self_num = torch.cat([sn, seq["self_flags"][..., _HAL_FLAG_IDX].float()], dim=-1)
-        opp_num = torch.cat([on, seq["opp_flags"][..., _HAL_FLAG_IDX].float()], dim=-1)
+            # Full 22-column: select 6 (drop invuln_left at index 12)
+            _IDX = [0, 1, 2, 3, 4, 13]  # pos_x, pos_y, percent, stock, jumps_left, shield
+            sn = sn[..., _IDX]
+            on = on[..., _IDX]
+        elif sn.shape[-1] == 7:
+            # 7-column hal_minimal: drop invuln_left at index 5
+            _IDX = [0, 1, 2, 3, 4, 6]
+            sn = sn[..., _IDX]
+            on = on[..., _IDX]
+        # sn/on now have 6 values: [pos_x, pos_y, percent, stock, jumps_left, shield]
+        _FLAG_IDX = [0, 2, 3]  # on_ground, facing, invulnerable from 5-flag tensor
+        sf = seq["self_flags"][..., _FLAG_IDX].float()
+        of = seq["opp_flags"][..., _FLAG_IDX].float()
+        # Concat → [pos_x(0), pos_y(1), percent(2), stock(3), jumps_left(4),
+        #           shield(5), on_ground(6), facing(7), invulnerable(8)]
+        # Reorder to HAL: percent, stock, facing, invulnerable, jumps_left,
+        #                  on_ground, shield, pos_x, pos_y
+        _HAL_ORDER = [2, 3, 7, 8, 4, 6, 5, 0, 1]
+        self_num = torch.cat([sn, sf], dim=-1)[..., _HAL_ORDER]
+        opp_num = torch.cat([on, of], dim=-1)[..., _HAL_ORDER]
 
         parts = [stage, self_char, opp_char, self_action, opp_action,
                  self_num, opp_num]

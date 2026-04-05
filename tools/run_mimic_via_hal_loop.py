@@ -186,9 +186,15 @@ def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
     shldr_idx = int(torch.multinomial(shldr_probs, 1))
     shldr = [0.0, 0.4, 1.0][shldr_idx]
 
-    dir_idx = int(torch.argmax(preds["c_dir_logits"][0, -1]))
-    C_DIR = {0:(0.5,0.5),1:(0.5,1.0),2:(0.5,0.0),3:(0.0,0.5),4:(1.0,0.5)}
-    cx, cy = C_DIR.get(dir_idx, (0.5, 0.5))
+    n_cdir = preds["c_dir_logits"].size(-1)
+    if n_cdir == 9:
+        c_probs = Fn.softmax(preds["c_dir_logits"][0, -1].float() / temperature, dim=-1)
+        c_idx = int(torch.multinomial(c_probs, 1))
+        cx, cy = float(HAL_CSTICK_CLUSTERS_9[c_idx][0]), float(HAL_CSTICK_CLUSTERS_9[c_idx][1])
+    else:
+        dir_idx = int(torch.argmax(preds["c_dir_logits"][0, -1]))
+        C_DIR = {0:(0.5,0.5),1:(0.5,1.0),2:(0.5,0.0),3:(0.0,0.5),4:(1.0,0.5)}
+        cx, cy = C_DIR.get(dir_idx, (0.5, 0.5))
 
     btn_probs = Fn.softmax(preds["btn_logits"][0, -1].float() / temperature, dim=-1)
     btn_idx = int(torch.multinomial(btn_probs, 1))
