@@ -214,6 +214,14 @@ if args.hal_stats:
                          for k in _raw_hal_stats if k.startswith("p1_")}
         _hal_stats_p2 = {k.removeprefix("p2_"): _raw_hal_stats[k]
                          for k in _raw_hal_stats if k.startswith("p2_")}
+        # Add aliases: MIMIC uses pos_x/pos_y/invuln_left, HAL uses position_x/position_y/invulnerability_left
+        for d in (_hal_stats_p1, _hal_stats_p2):
+            if "position_x" in d:
+                d["pos_x"] = d["position_x"]
+            if "position_y" in d:
+                d["pos_y"] = d["position_y"]
+            if "invulnerability_left" in d:
+                d["invuln_left"] = d["invulnerability_left"]
         _hal_use_exact_stats = True
         log.info("Loaded HAL exact stats from %s (%d p1, %d p2 features)",
                  _hal_stats_path, len(_hal_stats_p1), len(_hal_stats_p2))
