@@ -777,8 +777,9 @@ class HALFlatEncoder(nn.Module):
             on = on[..., _IDX]
         # sn/on now have 6 values: [pos_x, pos_y, percent, stock, jumps_left, shield]
         _FLAG_IDX = [0, 2, 3]  # on_ground, facing, invulnerable from 5-flag tensor
-        sf = seq["self_flags"][..., _FLAG_IDX].float()
-        of = seq["opp_flags"][..., _FLAG_IDX].float()
+        # HAL normalizes boolean flags: 0→-1, 1→+1 (normalize transform with min=0,max=1)
+        sf = seq["self_flags"][..., _FLAG_IDX].float() * 2.0 - 1.0
+        of = seq["opp_flags"][..., _FLAG_IDX].float() * 2.0 - 1.0
         # Concat → [pos_x(0), pos_y(1), percent(2), stock(3), jumps_left(4),
         #           shield(5), on_ground(6), facing(7), invulnerable(8)]
         # Reorder to HAL: percent, stock, facing, invulnerable, jumps_left,
