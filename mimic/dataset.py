@@ -84,10 +84,8 @@ class StreamingMeleeDataset(IterableDataset):
             self.files = [self.data_dir / n for n in manifest[key]]
             nkey = "n_val_games" if split == "val" else "n_train_games"
             self.n_games = manifest[nkey]
-            fkey = "n_val_frames" if split == "val" else "n_train_frames"
-            W, R = sequence_length, reaction_delay
-            n_frames = manifest[fkey]
-            self._total_windows = max(0, n_frames - self.n_games * (W + R - 1))
+            # One random window per game per pass (HAL-style sampling)
+            self._total_windows = self.n_games
 
         else:
             raise RuntimeError(
@@ -166,7 +164,7 @@ class StreamingMeleeDataset(IterableDataset):
             states = shard["states"]
             targets = shard["targets"]
 
-            window_indices: List[Tuple[int, int]] = []
+            game_ranges: List[Tuple[int, int]] = []  # (start, max_w) per valid game
             skipped_games = 0
             for g in range(n_games):
                 start = offsets[g].item()
@@ -181,8 +179,7 @@ class StreamingMeleeDataset(IterableDataset):
                     if states["self_character"][start].item() != self._char_filter:
                         skipped_games += 1
                         continue
-                for w in range(max_w + 1):
-                    window_indices.append((start + w, start + w))
+                game_ranges.append((start, max_w))
             if skipped_games > 0 and n_games > 0:
                 pct = 100 * skipped_games / n_games
                 if pct > 5:
@@ -193,9 +190,10 @@ class StreamingMeleeDataset(IterableDataset):
                         stacklevel=2,
                     )
 
-            random.shuffle(window_indices)
-
-            for abs_start, _ in window_indices:
+            # Random window sampling: one random window per game (like HAL)
+            random.shuffle(game_ranges)
+            for game_start, max_w in game_ranges:
+                abs_start = game_start + random.randint(0, max_w)
                 state = {k: v[abs_start: abs_start + W] for k, v in states.items()}
                 target = {k: v[abs_start + R: abs_start + W + R] for k, v in targets.items()}
                 # HAL-style: shift self-controller by -1 so position i sees frame i-1's controller
