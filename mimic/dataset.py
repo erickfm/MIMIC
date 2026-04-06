@@ -178,8 +178,7 @@ class StreamingMeleeDataset(IterableDataset):
                     continue
                 # Character filter: skip games where self isn't the target character
                 if self._char_filter is not None:
-                    majority_char = states["self_character"][start:end].mode().values.item()
-                    if majority_char != self._char_filter:
+                    if states["self_character"][start].item() != self._char_filter:
                         skipped_games += 1
                         continue
                 for w in range(max_w + 1):
