@@ -1102,6 +1102,7 @@ def create_tensor_shards(
     seed: int,
     n_workers: int = 0,
     hal_norm: Dict = None,
+    character_filter: int = None,
 ) -> Dict:
     schema, norm_stats, cat_maps, stick_centers, shoulder_centers = (
         _load_prereqs(meta_dir))
@@ -1131,6 +1132,7 @@ def create_tensor_shards(
             split_files, split, staging_dir, shard_bytes,
             schema, norm_stats, cat_maps, stick_centers, shoulder_centers,
             n_workers, hal_norm, combo_map_local, n_combos_local,
+            character_filter=character_filter,
         )
         results[split] = shard_infos
 
@@ -1144,7 +1146,7 @@ def create_tensor_shards(
 def _tensorize_split(
     split_files, split, out_dir, shard_bytes,
     schema, norm_stats, cat_maps, stick_centers, shoulder_centers, n_workers,
-    hal_norm=None, combo_map=None, n_combos=5,
+    hal_norm=None, combo_map=None, n_combos=5, character_filter=None,
 ):
     buf_states: List = []
     buf_targets: List = []
@@ -1168,6 +1170,10 @@ def _tensorize_split(
 
             # Each result is a list of 2 (states, targets, n_frames) tuples
             for states, targets, n_frames in result:
+                # Character filter: only keep perspective where self matches
+                if character_filter is not None:
+                    if states["self_character"][0].item() != character_filter:
+                        continue
                 buf_states.append(states)
                 buf_targets.append(targets)
                 buf_offsets.append(buf_offsets[-1] + n_frames)
@@ -1460,6 +1466,9 @@ def main():
                         help="Parallel workers (0=auto)")
     parser.add_argument("--hal-norm", type=str, default=None,
                         help="Path to hal_norm.json for HAL-style normalization")
+    parser.add_argument("--character", type=int, default=None,
+                        help="Only keep perspective where self_character matches "
+                             "this index (e.g. 1 for Fox)")
     args = parser.parse_args()
 
     if args.resume and args.clean:
@@ -1519,6 +1528,7 @@ def main():
             manifest = create_tensor_shards(
                 slp_files, meta_dir, staging_dir, args.shard_gb,
                 args.val_frac, args.seed, n_workers, hal_norm,
+                character_filter=args.character,
             )
             print(f"\n=== Staging metadata ===")
             stage_metadata(meta_dir, staging_dir)
