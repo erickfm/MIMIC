@@ -84,8 +84,8 @@ class StreamingMeleeDataset(IterableDataset):
             self.files = [self.data_dir / n for n in manifest[key]]
             nkey = "n_val_games" if split == "val" else "n_train_games"
             self.n_games = manifest[nkey]
-            # One random window per game per pass (HAL-style sampling)
-            self._total_windows = self.n_games
+            # Random window sampling: ~100 windows per game per pass
+            self._total_windows = self.n_games * 100
 
         else:
             raise RuntimeError(
@@ -190,10 +190,17 @@ class StreamingMeleeDataset(IterableDataset):
                         stacklevel=2,
                     )
 
-            # Random window sampling: one random window per game (like HAL)
-            random.shuffle(game_ranges)
+            # Random window sampling: N random windows per game per shard visit.
+            # HAL samples one random window per __getitem__ call; across training
+            # each game is visited ~5000 times. We amortize shard loading by
+            # sampling multiple random windows per game per visit.
+            windows_per_game = max(1, min(100, max_w // 2)) if game_ranges else 1
+            window_indices = []
             for game_start, max_w in game_ranges:
-                abs_start = game_start + random.randint(0, max_w)
+                for _ in range(windows_per_game):
+                    window_indices.append(game_start + random.randint(0, max_w))
+            random.shuffle(window_indices)
+            for abs_start in window_indices:
                 state = {k: v[abs_start: abs_start + W] for k, v in states.items()}
                 target = {k: v[abs_start + R: abs_start + W + R] for k, v in targets.items()}
                 # HAL-style: shift self-controller by -1 so position i sees frame i-1's controller
