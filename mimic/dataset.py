@@ -54,6 +54,7 @@ class StreamingMeleeDataset(IterableDataset):
         self._rank           = rank
         self._world_size     = world_size
         self._distributed    = kwargs.pop("distributed", True)
+        self._char_filter    = kwargs.pop("character_filter", None)  # e.g. 1 for Fox
         self._controller_offset = controller_offset
         self._hal_ctrl_enc   = hal_controller_encoding
         self._combo_map      = controller_combo_map
@@ -175,6 +176,12 @@ class StreamingMeleeDataset(IterableDataset):
                 if max_w < 0:
                     skipped_games += 1
                     continue
+                # Character filter: skip games where self isn't the target character
+                if self._char_filter is not None:
+                    majority_char = states["self_character"][start:end].mode().values.item()
+                    if majority_char != self._char_filter:
+                        skipped_games += 1
+                        continue
                 for w in range(max_w + 1):
                     window_indices.append((start + w, start + w))
             if skipped_games > 0 and n_games > 0:

@@ -436,8 +436,11 @@ def _compute_intervals(max_steps):
 def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
                   rank=0, world_size=1, controller_offset=False,
                   hal_controller_encoding=False,
-                  controller_combo_map=None, n_controller_combos=5):
+                  controller_combo_map=None, n_controller_combos=5,
+                  character_filter=None):
     _log(f"  Using streaming dataset from {data_dir}")
+    if character_filter is not None:
+        _log(f"  Character filter: self_character={character_filter}")
     ctrl_kw = dict(
         hal_controller_encoding=hal_controller_encoding,
         controller_combo_map=controller_combo_map,
@@ -451,6 +454,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         rank=rank,
         world_size=world_size,
         controller_offset=controller_offset,
+        character_filter=character_filter,
         **ctrl_kw,
     )
     val_ds = StreamingMeleeDataset(
@@ -462,6 +466,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         world_size=world_size,
         controller_offset=controller_offset,
         distributed=False,  # all ranks see all val data — prevents DDP deadlock
+        character_filter=character_filter,
         **ctrl_kw,
     )
     return train_ds, val_ds
@@ -600,7 +605,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           hal_minimal_features: bool = False,
           reaction_delay_override: int = None,
           controller_offset: bool = False,
-          hal_controller_encoding: bool = False):
+          hal_controller_encoding: bool = False,
+          character_filter: int = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -672,7 +678,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                               controller_offset=controller_offset,
                               hal_controller_encoding=hal_controller_encoding,
                               controller_combo_map=_combo_map,
-                              n_controller_combos=_n_combos)
+                              n_controller_combos=_n_combos,
+                              character_filter=character_filter)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
@@ -1294,6 +1301,8 @@ if __name__ == "__main__":
                         help="Use HAL's minimal input set (drop ECB, speeds, hitlag/hitstun from numeric)")
     parser.add_argument("--hal-controller-encoding", action="store_true",
                         help="Use HAL-style one-hot controller feedback encoding (requires controller_combos.json)")
+    parser.add_argument("--character-filter", type=int, default=None,
+                        help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
     parser.add_argument("--si-drop-start", type=float, default=None,
                         help="Fraction of training where SI dropout begins")
     parser.add_argument("--si-drop-end", type=float, default=None,
@@ -1369,4 +1378,5 @@ if __name__ == "__main__":
         reaction_delay_override=args.reaction_delay,
         controller_offset=args.controller_offset,
         hal_controller_encoding=args.hal_controller_encoding,
+        character_filter=args.character_filter,
     )
