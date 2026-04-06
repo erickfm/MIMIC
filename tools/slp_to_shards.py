@@ -617,15 +617,45 @@ def build_targets_from_arrays(
         c_dir_onehot.scatter_(1, c_dir.unsqueeze(1), 1.0)
         targets["c_dir"] = c_dir_onehot
 
-    # Buttons
+    # Buttons (store both raw multi-hot and HAL-style early_release single-label)
     btn_key = None
     for tkey, ftype, cols in schema.tensor_layout:
         if tkey == "self_buttons":
             btn_key = tkey
             break
     if btn_key is not None:
-        targets["btns"] = torch.from_numpy(
-            arrays[btn_key][:n].astype(np.float32).copy())
+        raw_btns = arrays[btn_key][:n].astype(np.float32).copy()
+        targets["btns"] = torch.from_numpy(raw_btns)
+
+        # HAL-style early_release single-label: A=0, B=1, Jump(X|Y)=2, Z=3, NONE=4
+        # Combines X/Y into Jump, resolves multi-press by keeping newest and releasing older
+        a = raw_btns[:, 0] > 0.5    # btn_A
+        b = raw_btns[:, 1] > 0.5    # btn_B
+        jump = (raw_btns[:, 2] > 0.5) | (raw_btns[:, 3] > 0.5)  # X|Y
+        z = raw_btns[:, 4] > 0.5    # btn_Z
+        stacked = np.stack([a, b, jump, z], axis=-1)  # (n, 4)
+        no_btn = ~(a | b | jump | z)
+
+        # Early release: track which buttons are held, keep only newest on change
+        single = np.full(n, 4, dtype=np.int64)  # default NONE
+        prev_buttons = set()
+        for i in range(n):
+            curr_buttons = set(np.where(stacked[i])[0])
+            if not curr_buttons:
+                single[i] = 4  # NONE
+                prev_buttons = set()
+            elif curr_buttons != prev_buttons:
+                new_buttons = curr_buttons - prev_buttons
+                if new_buttons:
+                    single[i] = min(new_buttons)  # newest press, tie-break by priority
+                else:
+                    # buttons were released, not pressed — keep the remaining one
+                    single[i] = min(curr_buttons) if curr_buttons else 4
+                prev_buttons = curr_buttons
+            else:
+                # same buttons held — keep previous label
+                single[i] = single[i - 1] if i > 0 else (min(curr_buttons) if curr_buttons else 4)
+        targets["btns_single"] = torch.from_numpy(single)
 
     return targets
 

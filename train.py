@@ -252,8 +252,11 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5):
         cdir_classes = _CDIR_5_TO_9.to(cdir_classes.device)[cdir_classes]
     loss_cdir = F.cross_entropy(c_logits.reshape(-1, c_logits.size(-1)), cdir_classes.reshape(-1))
 
-    # Single-label buttons (combo-based if controller encoding, else priority-based)
-    if _combo_map is not None:
+    # Single-label buttons: use pre-computed early_release labels if available
+    btn_single_pre = targets.get("btns_single")
+    if btn_single_pre is not None:
+        btn_single = btn_single_pre.long()
+    elif _combo_map is not None:
         btn_single = _multi_hot_to_combo_label(btn_tgt)
     else:
         btn_single = _multi_hot_to_single_label(btn_tgt)
