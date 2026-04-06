@@ -246,9 +246,9 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5):
         shldr_tgt = l_bin_tgt.reshape(-1)  # fallback
     loss_shldr = F.cross_entropy(shldr_pred.reshape(-1, n_shldr), shldr_tgt)
 
-    # C-dir (remap 5-class → 9-cluster if needed)
+    # C-dir: if targets are already 9-class (from new shards), use directly; else remap 5→9
     cdir_classes = cdir_tgt.argmax(dim=-1)
-    if n_cdir == 9:
+    if n_cdir == 9 and cdir_tgt.size(-1) == 5:
         cdir_classes = _CDIR_5_TO_9.to(cdir_classes.device)[cdir_classes]
     loss_cdir = F.cross_entropy(c_logits.reshape(-1, c_logits.size(-1)), cdir_classes.reshape(-1))
 
@@ -812,8 +812,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     # --- DDP wrapping (after compile, optimizer, and checkpoint load) ---
     if is_distributed:
-        model = DDP(model, device_ids=[local_rank],
-                    find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank])
     _raw_model = model.module if is_distributed else model
 
     # -- Self-input curriculum schedule --

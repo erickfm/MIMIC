@@ -567,6 +567,7 @@ def build_targets_from_arrays(
     stick_centers: Optional[np.ndarray],
     shoulder_centers: Optional[np.ndarray],
     n: int,
+    c_tmps: Dict[str, np.ndarray] = None,
 ) -> Dict[str, torch.Tensor]:
     """Build target tensors from preprocessed arrays (replaces build_targets_batch)."""
 
@@ -599,11 +600,22 @@ def build_targets_from_arrays(
         targets["r_bin"] = torch.from_numpy(
             assign_shoulder_bins(r_shldr, shoulder_centers))
 
-    # C-stick direction one-hot
-    c_dir = torch.from_numpy(arrays["self_c_dir"][:n].copy())
-    c_dir_onehot = torch.zeros(n, 5, dtype=torch.float32)
-    c_dir_onehot.scatter_(1, c_dir.unsqueeze(1), 1.0)
-    targets["c_dir"] = c_dir_onehot
+    # C-stick targets: 9-cluster from raw x/y if available, else 5-class categorical
+    if c_tmps is not None and "self_c_x" in c_tmps:
+        from mimic.features import HAL_CSTICK_CLUSTERS_9
+        cx = c_tmps["self_c_x"][:n].astype(np.float32)
+        cy = c_tmps["self_c_y"][:n].astype(np.float32)
+        c_xy = np.stack([cx, cy], axis=-1)
+        dists = np.sum((c_xy[:, None, :] - HAL_CSTICK_CLUSTERS_9[None, :, :]) ** 2, axis=-1)
+        c_idx = torch.from_numpy(dists.argmin(axis=-1).astype(np.int64))
+        c_dir_onehot = torch.zeros(n, 9, dtype=torch.float32)
+        c_dir_onehot.scatter_(1, c_idx.unsqueeze(1), 1.0)
+        targets["c_dir"] = c_dir_onehot
+    else:
+        c_dir = torch.from_numpy(arrays["self_c_dir"][:n].copy())
+        c_dir_onehot = torch.zeros(n, 5, dtype=torch.float32)
+        c_dir_onehot.scatter_(1, c_dir.unsqueeze(1), 1.0)
+        targets["c_dir"] = c_dir_onehot
 
     # Buttons
     btn_key = None
@@ -843,11 +855,12 @@ def _extract_replay_inner(
 
     # Convert to tensors
     results = []
-    for arr_set, c_tmps, raw_ctrl in [(p1_arrays, p1_c_tmps, p1_raw_ctrl),
-                                       (p2_arrays, p2_c_tmps, p2_raw_ctrl)]:
+    for arr_set, c_tmp, raw_ctrl in [(p1_arrays, p1_c_tmps, p1_raw_ctrl),
+                                      (p2_arrays, p2_c_tmps, p2_raw_ctrl)]:
         states = schema.arrays_to_state_tensors(arr_set, n_frames)
         targets = build_targets_from_arrays(
-            arr_set, schema, norm_stats, stick_centers, shoulder_centers, n_frames)
+            arr_set, schema, norm_stats, stick_centers, shoulder_centers, n_frames,
+            c_tmps=c_tmp)
 
         # Bake controller encoding into state tensors
         if raw_ctrl is not None and _combo_map_local is not None:
