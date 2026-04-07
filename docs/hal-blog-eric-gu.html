@@ -1,0 +1,654 @@
+<!DOCTYPE html><html><head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Training AI to play Super Smash Bros. Melee - Eric Gu</title>
+
+  <link rel="alternate" type="application/rss+xml" title="Eric Gu" href="https://ericyuegu.com/feed.rss">
+
+
+  <link rel="stylesheet" href="https://cdn.blot.im/template/3f/46/75c416d5335c1fa89257af1a9886/style.css">
+
+  <meta name="description" content="I trained a 20 million parameter Transformer on 3 billion frames of professional Fox player replays. It wins 95% of the time against the in-game">
+
+  <!-- Meta tags for sharing on social media platforms -->
+  <meta property="og:title" content="Training AI to play Super Smash Bros. Melee - Eric Gu">
+  <meta property="og:description" content="I trained a 20 million parameter Transformer on 3 billion frames of professional Fox player replays. It wins 95% of the time against the in-game">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_thumbnails/f189430a-62b2-417e-bfe3-818f20c32daa/large.png">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta property="og:url" content="https://ericyuegu.com/melee-pt1">
+</head>
+<body class="navigation-location-top">
+  <div class="navigation alignment-left">
+    <div class="container">
+      <a id="logo" href="/">
+        Eric Gu
+      </a>
+      <div class="links">
+        <a href="/" title="Home">Home</a>
+        <a href="/about" title="About">About</a>
+        <a href="https://github.com/ericyuegu" title="Github">Github</a>
+        <a href="https://twitter.com/ericyuegu" title="Twitter">Twitter</a>
+        <a href="https://www.linkedin.com/in/ericyuegu/" title="LinkedIn">LinkedIn</a>
+        <a href="/feed.rss" title="Feed">Feed</a>
+      </div>
+    </div>
+  </div>  <div class="container">
+    <div class="main">
+      <div class="entry">
+
+        
+<h1 id="training-ai-to-play-super-smash-bros.-melee">Training <span class="small-caps">AI</span> to play <em>Super Smash Bros.&nbsp;Melee</em></h1>
+<p>I trained a 20 million parameter Transformer on 3 billion frames of professional Fox player replays.</p>
+<p>It wins 95% of the time against the in-game level 9 <span class="small-caps">CPU</span>, and only cost me about $5 to train on two 3090s in 5 hours.<a href="#footnote-1UHX" class="footnote-ref" id="ref-1UHX" role="doc-noteref"><sup>1</sup></a></p>
+<p>Here it is playing as Fox (on the left):</p>
+<p><video src="https://cdn.blot.im/folder/v-ca005d1e/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/CodyGPT_trailer.webm" controls=""><a href="https://cdn.blot.im/folder/v-ca005d1e/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/CodyGPT_trailer.webm">Video</a></video></p>
+<p>It’s not set up yet to play humans today, but I wanted to share my progress because having a model that works at all is a big milestone.</p>
+<p>So far, I’ve spent over 300 hours setting up infrastructure, munging data, dealing with emulator bugs, thinking about the right feature representations, and running experiments. My goal is to eventually make a model strong enough to beat the best pro players, with human-level reaction time and running in real-time on consumer hardware.</p>
+<p>Today, I’ll go into detail on my data processing, supervised learning, and evaluation setup. In future blog posts, I’ll focus more on reinforcement learning, inference optimizations, and making it playable for humans!</p>
+<p><strong>For more videos of the model playing, skip to <a href="#footage">Footage</a>.</strong> Code is <a href="https://github.com/ericyuegu/hal" target="_blank">here</a>.</p>
+<p>This post assumes technical knowledge of deep learning from the reader.</p>
+<hr>
+<h1 id="table-of-contents">Table of contents</h1>
+<ol type="1">
+<li><a href="#why?">Why?</a></li>
+<li><a href="#melee">What is <em>Melee</em>?</a></li>
+<li><a href="#methodology">Methodology</a>
+<ol type="1">
+<li><a href="#data">Data</a>
+<ol type="1">
+<li><a href="#format">Data format and loader</a></li>
+<li><a href="#preprocessing">Preprocessing</a></li>
+<li><a href="#limitations">Limitations</a></li>
+</ol></li>
+<li><a href="#training">Training</a></li>
+<li><a href="#eval">Closed loop evaluation</a></li>
+</ol></li>
+<li><a href="#experiments">Experiments</a>
+<ol type="1">
+<li><a href="#learnings">Learnings</a></li>
+</ol></li>
+<li><a href="#footage">Footage</a></li>
+<li><a href="#next">What’s next</a></li>
+<li><a href="#acknowledgements">Acknowledgements</a></li>
+</ol>
+<hr>
+<h1 id="why">Why?</h1>
+<p>Because it’s <em>cool</em>.</p>
+<p>I believe the best projects speak to you on multiple levels, and this one was no different.</p>
+<ul>
+<li><strong><em>Melee</em> is sick</strong>
+<ul>
+<li>I love the janky gameplay, grassroots community, personalities, and tournament storylines. I’ve followed the competitive scene for over 10 years and never get sick of the game.</li>
+<li>This was important for not getting tired of debugging emulator issues or analyzing endless data &amp; replays.</li>
+</ul></li>
+<li><strong>The timing felt right</strong>
+<ul>
+<li>In the post-covid <a href="https://www.ssbwiki.com/Project_Slippi#History" target="_blank">Slippi era</a>, all the ingredients needed for imitation learning were in place. Large dumps of anonymized human replays from around the world are available in a portable format. Recent improvements to the emulator made faster-than-real-time rollouts possible, thanks to hard work from Fizzi and Vlad.</li>
+</ul></li>
+<li><strong>I saw a chance to give something unique to the community</strong>
+<ul>
+<li>The fighting game community never had its <em>Deep Blue</em> moment. AlphaStar and OpenAI Five made a big splash in 2018-2019 by conquering my favorite <span class="small-caps">RTS</span> games (and inspired me to pursue <span class="small-caps">ML</span> as a career), but a disappointing aspect was how these foundation labs moved on and never open-sourced code or weights.</li>
+<li>I plan to open-source my models and, hopefully, a training tool that can push <em>Melee</em> players to deeper levels of understanding in the game.<a href="#footnote-2UHX" class="footnote-ref" id="ref-2UHX" role="doc-noteref"><sup>2</sup></a></li>
+</ul></li>
+<li><strong>I like training models</strong>
+<ul>
+<li>I just enjoy designing training runs and building up my <span class="small-caps">ML</span> intuition. Watching loss curves go down is addictive, and it’s all the more meaningful because you know it means something is cooking—a bit like pulling a lottery ticket after you’ve<span class="push-double"></span> <span class="pull-double">“</span>paid” with thinking of an idea or configuration and coded it up. And the reward is seeing gameplay improvement magically emerge from a tiny set of weights!</li>
+<li>Generally, it seems helpful to have this kind of enjoyable inner loop in large projects to keep you going when overall progress stalls.</li>
+</ul></li>
+<li><strong>It’s relevant to my career</strong>
+<ul>
+<li>I found that I used almost everything I learned in <span class="small-caps">ML</span> and software engineering on this project—writing maintainable code; running experiments; distributed training with good logging; designing evals; inference optimization.</li>
+<li>Building this project also gave me a testbed for future research ideas.</li>
+<li>Usually, when coding for a day job, you are not the primary consumer of the code you write. It was fun and freeing to write code for myself, and I also got to really dogfood and internalize learnings from dealing with my past self’s mistakes.</li>
+</ul></li>
+</ul>
+<h1 id="melee">What is <em>Melee</em>?</h1>
+<p>Most people I’ve met have heard of <em>Super Smash Bros.</em>, but not everyone knows that there’s a vibrant esports scene. If you’re unfamiliar, I find it’s easiest to understand the appeal of <em>Melee</em> by <a href="https://www.youtube.com/watch?v=bj7IX18ccdY" target="_blank">watching a game</a>.</p>
+<p>Very briefly, the competitive ruleset has the following constraints:</p>
+<ul>
+<li>there are 6 tournament legal stages</li>
+<li>you can pick any character</li>
+<li>no items</li>
+<li>you have 4 lives (“stocks”) each, 8 minute time limit</li>
+<li>your goal is to hit each other off the stage: last person standing wins</li>
+</ul>
+<p>For a really long deep dive, you can watch <em><a href="https://www.youtube.com/watch?v=jX9hbbA-WP4" target="_blank">The Smash Brothers</a></em> documentary, which is how I was turned on to the game in college.</p>
+<h2 id="previous-work">Previous Work</h2>
+<p>The citable literature on <em>Melee</em> is outdated. Since this is a blog post, I’ll describe the landscape as I understand it.</p>
+<p>Past attempts to train a model by Vlad Firoiu (<a href="https://github.com/vladfi1/slippi-ai/tree/main" target="_blank">Phillip</a>) and Bryan Chen (<a href="https://bycn.github.io/2022/08/19/project-nabla-writeup.html" target="_blank">Project Nabla</a>) achieved impressive results using imitation learning + reinforcement learning. Phillip is state of the art—as far as I know, it goes head-to-head with some of the strongest players, but I have a feeling things can be pushed further.</p>
+<p>For one, previous projects used <span class="small-caps">LSTM</span> architectures and trained character-specific models. I strongly believe a single Transformer trained on all character replays would out-perform and be more efficient to train. General concepts like spacing and positioning are fundamentally the same across all matchups, and the bitter lesson certainly applies to <em>Melee</em>.</p>
+<p>I was also eager to play around with more feature representations, hyperparameter sweeps, and offline <span class="small-caps">RL</span> algorithms before moving on to self-play <span class="small-caps">RL</span>. My hunch is that a better, more expressive base model translates to improved priors, more coverage of states, and thus, better downstream performance.</p>
+<p>Eventually, I’m interested in AlphaStar-style population-based <span class="small-caps">RL</span>. This cool paper by <a href="https://arxiv.org/abs/2004.09468" target="_blank">Czarnecki et al., 2020</a> suggests that learning Nash equilibriums for two-player zero-sum games sometimes requires population learning to get out of cycles of suboptimal strategies.</p>
+<h1 id="methodology">Methodology</h1>
+<p>Now that we’ve convinced ourselves we should invest our free time training a model to play a 25 year old children’s party game, how do we go about it?</p>
+<p>We want the bot to be fun and fair to play against, and we want players around the world to be able to run it locally.</p>
+<p>Our goal, then, is to train the best performing model possible, subject to the following constraints:</p>
+<ul>
+<li>Single model for all 1v1 stages &amp; matchups</li>
+<li>Human-like play style</li>
+<li>Human-level reaction time</li>
+<li>Runs at real-time (60 fps) on consumer hardware</li>
+</ul>
+<p>From the <a href="https://discord.gg/qaHgPwpr" target="_blank">Slippi discord server</a>, it turns out we have an <a href="https://github.com/project-slippi/Ishiiruka" target="_blank">emulator</a>, a large dump of ~100k anonymized human replays in a <code>.slp</code> file format, and a python <span class="small-caps">API</span> called <a href="https://libmelee.readthedocs.io/en/latest/index.html" target="_blank"><code>libmelee</code></a> for running the emulator as well as reading recorded game states and controller inputs from <code>.slp</code> files. We can also get access to some pro players’ replays if we ask nicely.</p>
+<p>For the first stage of the project, <strong>we’ll approach the problem as a supervised learning (behavior cloning) task.</strong> This <em>should</em> be a strong baseline because we have a lot of expert demonstrations. The model will hopefully learn to copy its distribution, giving us human-like play style and reaction times by default.</p>
+<p>In behavior cloning, low training or validation loss doesn’t guarantee the model will perform well in the real environment. The best way to quantitatively measure training performance is to define some closed-loop evaluation metrics—e.g.&nbsp;having the model play against the in-game <span class="small-caps">CPU</span> and measuring damage dealt or stock win rate—so we’ll have to also build an evaluation harness with the emulator.</p>
+<p><img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/a6b7f353-2cf8-4df3-8fff-2a034edf6840.svg" width="920" height="147" data-action="zoom"></p>
+<p>With the high level approach defined, let’s dive in.</p>
+<h2 id="data">Data</h2>
+<p>I began with 100k replays, but by the end of the project, I had over 1 million. Here’s how I processed <span class="small-caps">4TB</span> of <code>.slp</code> files and compressed them to <span class="small-caps">200GB</span>.<a href="#footnote-3UHX" class="footnote-ref" id="ref-3UHX" role="doc-noteref"><sup>3</sup></a></p>
+<p>I started by looking at the replay data, visualizing it, looking at summary statistics, and noting any outliers or noisy/missing fields. Each episode (episode == replay) is generally sparse and autocorrelated. I filtered replays for 1v1 matches and discarded those that had encoding errors, were incomplete, were below a certain duration, or registered no damage.</p>
+<p><code>.slp</code> files have to be read by <code>libmelee</code> and don’t support arbitrary seeks or slicing across frames, so I saved each replay as a <span class="small-caps">2D</span> array where <strong>each column represents a game state feature, each row represents one frame</strong>.</p>
+<div class="wide">
+<table>
+<thead>
+<tr>
+<th>frame</th>
+<th>stage</th>
+<th>p1_char</th>
+<th>p1_stock</th>
+<th>p1_action</th>
+<th>p1_jumps_left</th>
+<th>p1_facing</th>
+<th>p1_position_x</th>
+<th>p1_position_y</th>
+<th>p1_invulnerable</th>
+<th>p1_main_stick_x</th>
+<th>p1_main_stick_y</th>
+<th>p1_button_a</th>
+<th>…</th>
+<th>p2_char</th>
+<th>p2_stock</th>
+<th>p2_action</th>
+<th>…</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td>3</td>
+<td><span class="small-caps">FOX</span></td>
+<td>4</td>
+<td>ON_HALO_DESCENT</td>
+<td>1</td>
+<td>1</td>
+<td>-41.25</td>
+<td>21.00</td>
+<td>1</td>
+<td>0.0</td>
+<td>0.0</td>
+<td>0</td>
+<td>…</td>
+<td><span class="small-caps">MARTH</span></td>
+<td>4</td>
+<td>ON_HALO_DESCENT</td>
+<td>…</td>
+</tr>
+<tr>
+<td>1</td>
+<td>3</td>
+<td><span class="small-caps">FOX</span></td>
+<td>4</td>
+<td>ON_HALO_WAIT</td>
+<td>0</td>
+<td>1</td>
+<td>-41.25</td>
+<td>21.00</td>
+<td>1</td>
+<td>0.0</td>
+<td>0.0</td>
+<td>0</td>
+<td>…</td>
+<td><span class="small-caps">MARTH</span></td>
+<td>4</td>
+<td>ON_HALO_WAIT</td>
+<td>…</td>
+</tr>
+<tr>
+<td>2</td>
+<td>3</td>
+<td><span class="small-caps">FOX</span></td>
+<td>4</td>
+<td><span class="small-caps">FALLING</span></td>
+<td>0</td>
+<td>1</td>
+<td>-41.25</td>
+<td>21.08</td>
+<td>0</td>
+<td>0.0</td>
+<td>0.3</td>
+<td>0</td>
+<td>…</td>
+<td><span class="small-caps">MARTH</span></td>
+<td>4</td>
+<td><span class="small-caps">FALLING</span></td>
+<td>…</td>
+</tr>
+<tr>
+<td>3</td>
+<td>3</td>
+<td><span class="small-caps">FOX</span></td>
+<td>4</td>
+<td><span class="small-caps">FALLING</span></td>
+<td>0</td>
+<td>1</td>
+<td>-41.25</td>
+<td>21.13</td>
+<td>0</td>
+<td>0.0</td>
+<td>0.3</td>
+<td>1</td>
+<td>…</td>
+<td><span class="small-caps">MARTH</span></td>
+<td>4</td>
+<td><span class="small-caps">FALLING</span></td>
+<td>…</td>
+</tr>
+<tr>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+<td>…</td>
+</tr>
+<tr>
+<td>8370</td>
+<td>3</td>
+<td><span class="small-caps">FOX</span></td>
+<td>1</td>
+<td>DAMAGE_AIR_3</td>
+<td>0</td>
+<td>0</td>
+<td>126.21</td>
+<td>-135.46</td>
+<td>0</td>
+<td>0.9875</td>
+<td>-0.7</td>
+<td>0</td>
+<td>…</td>
+<td><span class="small-caps">MARTH</span></td>
+<td>2</td>
+<td><span class="small-caps">DAIR</span></td>
+<td>…</td>
+</tr>
+<tr>
+<td>8371</td>
+<td>3</td>
+<td><span class="small-caps">FOX</span></td>
+<td>0</td>
+<td>DEAD_DOWN</td>
+<td>0</td>
+<td>0</td>
+<td>129.58</td>
+<td>-146.82</td>
+<td>0</td>
+<td>1.0</td>
+<td>-0.7</td>
+<td>0</td>
+<td>…</td>
+<td><span class="small-caps">MARTH</span></td>
+<td>2</td>
+<td><span class="small-caps">DAIR</span></td>
+<td>…</td>
+</tr>
+</tbody>
+</table>
+</div>
+<h3 id="format">Data format and loader</h3>
+<p>However, an unexpected sticking point was deciding on the right storage format for the full dataset.</p>
+<p>In <em>Melee</em>, game states beyond the past 5 seconds rarely matter for the next action in a given frame. This is good because it means we can keep the sequences short and memory usage low instead of training on entire replays (important for quadratic attention).</p>
+<p>For training, <strong>we want to perform two random samplings: first, selecting from replays, and second, selecting rows within a chosen replay.</strong> But, we can’t just concatenate all rows into a single massive <span class="small-caps">2D</span> array. For one, that’d be 10 billion rows. Also, naively grabbing <code>seq_len</code> contiguous rows towards the end of one episode would include rows from the next episode.</p>
+<p>The dataset is just big enough to not fit in memory on a big machine, so we need file shards on disk for efficient shuffling and sampling. I wasted a lot of time at the beginning trying to get PyArrow and Parquet working, misled by ChatGPT’s sweet guile. Vlad had also used it in his project, but columnar storage is pretty bad for fast, random row accesses. You can’t retrieve data from disk by row index without decompressing and deserializing the entire column for the entire dataset, unless you maintain some mapping of indices to row groups or file partitions. Consequently, it’s also unfriendly for distributed training, where multiple <span class="small-caps">GPU</span> processes might have multiple data workers, each needing to redundantly deserialize huge chunks of the dataset.</p>
+<p>I also experimented with memory-mapping <code>.npy</code>. This had the disadvantage of being restricted only to <code>numpy</code>-supported data types, being disk space inefficient, and still required careful coordination of concurrent workers to avoid effectively reading the entire dataset into memory simultaneously.</p>
+<p>Searching online yielded only other unsatisfactory options like <span class="small-caps">CSV</span>, pickle or torch tensor (<code>.pkl</code>/<code>.pt</code>) files, TFRecord, <span class="small-caps">HDF5</span>, and <span class="small-caps">LMDB</span>. It seemed ridiculous that I couldn’t find a better data format and loader for my use case. I even started rolling my own by serializing the entire dataset as a <code>torch.tensor</code> in memory <a href="https://ppwwyyxx.com/blog/2022/Demystify-RAM-Usage-in-Multiprocess-DataLoader/" target="_blank">and sharing it across <span class="small-caps">DDP</span> processes</a> using ForkingPickler.</p>
+<p>Eventually, I came across <a href="https://docs.mosaicml.com/projects/streaming/en/stable/index.html" target="_blank">Mosaic Streaming</a>, which I’ve since used for <span class="small-caps">LLM</span> training. (Serious question: what were people using before this for sequence learning? Perplexity and o1 pro Deep Research could not think of this for my use case.)</p>
+<p>Happily, <code>StreamingDataset</code> is a drop-in replacement for PyTorch <code>Dataset</code>, but also supports automatic compression, streaming directly from <span class="small-caps">S3</span>, mixing datasets, and deterministic resumption. I treated each episode as a separate record and randomly sampled a sequence within an episode in <code>Dataset.__getitem__</code>. This slightly over-samples frames from shorter episodes, which is negligible given how few epochs I’m likely to train on a large dataset.</p>
+<p>As <a href="https://paulcalvano.com/2024-03-19-choosing-between-gzip-brotli-and-zstandard-compression/" target="_blank">others</a> have similarly concluded, I experimented between algorithms and found <code>brotli</code> to have about 20% better compression ratios that <code>zstd</code> in my use case, but I chose <code>zstd</code> for the faster decompression speeds for training. Because of the data sparsity, <code>zstd</code> already achieved &gt;20x compression ratios, which I was happy with.</p>
+<pre><code>   1   │ data/ranked/
+   2   │ ├── [4.0K]  diamond
+   3   │ │&nbsp;&nbsp; ├── [4.0K]  test
+   4   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [ 40K]  index.json
+   5   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [ 81M]  shard.00000.mds.zstd
+   6   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [ 80M]  shard.00001.mds.zstd
+   7   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [ 81M]  shard.00002.mds.zstd
+   8   │ │&nbsp;&nbsp; ...
+  11   │ │&nbsp;&nbsp; ├── [ 44K]  train
+  12   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [3.6M]  index.json
+  13   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [2.0G]  shard.00000.mds
+  14   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [ 81M]  shard.00000.mds.zstd
+  15   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [2.0G]  shard.00001.mds
+  16   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [ 80M]  shard.00001.mds.zstd
+  17   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [2.0G]  shard.00002.mds
+  18   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [ 81M]  shard.00002.mds.zstd
+  19   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [2.0G]  shard.00003.mds
+  20   │ │&nbsp;&nbsp; ...
+1144   │ ├── [4.0K]  master
+1145   │ │&nbsp;&nbsp; ├── [ 16K]  train
+1146   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [1.9M]  index.json
+1147   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [2.0G]  shard.00000.mds
+1148   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [2.0G]  shard.00001.mds
+1149   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [2.0G]  shard.00002.mds
+1150   │ │&nbsp;&nbsp; │&nbsp;&nbsp; ├── [2.0G]  shard.00003.mds</code></pre>
+<h3 id="preprocessing">Preprocessing</h3>
+<p>Normalizing input features was straightforward, but the target features required some care.</p>
+<p><strong>Buttons</strong></p>
+<p>The GameCube controller has both digital and analog inputs that interact in precise ways.<a href="#footnote-4UHX" class="footnote-ref" id="ref-4UHX" role="doc-noteref"><sup>4</sup></a> There are 6 buttons (A, B, X, Y, Z, D-Pad right), two analog sticks (“main”/control stick and c-stick), and two shoulders (L/R) that matter for gameplay.</p>
+<p><img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/571dca7f-38f4-4971-abbe-435da9d2c23e.svg" width="6200" height="3000" data-action="zoom"></p>
+<p>Players often hold multiple buttons on the same frame, but the game engine only notices button presses and releases. For instance, in-game button presses on the left are recorded in <code>.slp</code> for all the frames the button is held down.</p>
+<div class="three column">
+<pre><code>frame | in-game
+1 L down
+2 X down
+3 
+4 X up
+5 
+6 
+7 L up A down
+8 </code></pre>
+</div>
+<div class="three column">
+<pre><code>frame | in .slp
+1 L
+2 L X
+3 L X
+4 L X
+5 L 
+6 L
+7 L A
+8 A</code></pre>
+</div>
+<div class="three column">
+<pre><code>frame | preprocessed
+1 L
+2 X
+3 X
+4 X
+5 
+6 
+7 A
+8 A</code></pre>
+</div>
+<div class="clear">
+</div>
+<p>I preprocessed this to reduce the problem to single-label instead of multi-label classification (to avoid modeling joint probabilities for 6 independent buttons per frame<a href="#footnote-5UHX" class="footnote-ref" id="ref-5UHX" role="doc-noteref"><sup>5</sup></a>). I also combined X/Y and L/R buttons. In hindsight, I’m not sure these decisions were correct at the margins but it was hard to evaluate until the rest of the project was complete.</p>
+<p><strong>Analog sticks</strong></p>
+<p>Dolphin sends analog stick <code>x, y</code> values as <code>int8</code>, and <em>Melee</em> internally clips those to <code>[-80, 80]</code>. There’s a cross-shaped dead zone at <code>[-22, 22]</code> for ergonomic reasons, where values are clamped to the nearest axis or to the origin.</p>
+<p>Using <span class="small-caps">MSE</span> to regress on continuous controls can be a training bottleneck due to vanishing gradients. We <em>could</em> learn to classify 117 positions for each axis, but most would go unused. <strong>I decided to cluster joint <code>x, y</code> positions</strong> and use cross-entropy loss for everything to avoid weighing losses of different scales.</p>
+<div class="two column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/51541b24-244a-4e6d-b17f-cb7b45505952.png" width="815" height="855" data-action="zoom">
+</div>
+<div class="two column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/dd6c2f52-53a6-4f25-8d86-98ff6f6d6fed.png" width="547" height="413" data-action="zoom">
+</div>
+<div class="clear">
+</div>
+<p><em>100k <code>x, y</code> positions randomly sampled from <span class="small-caps">100M</span> frames; 21 relatively evenly spaced cluster centers found using k-means++</em></p>
+<p>A target feature with less class imbalance seemed more tractable for the model to learn, even if it introduced some divergence in closed loop.</p>
+<p>In later experiments, I tried finer-grained discretizations by adding more clusters as well as hand-picking points using <a href="https://marp-e3fcf.web.app/" target="_blank">Altimor’s StickMap</a> to encourage more expressivity. I haven’t yet tried predicting stick x, y positions independently, but if you’re curious to see the results, skip to <a href="#experiments">Experiments</a>.</p>
+<div class="three column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/c8db5dd2-dff7-47eb-bdc2-29ce23df45fd.png" width="256" height="256">
+</div>
+<div class="three column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/b15480bb-0a04-462b-9301-3aa38b7d17eb.png" width="514" height="514" data-action="zoom">
+</div>
+<div class="three column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/966caa40-c867-42a9-a55d-7a091e25fca2.png" width="256" height="256">
+</div>
+<div class="clear">
+</div>
+<p><em>certain moves like shield drops and ledge dashes require precise stick positions</em></p>
+<div class="two column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/e4710237-cde3-4924-a663-6ae683b2c197.png" width="547" height="413" data-action="zoom">
+</div>
+<div class="two column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/4ecf0855-fc85-40c0-8e19-bb23caf752ac.png" width="547" height="413" data-action="zoom">
+</div>
+<div class="clear">
+</div>
+<h3 id="limitations">Limitations</h3>
+<p>Due to limits in the <span class="small-caps">API</span>, the following were not encoded for the <span class="small-caps">AI</span> to observe:</p>
+<ul>
+<li>Moving platforms, stage hazards</li>
+<li>Projectiles<a href="#footnote-6UHX" class="footnote-ref" id="ref-6UHX" role="doc-noteref"><sup>6</sup></a></li>
+<li>Ice Climbers’ Nana<a href="#footnote-7UHX" class="footnote-ref" id="ref-7UHX" role="doc-noteref"><sup>7</sup></a></li>
+</ul>
+<h2 id="training">Training</h2>
+<p>For training, we use next-token prediction on a decoder-only Transformer—the same way LLMs are trained. Given <em>N</em> frames of game state, predict the controller inputs for frame <em>N+1</em>, simultaneously for all <em>N</em> &lt; sequence length.</p>
+<p><img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/a220f7aa-56d8-4aca-a169-9f38d4ff997b.svg" width="791" height="514" data-action="zoom"></p>
+<p><strong>By far the most important thing I did was to overfit on a single synthetic example, and debug until I was sure that my training and closed loop eval data distributions perfectly matched.</strong></p>
+<p>In this case, I generated a single episode in emulator using a hand-designed <code>multishine.py</code> script, saved it as a dataset, preprocessed it, and repeatedly trained a model until it achieved epsilon training loss and perfectly reproduced the script’s behavior in emulator. This<span class="push-double"></span> <span class="pull-double">“</span>closed the loop” and helped me find all sorts of bugs that I had in my preprocessing and eval code, and eventually, larger flaws in model architecture. A highly regular demonstration can be reasoned about in closed loop without divergence; therefore model inputs &amp; outputs can be saved off and compared frame-by-frame with the training example. This is basically what Karpathy recommends in <a href="https://karpathy.github.io/2019/04/25/recipe/" target="_blank">Recipe for Training NNs</a>. If I had zeroed in on this idea from the beginning, I would have saved a lot of time.</p>
+<p>Once I had ironed out all the inconsistencies between train and eval, my model still was not fitting <code>multishine</code>. I concluded the model either did not have enough information about the environment, enough expressive power, or both. I found that both adding controller inputs from previous frames (teacher forcing) and changing the output heads to be MLPs instead of shallow linear layers were crucial. Finally, decoding output heads auto-regressively helped the model to coordinate separate modalities on the same frame (i.e.&nbsp;pressing down on <code>main_stick</code> on the same frame as pressing button <code>B</code>).</p>
+<div class="two column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/a4b2ffad-1bad-4bbd-b942-17561f86c104.gif" width="800" height="656" data-action="zoom">
+</div>
+<div class="two column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/061577de-9d1e-423b-875e-99c658e4de69.png" width="807" height="496" data-action="zoom">
+</div>
+<div class="clear">
+</div>
+<p><em>small model successfully overfitted on <code>multishine</code> and running in emulator</em></p>
+<p>Categorical variables like <code>action</code> have hundreds of classes. Most are rarely used (power law), so in my model, I down projected with a learned embedding shared between players before concatenating numeric inputs. This saved parameters by avoiding a fat matmul on a sparse input vector. Combined with coarse discretization on the agent’s controller inputs from previous frames, this decision saved over <span class="small-caps">1M</span> parameters in the input layer.</p>
+<p>Here’s the architecture along the data dimension for a single frame:</p>
+<p><img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/073ddc67-5da5-4e3f-8a45-87cabc25dabc.svg" width="1621" height="958" data-action="zoom"> <em>model architecture—batch and seq_len dimensions not depicted</em></p>
+<p>To aid in all of the above, I designed my code base such that I could easily register new preprocessing functions and models, and it would automatically adjust input &amp; target layer shapes according to the config. This let me freely experiment with feature engineering, embedding sizes, sequence lengths, target discretizations, and architectures until I found a combination that performed well.</p>
+<h2 id="eval">Closed loop evaluation</h2>
+<p>The second most important thing that I did was to create a closed loop evaluation harness.</p>
+<p>Often in robotics, open loop performance (validation loss) does not track with actual performance in the test environment.<a href="#footnote-8UHX" class="footnote-ref" id="ref-8UHX" role="doc-noteref"><sup>8</sup></a> A Monte Carlo estimate of model performance against a baseline opponent in closed loop is our best signal. This environment will also be necessary at a later stage of the project for online reinforcement learning, so I took pains to build something hackable yet performant.</p>
+<p>I used a <code>multiprocessing.Pool</code> of <span class="small-caps">CPU</span> workers to run dozens of instances of Dolphin emulator. I batched inputs, performed a forward pass on the latest model checkpoint, sampled from the model’s predictions, and flushed button and analog stick presses to the virtual controllers. To avoid the overhead of serializing tensors for <span class="small-caps">IPC</span>, I wrote to input and output buffers in <a href="https://pytorch.org/tutorials/intermediate/pinmem_nonblock.html" target="_blank">pinned and shared memory</a> for non-blocking transfer to <span class="small-caps">GPU</span>. Here’s a diagram of what that looks like:</p>
+<p><img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/caf9ba69-17d6-4ca3-9ab4-535b59504768.svg" width="929" height="728" data-action="zoom"></p>
+<p>With a <span class="small-caps">7M</span> model running on <span class="small-caps">RTX</span> 3090 and 32 <span class="small-caps">CPU</span> workers, the timings for one emulator step look like this:</p>
+<table>
+<thead>
+<tr>
+<th>Eval step</th>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>console.step()</code></td>
+<td>4-5 ms</td>
+</tr>
+<tr>
+<td><code>preprocessing</code></td>
+<td>1.5-3 ms</td>
+</tr>
+<tr>
+<td><code>update context</code></td>
+<td>0.3 ms</td>
+</tr>
+<tr>
+<td><code>buffer writein</code></td>
+<td>0.15 ms</td>
+</tr>
+<tr>
+<td><code>batched model.forward()</code></td>
+<td>5-7 ms</td>
+</tr>
+<tr>
+<td><code>buffer writeback</code></td>
+<td>0.1 ms</td>
+</tr>
+<tr>
+<td><code>postprocessing</code></td>
+<td>0.4 ms</td>
+</tr>
+<tr>
+<td><code>send controller inputs</code></td>
+<td>0.15 ms</td>
+</tr>
+<tr>
+<td><code>total</code></td>
+<td>12-16ms</td>
+</tr>
+</tbody>
+</table>
+<p>There are more optimizations to be made. We should overlap the context update with worker preprocessing, and we can use <span class="small-caps">KV</span> caching, model distillation, and multi-token prediction to work around the 5-7ms inference budget—but that’s for another day.</p>
+<p>In hindsight, I would have thought harder to design clever metrics earlier on so that runs could still be compared when improvements started to fall within the eval noise for<span class="push-double"></span> <span class="pull-double">“</span>stock win rate.” Train and validation losses are no longer comparable once you’re fiddling with the number of target classes, and aren’t always correlated with closed loop performance anyways. Besides match win rate, stocks won/lost, and damage dealt/taken normalized by number of episodes, I wish I had also normalized by number of frames and tracked stats like average damage at kill, average time per kill, average combo length, or openings per kill from the start. These require coming up with heuristics but would’ve provide more granular dimensions to measure progress along.</p>
+<h1 id="experiments">Experiments</h1>
+<p>Great! Now we have all the ingredients needed to train a model on human replays. Below, I list both positive and negative results from experiments I tried (roughly in order of increasing surprise), and some speculative explanations for them.</p>
+<p><strong>Making the model wider and shallower</strong> improved both performance and latency. Increasing sequence length from 128 to 256 frames had dramatic improvement, but gains were diminished going to 384.</p>
+<p><strong>Increasing batch size</strong> from 256 to 512 resulted in near linear training speedups.</p>
+<ul>
+<li>It seems we were under the <a href="https://arxiv.org/pdf/1812.06162" target="_blank">critical batch size</a>.</li>
+<li>Going to 1024 made the model generalize much worse—there’s some noise from smaller batch sizes that seem to help regularize learning.</li>
+</ul>
+<p><strong>Feeding controller inputs</strong> from previous frames and using <strong>autoregressive <span class="small-caps">MLP</span> output heads</strong> instead of independent, shallow linear heads were key to the model’s expressivity and accuracy in closed loop.</p>
+<ul>
+<li>I thought the transformer blocks in the model trunk would learn to write into separate dimensions of the latent space for the shallow output heads to read from, but it seems the nonlinearities were necessary.</li>
+<li>Same for explicitly adding previous controller presses instead of inferring from changes in game state—at small scale, inductive biases are important!</li>
+</ul>
+<p><strong>Relative position encodings</strong> (<a href="https://arxiv.org/abs/1809.04281" target="_blank">Huang et al., 2018</a>) achieved the same validation loss in half the number of steps as trained absolute position encodings, but were about 37% slower in wall clock time per step.</p>
+<ul>
+<li>The slowdown is mostly from not being able to call FlashAttention <span class="small-caps">CUDA</span> kernels when using a modified self-attention with relative positional encodings.</li>
+<li>The improvement makes sense since controller input timings should mostly be determined very locally by how many frames apart they are from previous game state and controller presses, instead of forcing the model to learn to subtract arbitrary absolute embeddings.</li>
+<li>I did not try static sinusoidal encodings (but should).</li>
+</ul>
+<p><strong>Fourier positional embeddings</strong> I assumed would provide the model with high- and low-frequency features for better understanding character x, y positions, but this did not seem to help.</p>
+<ul>
+<li>Other input features (<code>action_frame</code>, <code>hitlag_left</code>, <code>invulnerability_left</code>, <code>ECB</code> x, y coordinates<a href="#footnote-9UHX" class="footnote-ref" id="ref-9UHX" role="doc-noteref"><sup>9</sup></a>) were also too noisy.</li>
+<li>All stages are at fixed absolute positions, so the model is able to memorize ledge locations and infer whether it’s falling based on its action state.</li>
+<li>I did not (but should) try calculating the diff of character x, y positions between frames as an input feature.</li>
+</ul>
+<p><strong>Controller discretization</strong> had mixed results. The left three below were roughly tied in closed loop performance.</p>
+<div class="four column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/dd6c2f52-53a6-4f25-8d86-98ff6f6d6fed.png" width="547" height="413" data-action="zoom">
+</div>
+<div class="four column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/4ecf0855-fc85-40c0-8e19-bb23caf752ac.png" width="547" height="413" data-action="zoom">
+</div>
+<div class="four column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/e4710237-cde3-4924-a663-6ae683b2c197.png" width="547" height="413" data-action="zoom">
+</div>
+<div class="four column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/5c1cd6c7-f510-43f9-bb8e-914af791d0a3.png" width="568" height="413" data-action="zoom">
+</div>
+<div class="clear">
+</div>
+<ul>
+<li>I thought that all else equal, more target discretization would be better, but in fact, the rightmost did worst by far.</li>
+<li>Maybe due to player behavior and discretization in the game engine, the effective number of angles actually used on the controller are relatively few. It’s possible I didn’t train long enough or have enough data, and coarser discretization has higher accuracy &amp; less divergence in this regime.</li>
+</ul>
+<p>However, due to discretizing analog target features, validation loss often tracked well with closed loop evaluation metrics, something rare to see in control tasks. <img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/f7507d2f-9855-41e7-82db-0ec9c3c41cde.png" width="2528" height="1250" data-action="zoom"></p>
+<ul>
+<li><em>Melee</em> can be unforgiving to errant inputs, so in a large human dataset, there are lots of examples for recovering from bad trajectories, which is important for behavior cloning.</li>
+<li>I did not try predicting raw recorded button presses (but should).</li>
+</ul>
+<p>A custom idea that did not work: I tried <strong>label smoothing</strong> by distributing the probability mass of a <span class="small-caps">2D</span> Gaussian around the ground truth <code>x, y</code> to nearby reference points, like so:</p>
+<div class="two column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/dd6c2f52-53a6-4f25-8d86-98ff6f6d6fed.png" width="547" height="413" data-action="zoom">
+</div>
+<div class="two column">
+<img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/26570ad3-18ee-413e-8eb6-63696eb67025.png" width="691" height="701" data-action="zoom">
+</div>
+<div class="clear">
+</div>
+<ul>
+<li>I was surprised because this idea is similar to a <span class="small-caps">2D</span> version of <a href="https://arxiv.org/abs/2403.03950v1" target="_blank">Farebrother et al., 2024</a> that uses Gaussian histogram loss. A related intuition I’ve had about why knowledge distillation works well is that it provides<span class="push-double"></span> <span class="pull-double">“</span>dark knowledge” in the form of soft labels.</li>
+<li>Maybe this injected more noise to the model’s logits than was necessary. Given how unforgiving &amp; path dependent the game environment’s dynamics are, errant button presses can be deadly.</li>
+</ul>
+<h2 id="learnings">Learnings</h2>
+<ul>
+<li>Investment in tooling almost always pays for itself
+<ul>
+<li>I spent nearly 40 hours at the beginning of the project getting the emulator to work (building from source on older version of <code>glibc</code>) and ensuring it reproduced inputs. Huge thanks to Vlad for help on this.</li>
+<li>Once my training code was up, my workflow became: launch job, watch Weights &amp; Biases, <code>rsync</code> replays to laptop, and analyze in <a href="https://slippilab.com/" target="_blank">Slippi Lab</a>.</li>
+<li>Logging closed loop eval metrics in W&amp;B meant I usually didn’t even need to look at replays to know if a run was performing particularly well or poorly.</li>
+</ul></li>
+<li>Premature optimizations sneak up on you
+<ul>
+<li>I wanted to use serializable configs to define everything so that experiments would be deterministic and reproducible from W&amp;B.
+<ul>
+<li>But, this led to needing to pass config objects across APIs everywhere—I understand now why research scientists like to use global namespaces like <a href="https://abseil.io/docs/python/guides/flags" target="_blank"><code>absl.flags</code></a>.</li>
+<li>I never ended up needing to tune certain hyperparameters.</li>
+</ul></li>
+<li>I liked having registries for data preprocessing functions and model architectures in code, as they made launching from <span class="small-caps">CLI</span> easier.</li>
+</ul></li>
+<li>It’s hard to exercise the restraint to avoid changing more than 1 thing per experiment.</li>
+<li>A dev log is great, but once I was in the research portion of a project, writing things down as if presenting findings to an advisor with less context often helped clarify my thoughts enough to get unstuck.</li>
+<li><a href="https://github.com/pytorch/tensordict/tree/main" target="_blank">tensordict</a> is an underrated library. Very helpful for multimodal and <span class="small-caps">RL</span> settings, of which this was both. It helps to avoid tedious dictionary comprehensions when slicing input &amp; output tensors during data preprocessing, training, and eval, and <code>.to()</code> is automatically asynchronous under the hood.</li>
+</ul>
+<h3 id="pitfalls">Pitfalls</h3>
+<p>Here were some silly issues that I ran into at various points.</p>
+<ul>
+<li>Be careful with the dimensions you pass to <code>torch.nn.CrossEntropyLoss</code>. I had nonsensical loss for a while because my dimensions were <code>(batch, seq_len, C)</code> instead of <code>(batch, C, seq_len)</code> or <code>(batch * seq_len, C)</code>.</li>
+<li>Detach output heads when feeding them to each other autoregressively. You usually don’t want to take different numbers of gradient steps on the same batch for different heads in non-adversarial settings.</li>
+<li>In closed loop, be careful about padding and selecting model predictions from the correct index in the context window—this is usually <code>min(curr_episode_frame, block_size)</code>. But, during training, I sampled frames at an offset—<code>(1, episode_len - seq_len)</code>—due to using controller inputs from the previous frame as an input feature. This means you should accordingly discard 1 frame at test time!</li>
+<li>The Dolphin emulator can be finicky to configure—by default, it is set up for online play and incorporates a 2 frame delay, which must be set to 0 for local eval. If running multiple in parallel, it’s important to point everything to temp directories so that configs and replay writing streams don’t mutually interfere.</li>
+</ul>
+<h1 id="footage">Footage</h1>
+<p>Below are clips of earlier and current versions of the model playing the level 9 <span class="small-caps">CPU</span> and some interesting things I noticed.</p>
+<p>Remember that <strong>the model can’t explicitly see anything about the stage at all, including platforms and projectiles</strong>.</p>
+<p>Here’s an example showing the difference in behavior between an earlier and later model. The stick movement is erratic in the first, and relatively humanlike in the second. <video src="https://cdn.blot.im/folder/v-5267b7e1/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/erratic_sticks.webm" controls=""><a href="https://cdn.blot.im/folder/v-5267b7e1/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/erratic_sticks.webm">Video</a></video> <video src="https://cdn.blot.im/folder/v-ec40e172/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/smooth_sticks.webm" controls=""><a href="https://cdn.blot.im/folder/v-ec40e172/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/smooth_sticks.webm">Video</a></video></p>
+<p>The model practices moonwalking between stocks. <img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/2a05823c-5714-49e8-b2c5-95a5ad16b438.gif" width="800" height="656" data-action="zoom"></p>
+<p>It can pivot f-smash. <video src="https://cdn.blot.im/folder/v-7d20d5ff/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/MasterGPT_pivot_fsmash.webm" controls=""><a href="https://cdn.blot.im/folder/v-7d20d5ff/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/MasterGPT_pivot_fsmash.webm">Video</a></video></p>
+<p>When I trained it on <a href="https://liquipedia.net/smash/Cody_Schwab" target="_blank">Cody</a>, it’s a menace on the ledge. It even goes out for <a href="https://www.youtube.com/watch?v=ngqd5nA2XAU" target="_blank">Armada shines</a> but totally whiffs. In general, the model is full jumping and missing wavedashes all the time from pressing <code>X</code> for too long (because it’s bad at counting frames). <video src="https://cdn.blot.im/folder/v-b32e614f/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/CodyGPT_edge_guard.webm" controls=""><a href="https://cdn.blot.im/folder/v-b32e614f/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/CodyGPT_edge_guard.webm">Video</a></video></p>
+<p>Sometimes, it will kill itself trying to recover and imagining Randall is there. <video src="https://cdn.blot.im/folder/v-074adef4/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/CodyGPT_yoshis_sd.webm" controls=""><a href="https://cdn.blot.im/folder/v-074adef4/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/CodyGPT_yoshis_sd.webm">Video</a></video></p>
+<p>The level 9 <span class="small-caps">CPU</span> it’s playing against has superhuman <a href="https://www.ssbwiki.com/Directional_influence" target="_blank"><span class="small-caps">DI</span></a> and frequently gets out of moves (up air) that normally combo or kill, which I think gives a pessimistic demo of the model’s ability to combo human players. <video src="https://cdn.blot.im/folder/v-5946bcac/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/CodyGPT_jiggly_DI.webm" controls=""><a href="https://cdn.blot.im/folder/v-5946bcac/blog_20f19b440702429f891e7443ffe64924/_attachments/ssbm/CodyGPT_jiggly_DI.webm">Video</a></video></p>
+<p>Earlier on, the model frequently mis-input <code>side-B</code> as Fox, which often results in a self-destruct. However, you can save yourself by pressing <code>B</code> exactly on frames 20-24 to shorten the move and stay on stage. You can see the model attempting (but failing) to do that here.</p>
+<p><img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/037f9e47-4712-4305-91ae-38c0f8f9d6bb.gif" width="800" height="465" data-action="zoom"></p>
+<h1 id="next">What’s next</h1>
+<p>In my next blog post, I plan to experiment with 10x more data, bigger models, inference optimizations, offline <span class="small-caps">RL</span>, dealing with network latency with multi-token prediction, and playing against humans—stay tuned.</p>
+<p><strong>If you want to collaborate or know a pro player willing to contribute data, please reach out by email or <a href="https://twitter.com/ericyuegu" target="_blank">twitter</a></strong>. I’d also love to hear any thoughts and feedback in the comments!</p>
+<p>Thank you for reading.</p>
+<h1 id="acknowledgements">Acknowledgements</h1>
+<p>Countless friends gave me encouragement and feedback. I want to particularly thank Stephen Wu and Kate Yeh for their support, and Alex Reibman for reading an early draft.</p>
+<p>Thank you to Eric Jang for his valuable advice on imitation learning and riffing with me on <span class="small-caps">RL</span>.</p>
+<p>I’m grateful to Fizzi and Vlad Firoiu for paving the way with improvements to Slippi and Dolphin which made this project possible.</p>
+<section id="footnotes" class="footnotes footnotes-end-of-document" role="doc-endnotes">
+<hr>
+<ol>
+<li id="footnote-1UHX"><p>$2 in <span class="small-caps">S3</span> egress, $0.6/hr for GPUs at latest Vast prices <img src="https://cdn.blot.im/blog_20f19b440702429f891e7443ffe64924/_image_cache/f44eab6c-174b-4a5c-b0d9-74bd79a074e0.png" width="1618" height="214" data-action="zoom"><a href="#ref-1UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+<li id="footnote-2UHX"><p>There’s a risk that players will use <span class="small-caps">AI</span> to cheat in online competitive ladder, which is why I’m not releasing weights just yet. I’ll work with the right folks to mitigate this. For the record, I don’t think <span class="small-caps">AI</span> will destroy competitive <em>Melee</em>. Nintendo <a href="https://www.si.com/esports/fgc/nintendo-has-never-supported-smash-esports-and-itll-continue-to-thrive-anyway" target="_blank">has tried</a> and failed for years, but the community is insanely strong and grassroots. I’m also optimistic that the net impact of releasing model weights will be positive from looking at chess, where engines have dramatically improved average skill level while the player base is at an all-time high.<a href="#ref-2UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+<li id="footnote-3UHX"><p>At float32, <code>~100 cols * 4 bytes * ~10k frames/episode * 1M episodes = 4000GB</code><a href="#ref-3UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+<li id="footnote-4UHX"><p>As an example: the L/R shoulders control the shield as a function of <code>max(l_shoulder, r_shoulder)</code>. They are clamped to 0.0 for values under 0.3 and hide a digital button inside that registers as a separate input.<a href="#ref-4UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+<li id="footnote-5UHX"><p>Independently outputting probabilities for each button to fire on every frame results in a lack of<span class="push-double"></span> <span class="pull-double">“</span>coordination”—button presses often need to occur in correlated groups, with tight timings across frames.<a href="#ref-5UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+<li id="footnote-6UHX"><p>There are hundreds, if not thousands, of unique<span class="push-double"></span> <span class="pull-double">“</span>entities,” many of which still have not been deciphered from the <span class="small-caps">ROM</span>. Among these, ordinary projectiles each have unique hit boxes, durations, and interactivity.<a href="#ref-6UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+<li id="footnote-7UHX"><p>Ice Climbers are actually two characters in one, each with independent player state. After I got my baseline working, I actually spent over a full day trying to retrofit Nana into my data schema and codebase. This required reprocessing terabytes of replays and touched nearly all parts of my code because of broken assumptions. I eventually gave up and decided the <span class="small-caps">AI</span> would have to manage with only seeing Popo—sorry <span class="small-caps">IC</span> mains!<a href="#ref-7UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+<li id="footnote-8UHX"><p>Data scarcity—you need a lot of expert demonstrations to get adequate coverage of all the different states the agent might visit in the environment.<a href="#ref-8UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+<li id="footnote-9UHX"><p><a href="https://www.youtube.com/watch?v=gp4C9Z8yhAk" target="_blank"><span class="small-caps">ECB</span> explanation video</a><a href="#ref-9UHX" class="footnote-back" role="doc-backlink"><span class="small-caps">↩︎</span></a></p></li>
+</ol>
+</section>
+
+
+        <hr class="minimal">
+        <div class="left-label">
+          <h5>Date</h5>
+
+          February 24, 2025
+        </div>
+
+
+
+        <hr class="minimal">
+        <div class="left-label">
+          <h5>Previously</h5>
+          <a class="rounded-link" href="/philosophy-on-coding-agents">
+            <span class="title">Philosophy on coding agents</span>
+            <span class="summary">We’re currently building an AI coding product at Imbue. I think one important and under-valued direction in coding agents is disambiguation with</span>
+          </a>
+        </div>
+
+        <div class="clear"></div>
+        <div class="clear"></div>
+
+      </div>
+      <script src="https://cdn.blot.im/template/b6/2b/2cec568cef01dd6c1a44738fa259/script.js" type="text/javascript"></script>    </div>
+  </div>
+
+
+</body></html>

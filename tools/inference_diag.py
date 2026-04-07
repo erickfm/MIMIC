@@ -74,23 +74,34 @@ print(f"Cat maps: {len(cat_maps)} cols")
 fg = F.build_feature_groups(no_opp_inputs=cfg.no_opp_inputs)
 categorical_cols = F.get_categorical_cols(fg)
 
-# ── Load data ────────────────────────────────────────────────────────────
-parquets = sorted(glob.glob(f"{args.data_dir}/*.parquet"))
-if not parquets:
-    print(f"No parquets in {args.data_dir}"); sys.exit(1)
+# ── Load data (from .pt shards) ───────────────────────────────────────────
+data_dir = Path(args.data_dir)
+manifest_path = data_dir / "tensor_manifest.json"
+if not manifest_path.exists():
+    print(f"No tensor_manifest.json in {args.data_dir}"); sys.exit(1)
+with open(manifest_path) as fh:
+    manifest = json.load(fh)
+shard_names = manifest.get("train_shards", [])
+if not shard_names:
+    print("No train shards in manifest"); sys.exit(1)
 
 rng = np.random.default_rng(42)
-selected = rng.choice(parquets, size=min(20, len(parquets)), replace=False)
+selected_shards = rng.choice(shard_names, size=min(5, len(shard_names)), replace=False)
 
-all_dfs = []
-for pf in selected:
-    df = pd.read_parquet(pf)
-    df = df[df["frame"] >= 0].reset_index(drop=True)
-    if len(df) >= cfg.max_seq_len:
-        all_dfs.append(df)
-print(f"Loaded {len(all_dfs)} games from {len(selected)} files")
+# Load games from shards
+all_games = []  # list of (states_dict, n_frames)
+for sname in selected_shards:
+    shard = torch.load(data_dir / sname, weights_only=True)
+    offsets = shard["offsets"]
+    states = shard["states"]
+    for g in range(shard["n_games"]):
+        start, end = offsets[g].item(), offsets[g + 1].item()
+        if end - start >= cfg.max_seq_len:
+            game_states = {k: v[start:end] for k, v in states.items()}
+            all_games.append((game_states, end - start))
+print(f"Loaded {len(all_games)} games from {len(selected_shards)} shards")
 
-if not all_dfs:
+if not all_games:
     print("No games long enough for the window size"); sys.exit(1)
 
 # ── Sample windows and run inference ─────────────────────────────────────
@@ -104,32 +115,27 @@ n = 0
 for _ in range(args.n_windows * 5):
     if n >= args.n_windows:
         break
-    game = all_dfs[rng.integers(len(all_dfs))]
-    if len(game) < cfg.max_seq_len + 1:
-        continue
-    start = rng.integers(0, len(game) - cfg.max_seq_len)
-    window = game.iloc[start:start + cfg.max_seq_len].copy()
+    game_states, game_len = all_games[rng.integers(len(all_games))]
+    start = rng.integers(0, game_len - cfg.max_seq_len)
+    end = start + cfg.max_seq_len
 
-    target_row = game.iloc[start + cfg.max_seq_len - 1]
-    all_target_main_x.append(float(target_row["self_main_x"]))
-    all_target_main_y.append(float(target_row["self_main_y"]))
+    # Target analog values (already normalized in shards — denorm for comparison)
+    if "self_analog" in game_states:
+        analog = game_states["self_analog"]
+        target_main_x = analog[end - 1, 0].item()
+        target_main_y = analog[end - 1, 1].item()
+        # Denormalize
+        if "self_main_x" in norm_stats:
+            m, s = norm_stats["self_main_x"]
+            target_main_x = target_main_x * s + m
+        if "self_main_y" in norm_stats:
+            m, s = norm_stats["self_main_y"]
+            target_main_y = target_main_y * s + m
+        all_target_main_x.append(target_main_x)
+        all_target_main_y.append(target_main_y)
 
-    df = window.copy()
-    df = F.preprocess_df(df, categorical_cols, cat_maps)
-    F.apply_normalization(df, norm_stats)
-
-    missing_cats = [c for c in categorical_cols if c not in df.columns]
-    if missing_cats:
-        df = pd.concat([df, pd.DataFrame({c: 0 for c in missing_cats},
-                                         index=df.index)], axis=1)
-    for _, meta in F.walk_groups(fg, return_meta=True):
-        if meta["ftype"] != "categorical":
-            for col in meta["cols"]:
-                if col not in df.columns:
-                    df[col] = 0.0
-
-    state_seq = F.df_to_state_tensors(df, fg)
-    batch = {k: v.unsqueeze(0).to(DEVICE) for k, v in state_seq.items()}
+    batch = {k: v[start:end].unsqueeze(0).to(DEVICE)
+             for k, v in game_states.items()}
 
     with torch.no_grad():
         preds = model(batch)

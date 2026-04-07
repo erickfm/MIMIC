@@ -17,15 +17,11 @@
     --text-secondary: #A8A198;
     --text-tertiary: #787068;
     --text-heading: #E4DED6;
-    --accent-terracotta: #A8897C;
-    --accent-terracotta-light: #B89A8D;
-    --accent-sage: #8A9480;
-    --accent-sage-light: #9AA48F;
-    --accent-gold: #A89878;
-    --accent-sand: #B0A490;
-    --accent-stone-blue: #8494A0;
-    --accent-clay-rose: #9A8A82;
-    --accent-umber: #8A7E70;
+    --accent: #A8897C;          /* terracotta — titles, primary accent */
+    --accent-light: #B89A8D;
+    --sage: #8A9480;             /* sage — structure, connections, stable */
+    --sage-light: #9AA48F;
+    --warm-light: #C0B8AE;       /* warm gray — values, dimensions, code */
     --border-subtle: #3A3A3A;
     --border-medium: #484848;
     --border-active: #565656;
@@ -65,7 +61,7 @@
   }
   h3 {
     font-family: var(--font-heading);
-    color: var(--accent-terracotta);
+    color: var(--accent);
     margin: 56px 0 24px;
     font-size: 24px;
     font-weight: normal;
@@ -77,7 +73,7 @@
   .box-row { text-align: center; }
   .arrow { text-align: center; color: var(--text-tertiary); font-size: 13px; line-height: 1; padding: 3px 0; }
   .label { font-size: 13px; color: var(--text-tertiary); letter-spacing: 0.02em; }
-  .dim { color: var(--accent-gold); font-weight: 500; font-size: 14px; font-family: var(--font-mono); }
+  .dim { color: var(--warm-light); font-weight: 500; font-size: 14px; font-family: var(--font-mono); }
   .note {
     background: var(--bg-surface);
     border: 1px solid var(--border-subtle);
@@ -108,8 +104,8 @@
     font-size: 13px;
     box-shadow: var(--shadow-sm);
   }
-  .frame-box .title { color: var(--accent-stone-blue); font-weight: 500; font-size: 14px; margin-bottom: 6px; letter-spacing: 0.02em; }
-  .frame-box .feat { color: var(--accent-sage); font-size: 12px; line-height: 1.65; }
+  .frame-box .title { color: var(--warm-light); font-weight: 500; font-size: 14px; margin-bottom: 6px; letter-spacing: 0.02em; }
+  .frame-box .feat { color: var(--sage); font-size: 12px; line-height: 1.65; }
   .frame-dots { color: var(--text-tertiary); font-size: 24px; align-self: center; padding: 0 8px; }
 
   /* Encoder */
@@ -119,14 +115,14 @@
     box-shadow: var(--shadow-sm);
     display: block;
   }
-  .encoder .title { color: var(--accent-terracotta); font-family: var(--font-heading); font-size: 18px; margin-bottom: 12px; }
+  .encoder .title { color: var(--accent); font-family: var(--font-heading); font-size: 18px; margin-bottom: 12px; }
   .encoder .step { color: var(--text-primary); font-size: 14px; margin: 6px 0; }
 
   /* Vector row */
   .vec-row { display: flex; gap: 8px; justify-content: center; margin: 8px 0; }
   .vec {
     background: var(--bg-surface);
-    border: 1px solid var(--accent-gold);
+    border: 1px solid var(--border-medium);
     border-radius: 5px;
     padding: 6px 14px;
     font-size: 13px;
@@ -141,7 +137,7 @@
     box-shadow: var(--shadow-sm);
     display: inline-block;
   }
-  .transformer-layer .title { color: var(--accent-sage-light); font-weight: 500; font-size: 13px; }
+  .transformer-layer .title { color: var(--sage-light); font-weight: 500; font-size: 13px; }
 
   /* Detail sections */
   .layer-detail {
@@ -153,20 +149,20 @@
     box-shadow: var(--shadow-sm);
   }
   .layer-detail .section { margin: 16px 0; }
-  .layer-detail .section-title { color: var(--accent-clay-rose); font-weight: 500; font-size: 13px; margin-bottom: 8px; }
+  .layer-detail .section-title { color: var(--accent); font-weight: 500; font-size: 13px; margin-bottom: 8px; }
 
   /* Attention heads */
-  .heads-row { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin: 12px 0; }
+  .heads-row { display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; margin: 8px 0; max-width: 520px; margin-left: auto; margin-right: auto; }
   .head {
     background: var(--bg-elevated);
-    border: 1px solid var(--accent-clay-rose);
-    border-radius: 5px;
-    padding: 6px 10px;
-    min-width: 72px;
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 4px 8px;
+    width: 60px;
     font-size: 13px;
     text-align: center;
   }
-  .head .name { color: var(--accent-sand); font-weight: 700; font-size: 14px; }
+  .head .name { color: var(--text-primary); font-weight: 700; font-size: 14px; }
   .head .info { color: var(--text-tertiary); font-size: 12px; }
 
   /* Attention computation */
@@ -179,10 +175,10 @@
     font-size: 13px;
     line-height: 1.8;
   }
-  .attn-calc .frame-label { color: var(--accent-stone-blue); }
-  .attn-calc .score { color: var(--accent-gold); }
-  .attn-calc .mask { color: var(--accent-terracotta); }
-  .attn-calc .weight { color: var(--accent-sage-light); }
+  .attn-calc .frame-label { color: var(--warm-light); }
+  .attn-calc .score { color: var(--warm-light); }
+  .attn-calc .mask { color: var(--accent); }
+  .attn-calc .weight { color: var(--sage-light); }
   .attn-calc .comment { color: var(--text-tertiary); }
 
   /* Prediction heads */
@@ -192,15 +188,15 @@
     box-shadow: var(--shadow-sm);
     display: block;
   }
-  .pred-heads .title { color: var(--accent-sand); font-family: var(--font-heading); font-size: 18px; margin-bottom: 12px; }
+  .pred-heads .title { color: var(--text-primary); font-family: var(--font-heading); font-size: 18px; margin-bottom: 12px; }
   .pred-chain { display: flex; gap: 6px; justify-content: center; align-items: center; flex-wrap: wrap; }
   .pred-box {
     background: var(--bg-elevated);
-    border: 1px solid var(--accent-umber);
+    border: 1px solid var(--border-medium);
     border-radius: 6px;
     padding: 8px 14px;
     font-size: 13px;
-    color: var(--accent-sand);
+    color: var(--text-primary);
   }
   .pred-arrow { color: var(--text-tertiary); }
 
@@ -223,8 +219,8 @@
     letter-spacing: 0.03em;
     text-transform: uppercase;
   }
-  .compare .stable { background: var(--bg-elevated); color: var(--accent-sage); border: 1px solid var(--border-medium); }
-  .compare .unstable { background: var(--bg-elevated); color: var(--accent-terracotta); border: 1px solid var(--border-medium); }
+  .compare .stable { background: var(--bg-elevated); color: var(--sage); border: 1px solid var(--border-medium); }
+  .compare .unstable { background: var(--bg-elevated); color: var(--accent); border: 1px solid var(--border-medium); }
 
   /* Head specialization */
   .spec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 10px 0; }
@@ -234,7 +230,7 @@
     border-radius: 5px;
     padding: 8px 10px;
   }
-  .spec-item .role { color: var(--accent-clay-rose); font-weight: 500; margin-bottom: 2px; font-size: 13px; }
+  .spec-item .role { color: var(--accent); font-weight: 500; margin-bottom: 2px; font-size: 13px; }
   .spec-item .desc { color: var(--text-secondary); font-size: 12px; }
 
   /* Width comparison */
@@ -248,19 +244,19 @@
     text-align: center;
     box-shadow: var(--shadow-sm);
   }
-  .width-option .config { color: var(--accent-stone-blue); font-weight: 500; font-size: 15px; margin-bottom: 10px; font-family: var(--font-mono); }
-  .width-option .heads-mini { display: flex; gap: 4px; justify-content: center; flex-wrap: wrap; margin: 10px 0; }
+  .width-option .config { color: var(--warm-light); font-weight: 500; font-size: 15px; margin-bottom: 10px; font-family: var(--font-mono); }
+  .width-option .heads-mini { display: grid; grid-template-columns: repeat(8, 26px); gap: 3px; justify-content: center; margin: 8px auto; width: fit-content; }
   .width-option .head-mini {
-    width: 28px;
-    height: 28px;
-    border-radius: 5px;
+    width: 26px;
+    height: 26px;
+    border-radius: 4px;
     background: var(--bg-elevated);
-    border: 1px solid var(--accent-clay-rose);
+    border: 1px solid var(--accent);
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 9px;
-    color: var(--accent-sand);
+    color: var(--text-primary);
     font-family: var(--font-mono);
   }
 </style>
@@ -297,7 +293,7 @@
 
   <div style="display: flex; gap: 12px; margin: 12px 0; flex-wrap: wrap; justify-content: center;">
     <div style="flex: 1; min-width: 200px;">
-      <div style="color: var(--accent-terracotta); font-size: 12px; font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Categorical &rarr; Embedding</div>
+      <div style="color: var(--accent); font-size: 12px; font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Categorical &rarr; Embedding</div>
       <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7; text-align: left;">
         stage, self_port, opp_port<br>
         self_char, opp_char<br>
@@ -309,7 +305,7 @@
       <div style="font-size: 11px; color: var(--text-tertiary); margin-top: 4px;">~37 tokens, each int &rarr; <span class="dim">256-d</span> embedding</div>
     </div>
     <div style="flex: 1; min-width: 200px;">
-      <div style="color: var(--accent-sage); font-size: 12px; font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Numeric &rarr; MLP</div>
+      <div style="color: var(--sage); font-size: 12px; font-weight: 500; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Numeric &rarr; MLP</div>
       <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.7; text-align: left;">
         global (timer, frame count, &hellip;20 floats)<br>
         self_player (pos, vel, %, stocks, &hellip;23 floats)<br>
@@ -383,10 +379,10 @@
   <div style="text-align: center; color: var(--text-secondary); margin-bottom: 12px; font-size: 13px;">Input: 180 vectors, each <span class="dim">768-d</span></div>
 
   <div style="max-width: 580px; margin: 0 auto;">
-    <div class="box-row"><span style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 4px 16px; font-size: 13px; color: var(--accent-clay-rose); display: inline-block;">Layer Norm</span></div>
+    <div class="box-row"><span style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 4px 16px; font-size: 13px; color: var(--accent); display: inline-block;">Layer Norm</span></div>
     <div class="arrow">&darr;</div>
     <div style="background: var(--bg-elevated); border: 1px solid var(--border-medium); border-radius: 6px; padding: 12px 14px; text-align: center; margin: 4px 0;">
-      <div style="color: var(--accent-clay-rose); font-family: var(--font-heading); font-size: 15px; margin-bottom: 8px;">Multi-Head Attention</div>
+      <div style="color: var(--accent); font-family: var(--font-heading); font-size: 15px; margin-bottom: 8px;">Multi-Head Attention</div>
       <div class="heads-row">
         <div class="head"><div class="name">H1</div><div class="info">96-d</div></div>
         <div class="head"><div class="name">H2</div><div class="info">96-d</div></div>
@@ -399,15 +395,15 @@
       </div>
       <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 4px;">Concat &rarr; Linear(768, 768)</div>
     </div>
-    <div style="text-align: center; color: var(--accent-sage); font-size: 12px; margin: 6px 0;">+ residual</div>
+    <div style="text-align: center; color: var(--sage); font-size: 12px; margin: 6px 0;">+ residual</div>
 
-    <div class="box-row"><span style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 4px 16px; font-size: 13px; color: var(--accent-clay-rose); display: inline-block;">Layer Norm</span></div>
+    <div class="box-row"><span style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 4px 16px; font-size: 13px; color: var(--accent); display: inline-block;">Layer Norm</span></div>
     <div class="arrow">&darr;</div>
     <div style="background: var(--bg-elevated); border: 1px solid var(--border-medium); border-radius: 6px; padding: 10px 14px; text-align: center; margin: 4px 0;">
-      <div style="color: var(--accent-sage); font-family: var(--font-heading); font-size: 15px; margin-bottom: 6px;">Feed-Forward Network</div>
+      <div style="color: var(--sage); font-family: var(--font-heading); font-size: 15px; margin-bottom: 6px;">Feed-Forward Network</div>
       <div style="font-size: 13px; color: var(--text-primary);">Linear(<span class="dim">768</span> &rarr; <span class="dim">3072</span>) &rarr; GELU &rarr; Linear(<span class="dim">3072</span> &rarr; <span class="dim">768</span>)</div>
     </div>
-    <div style="text-align: center; color: var(--accent-sage); font-size: 12px; margin: 6px 0;">+ residual</div>
+    <div style="text-align: center; color: var(--sage); font-size: 12px; margin: 6px 0;">+ residual</div>
   </div>
 
   <div style="text-align: center; color: var(--text-secondary); margin-top: 12px; font-size: 13px;">Output: 180 vectors, each <span class="dim">768-d</span></div>
@@ -423,15 +419,15 @@
 
   <div style="display: flex; gap: 8px; justify-content: center; margin: 12px 0;">
     <div style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 6px 14px; font-size: 12px; text-align: center;">
-      <div style="color: var(--accent-terracotta); font-weight: 500; font-size: 14px;">Q</div>
+      <div style="color: var(--warm-light); font-weight: 500; font-size: 14px;">Q</div>
       <div style="color: var(--text-tertiary);">what am I looking for?</div>
     </div>
     <div style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 6px 14px; font-size: 12px; text-align: center;">
-      <div style="color: var(--accent-sage); font-weight: 500; font-size: 14px;">K</div>
+      <div style="color: var(--warm-light); font-weight: 500; font-size: 14px;">K</div>
       <div style="color: var(--text-tertiary);">what do I contain?</div>
     </div>
     <div style="background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 5px; padding: 6px 14px; font-size: 12px; text-align: center;">
-      <div style="color: var(--accent-stone-blue); font-weight: 500; font-size: 14px;">V</div>
+      <div style="color: var(--warm-light); font-weight: 500; font-size: 14px;">V</div>
       <div style="color: var(--text-tertiary);">what info to extract?</div>
     </div>
   </div>
@@ -462,7 +458,7 @@
     </div>
   </div>
 
-  <div class="section-title" style="color: var(--accent-clay-rose); margin-top: 24px;">What each head might specialize in:</div>
+  <div class="section-title" style="color: var(--accent); margin-top: 24px;">What each head might specialize in:</div>
   <div class="spec-grid">
     <div class="spec-item">
       <div class="role">Head 1: "Previous frame"</div>
@@ -538,7 +534,7 @@
       55 features &rarr; embed each &rarr; <strong style="color: var(--text-primary);">concat</strong> &rarr; 2-layer MLP &rarr; 768-d<br><br>
       <strong style="color: var(--text-primary);">No per-frame attention.</strong> All cross-feature reasoning happens in the sequence transformer.<br><br>
       The model uses temporal attention slots to understand within-frame relationships (e.g., frame 47 attends to frame 46, which has near-identical content).<br><br>
-      <span style="color: var(--accent-sage-light);">gnorm = 0.38 at 1M+ steps</span>
+      <span style="color: var(--sage-light);">gnorm = 0.38 at 1M+ steps</span>
     </div>
   </div>
   <div>
@@ -547,9 +543,9 @@
     <div style="font-size: 12px; color: var(--text-secondary); line-height: 1.8;">
       55 features &rarr; group into 16 tokens &rarr; <strong style="color: var(--text-primary);">2 layers of self-attention</strong> &rarr; pool &rarr; 768-d<br><br>
       Pre-computes cross-feature relationships within each frame. &ldquo;JUMPSQUAT + diagonal stick = wavedash&rdquo; encoded before the sequence transformer sees it.<br><br>
-      <strong style="color: var(--accent-terracotta);">2 extra attention layers &times; 180 frames = deep gradient paths that eventually explode.</strong><br><br>
-      <span style="color: var(--accent-terracotta);">gnorm &rarr; 509,047 at 2.4M steps (ctx=60)</span><br>
-      <span style="color: var(--accent-terracotta);">gnorm &rarr; 126,100 at 410k steps (ctx=180)</span>
+      <strong style="color: var(--accent);">2 extra attention layers &times; 180 frames = deep gradient paths that eventually explode.</strong><br><br>
+      <span style="color: var(--accent);">gnorm &rarr; 509,047 at 2.4M steps (ctx=60)</span><br>
+      <span style="color: var(--accent);">gnorm &rarr; 126,100 at 410k steps (ctx=180)</span>
     </div>
   </div>
 </div>
