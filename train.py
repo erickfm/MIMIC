@@ -677,7 +677,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         else:
             raise RuntimeError(
                 f"--hal-controller-encoding requires controller_combos.json in {data_dir}. "
-                f"Run: python tools/build_controller_combos.py --data-dir {data_dir}")
+                f"Copy from an existing HAL-normalized data dir (e.g. data/fox_hal_local/).")
 
     _log(f"Loading dataset from {data_dir} ...")
     ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs,
