@@ -1,0 +1,341 @@
+# Research Notes — 2026-03-21
+
+## Context
+
+Continued from [2026-03-19](research-notes-2026-03-19.md). Active runs at start of session:
+- **Machine C**: `full-nsi-ctx256-seed42` — medium (32M), ctx=256, no self-inputs, lr=5e-5
+- **Machine E**: `full-nsi-ctx256-seed43` — medium (32M), ctx=256, no self-inputs, lr=5e-5
+- **Machine D**: `full-nsi-ctx256-huge-seed42` — huge (621M), ctx=256, no self-inputs, lr=5e-5
+- **Machine F**: `full-si-ctx60-seed42` — medium (32M), ctx=60, self-inputs, lr=5e-5 (previously diverged)
+
+F's original self-inputs run had diverged: gradient norms exploded from ~5 to 180,000 between steps 400k-878k, crashing btn_f1 from 88% to 35%.
+
+---
+
+## Finding 1: Self-inputs instability is not an LR problem
+
+Ran three fresh self-inputs runs on Machine F (medium model, ctx=60, seed=42), varying only the peak learning rate:
+
+| Run | Peak LR | Blowup step | gnorm trajectory |
+|-----|---------|-------------|------------------|
+| `full-si-ctx60-seed42` (original) | 5e-5 | ~400k | 5 → 180,000 |
+| `full-si-ctx60-seed42-lr4e5` | 4e-5 | ~410k | 3 → 22 → 40 (killed) |
+| `full-si-ctx60-seed42-lr3e5` | 3e-5 | ~490k | 4 → 30 → 138 → 754 → 7,404 |
+
+All three diverged in the same training region (400-600k steps). Lower LR only delayed the explosion slightly. The instability is structural — self-inputs create a sharp loss landscape that the medium model can't handle.
+
+Prior to divergence, all runs reached ~88-92% train btn_f1, confirming self-inputs enable much faster learning vs no-self-inputs (~55% at the same point).
+
+## Finding 2: Medium model without self-inputs plateaus at ~40% val btn_f1
+
+Machines C and E ran to ~1.1M steps (29% of training) with stable gnorms (~1.0) but val btn_f1 plateaued around 38-42%:
+
+| Machine | Steps reached | Val btn_f1 (last 5) | Train btn_f1 |
+|---------|--------------|---------------------|--------------|
+| C (seed=42) | 1.15M (29.5%) | 42→41→41→39→40% | ~50% |
+| E (seed=43) | 1.13M (29.0%) | 42→39→38→41→41% | ~55% |
+
+Train > val gap suggests overfitting. The medium model (32M params) may be capacity-limited for ctx=256 without self-inputs. **Killed both runs.**
+
+## Finding 3: Huge model (621M) is much more capable
+
+Machine D's huge model at same config (ctx=256, no self-inputs, lr=5e-5) reached 77% train btn_f1 at only 11.5% through training with perfectly stable gnorms (0.48-0.60). Only 2 val checkpoints so far (~39% val btn_f1), too early to assess plateau. This run continues.
+
+## Finding 4: Autoregressive prediction feedback already exists
+
+Investigated whether to implement autoregressive feedback (feed model predictions back as self-inputs at inference, like HAL's approach). Found it's already implemented in `inference.py:644-662` — when `no_self_inputs=False` and `--no-pred-feedback` is not set, the model feeds its previous predictions back as self-inputs. No code changes needed.
+
+This means the training/inference gap for self-inputs runs is standard exposure bias (teacher forcing vs autoregressive generation), same as any LLM.
+
+---
+
+## Action: Curriculum masking on Machine F
+
+Since self-inputs diverge at all learning rates but enable much faster early learning, implemented scheduled self-input dropout (curriculum masking):
+
+### Implementation (commit `7f33676`)
+
+**`mimic/frame_encoder.py`:** Added `si_drop_prob` attribute to `_BaseFrameEncoder`. In `_build_raw_tokens()`, when `si_drop_prob > 0`, applies per-sample Bernoulli mask that zeros `self_analog`, `self_buttons`, `self_c_dir` (+ nana variants). Stochastic during training, deterministic zeros during eval.
+
+**`train.py`:** Added `--si-drop-start`, `--si-drop-end`, `--si-drop-max` CLI args. Linear ramp schedule from 0 to `si_drop_max` over the configured training fraction. Dual validation: normal val at `si_drop_prob=0` (full self-inputs), plus `val_nsi/*` at `si_drop_prob=1.0` (no self-inputs). Logs `curriculum/si_drop_prob` to wandb.
+
+Also added `--no-load-optim` flag (commit `6790199`) for resuming with fresh optimizer/scheduler state.
+
+### Launch
+
+```bash
+BG=1 bash parallel.sh F -- \
+  --model medium --seq-len 60 --batch-size 64 --max-samples 250000000 \
+  --no-compile --self-inputs --seed 42 \
+  --lr 3e-5 \
+  --si-drop-start 0.05 --si-drop-end 0.5 \
+  --run-name full-si-curriculum-ctx60-seed42
+```
+
+Schedule: `si_drop` ramps 0→1.0 over steps 195k (5%) to 1.95M (50%). Steps 0-195k train with full self-inputs (fast learning). By the 400k danger zone, `si_drop` ≈ 12%. Steps 1.95M+ train with fully masked self-inputs.
+
+### Hypothesis
+
+The instability is caused by the model over-relying on self-inputs, creating sharp loss landscape features that amplify gradient norms. Gradually masking self-inputs forces the model to diversify its feature reliance, potentially smoothing the landscape enough to prevent divergence.
+
+### Result: Curriculum slowed but did not prevent divergence
+
+The curriculum run on F diverged at ~586k steps (si_drop=0.22), later than the non-curriculum runs (~400-490k) but with the same exponential gnorm pattern:
+
+| Step | si_drop | gnorm |
+|------|---------|-------|
+| 469k | 0.16 | 6.11 |
+| 586k | 0.22 | 65.68 |
+| 762k | 0.32 | 785 |
+
+Killed at gnorm=785. The curriculum delayed divergence by ~100-180k steps compared to plain self-inputs, but the fundamental instability remains for the medium model.
+
+---
+
+## Finding 5: Medium no-SI plateaus at ~40% val btn_f1 regardless of character or context
+
+Ran Fox (ctx=60) and Falco (ctx=60) single-character runs. Both hit the same ~36-43% val btn_f1 ceiling seen on the all-character ctx=256 runs (C/E). Fox ctx=180 also reached 43% val after only 2 val checkpoints.
+
+The ~40% val btn_f1 ceiling appears to be a medium model limitation, not a data or context issue.
+
+---
+
+## Pivot: Character-specific runs with curriculum masking
+
+Launched character-specific runs to test whether:
+1. Single-character data (smoother loss landscape?) helps curriculum masking survive
+2. Longer context (180 vs 60) improves learning rate per step
+
+Data sizes:
+- FOX: 443M frames (48k games), 331 shards
+- FALCO: 292M frames (32k games), 240 shards
+
+---
+
+## HAL Reference Analysis (2026-03-23)
+
+Deep-dived into Eric Gu's HAL architecture and training. Key differences from MIMIC:
+
+| | **HAL** | **MIMIC (medium)** |
+|---|---|---|
+| Params | ~20M | ~32M |
+| Sequence layers | 6 × 512-d | 4 × 768-d |
+| Frame encoding | Flat concat → linear | Intra-frame transformer (2 layers) |
+| Pos encoding | Shaw relative | RoPE |
+| Buttons | Single-label CE (6 classes) | Multi-hot focal BCE (12 outputs) |
+| Sticks | 36 hand-designed clusters, plain CE | 30 k-means clusters, focal CE |
+| Dropout | 0.2 | 0.1 |
+| LR | 3e-4 | 5e-5 (was), 3e-4 (new) |
+| Grad clip | 1.0 | none (was), 1.0 (new) |
+| Context | 256 | 60 / 180 |
+
+Critical insight: **HAL uses gradient clipping at 1.0** — we weren't clipping at all, which directly caused our self-inputs gradient explosions.
+
+---
+
+## Finding 6: Gradient clipping solves self-inputs instability at ctx=60
+
+Launched self-inputs runs with `--grad-clip-norm 1.0 --lr 3e-4` (matching HAL):
+
+| Run | ctx | Step | gnorm | btn_f1 | Status |
+|-----|-----|------|-------|--------|--------|
+| `falco-med-ctx60-si-lr3e4-clip1-s42` (C) | 60 | 898k | 1.23 | 86.3% | **stable** — past all previous death zones |
+| `falco-med-ctx180-si-lr3e4-clip1-s43` (E) | 180 | 410k | 126,100 | 43.0% | **diverging** despite clipping |
+
+ctx=60 + clip + lr=3e-4 is fully stable through 898k steps (previous runs exploded at 400-500k). First successful self-inputs run past the danger zone.
+
+ctx=180 + clip + lr=3e-4 explodes — gnorm reaches 126k. The clipping prevents NaN but the model degrades. The same lr=3e-4 that HAL uses at ctx=256 doesn't work for us at ctx=180, suggesting architectural differences (intra-frame attention, focal loss, multi-hot buttons) amplify instabilities at longer sequences.
+
+---
+
+## Note on historical sweep validity (2026-03-23)
+
+The hyperparameter sweep results from 2026-03-16 and 2026-03-17 were obtained under a specific regime:
+- Single GPU, batch=256, lr=5e-5, no grad clipping, focal loss, no self-inputs, 50M samples
+
+Current training regime differs significantly:
+- DDP 8 GPUs, eff batch=512, lr=3e-4, grad clipping=1.0, self-inputs, 250M samples, character-specific data
+
+Findings like "dropout=0.05 is best" and "lr=5e-5 is the only stable lr" may not transfer. These results should be re-validated under current conditions before being relied upon.
+
+---
+
+## Terminated run results (2026-03-23)
+
+### D: `all-huge-ctx256-nsi-lr5e5-s42` — huge model (621M), all chars, ctx=256, no SI
+
+**Killed at step 1.02M (26% of training).**
+
+| Metric | Value |
+|--------|-------|
+| Train btn_f1 | 80.2% |
+| Val btn_f1 (last 5) | 39.2%, 39.2%, 40.3%, 39.5%, 42.8% |
+| Train mf1 | 80.0% |
+| Val mf1 | 6.5-8.0% |
+| gnorm | 0.35-0.45 (stable throughout) |
+| Train total loss | 0.189 |
+| Val total loss | 3.2-3.9 |
+
+Facts: Train btn_f1 climbed from 36% to 80% over 1M steps while val btn_f1 stayed flat at 39-43%. Train/val loss diverged by 20x (0.19 vs 3.9). The model memorized training data without generalizing. gnorm was perfectly stable (0.35-0.45) throughout — no training instability.
+
+The 621M model has 19x more parameters than medium (32M). Both plateau at the same ~40% val btn_f1 without self-inputs. The huge model achieves 2x higher train metrics but identical val, indicating severe overfitting.
+
+Possible explanations: (1) without self-inputs, val performance may be fundamentally limited by the information available in game state alone — 40% may be near-ceiling for predicting buttons from game state without knowing what was pressed last frame; (2) the huge model overfits to training-set-specific patterns that don't transfer; (3) the all-character dataset's diversity may make generalization harder than single-character.
+
+### E: `falco-med-ctx180-si-lr3e4-clip1-s43` — medium (32M), Falco, ctx=180, SI, clip=1.0
+
+**Killed at step 410k (10.5% of training). Diverged.**
+
+| Metric | Value |
+|--------|-------|
+| Train btn_f1 at peak | ~87.8% (step 195k, first val) |
+| Train btn_f1 at kill | 43.0% |
+| Val btn_f1 | 78.9% (only 1 val checkpoint before divergence) |
+| gnorm trajectory | 2,714 (step 312k) → 9,997 (step 391k) → 126,100 (step 410k) |
+
+Facts: Grad clipping at 1.0 prevented NaN/crash — the model kept training and logging throughout. But raw (pre-clip) gnorm grew exponentially starting around step 300k. btn_f1 degraded from 87.8% to 43.0% as the clipped gradients became too noisy to learn effectively.
+
+The same lr=3e-4 and clip=1.0 is stable at ctx=60 (Machine C, gnorm ~1-5 at 918k steps). The instability is specific to ctx=180.
+
+Possible explanations: (1) longer sequences create more gradient signal per step, making lr=3e-4 effectively too large; (2) our intra-frame transformer (2 layers of attention per frame, absent in HAL) deepens the compute graph proportionally to sequence length; (3) focal loss amplifies gradients on hard examples, and longer sequences contain more hard frames.
+
+### F: `fox-med-ctx180-nsi-lr5e5-s42` — medium (32M), Fox, ctx=180, no SI
+
+**Killed at step 742k (19% of training).**
+
+| Metric | Value |
+|--------|-------|
+| Train btn_f1 | 57.4% |
+| Val btn_f1 (last 3) | 40.0%, 42.6%, 42.3% |
+| gnorm | 1.07-1.21 (stable throughout) |
+
+Facts: Stable training, no instability. Val btn_f1 plateaued at 40-43% — the same ceiling as D (huge, all chars, ctx=256), the old C/E runs (medium, all chars, ctx=256), and Falco/Fox ctx=60 runs. gnorm stayed at 1.0-1.2 throughout.
+
+The 40% val btn_f1 ceiling appears at every combination of model size (32M, 621M), context length (60, 180, 256), and character (Fox, Falco, all) — as long as self-inputs are excluded. Machine C with self-inputs + grad clipping broke through to 87-88% val btn_f1.
+
+---
+
+## Finding 7: Intra-frame attention (hybrid16) is the root cause of gradient instability (2026-03-24)
+
+Ran three simultaneous experiments with self-inputs + lr=3e-4 + clip=1.0, varying encoder type:
+
+| Run | Encoder | ctx | Step at check | gnorm | btn_f1 | Status |
+|-----|---------|-----|---------------|-------|--------|--------|
+| C: hybrid16, ctx=60 | hybrid16 | 60 | 2.46M (63%) | **509,047** | 0.0% | **collapsed** |
+| E: hybrid16, ctx=256 | hybrid16 | 256 | 547k (14%) | **13,643** | 12.7% | **diverging** |
+| F: flat, ctx=180 | **flat** | 180 | 1.04M (26.5%) | **0.38** | 88.5% | **stable** |
+
+Facts:
+- Machine C (hybrid16, ctx=60) was stable for 23% of training (87.8% val btn_f1) but eventually collapsed at ~63%. The instability was delayed, not prevented.
+- Machine E (hybrid16, ctx=256) diverged by step 547k — same pattern as all previous hybrid16 long-context runs.
+- Machine F (flat encoder, ctx=180) is completely stable at 1.04M steps. gnorm=0.38, never clipped. Train/val btn_f1 = 88.5%/87.8%. mf1=60.2% — highest ever observed.
+- The flat encoder removes the 2-layer intra-frame transformer and replaces it with concat → 2-layer MLP, matching HAL's approach.
+
+Conclusion: The `_GroupAttention` module (2 layers of `nn.TransformerEncoderLayer` operating on ~55 feature-group tokens per frame) creates gradient instability that eventually causes divergence in all runs. The instability manifests later at shorter context lengths and lower learning rates, but is always fatal. The flat encoder eliminates this entirely.
+
+### What does intra-frame attention buy us (in theory)?
+
+The hybrid16 encoder groups ~55 raw features into ~16 entity-level tokens, then runs 2 layers of self-attention across them before pooling to a single d_model vector. This lets the model learn cross-feature relationships *within* a single frame — e.g., attending to position based on velocity, or relating action state to stick position.
+
+### What does the flat encoder do instead?
+
+Concatenates all ~55 feature embeddings (each d_intra=256) into a single vector (~14,080-dim), then projects through a 2-layer MLP to d_model. No per-frame attention. All cross-feature reasoning happens at the sequence-level transformer.
+
+### What do we lose?
+
+In practice, maybe nothing — HAL achieves 95% win rate vs CPU with flat concat. The sequence-level transformer (4 layers, 768-d) has enough capacity to learn intra-frame relationships implicitly. The features are already semantically encoded (embeddings for categorical, MLPs for numeric), so the concat is information-preserving.
+
+The theoretical loss is *per-frame structural inductive bias*. With attention, the model can learn "when action=JUMPSQUAT, attend to stick angle" as a reusable pattern. With flat concat, this must be learned through the MLP weights, which can only do fixed linear combinations. But the sequence transformer downstream can still learn these relationships through its attention mechanism — it just sees them as part of the temporal sequence rather than as an explicit per-frame structure.
+
+### Could we get intra-frame mixing without the instability?
+
+Ideas to explore:
+- **1 layer instead of 2** — halves the per-frame compute graph depth
+- **No attention, just MLP mixing** — apply a shared MLP across feature groups (like a pointwise convolution). Cheaper than attention, still enables cross-feature interaction
+- **Gated residual mixing** — lightweight gating between feature groups without full attention
+- **Lower d_intra** — smaller intra-frame dimension means smaller gradients through the encoder
+- **Separate gradient clipping for encoder vs backbone** — clip the intra-frame encoder more aggressively
+- **Freeze encoder after warmup** — let it learn basic cross-feature patterns, then freeze to prevent instability
+
+None of these have been tested. The flat encoder is the proven winner for now.
+
+---
+
+## Finding 8: hybrid16 ctx=60 (Machine C) eventually collapsed too (2026-03-24)
+
+The hybrid16 ctx=60 run on Machine C — previously our best result at 87.8% val btn_f1 — collapsed after extended training:
+
+| Step | gnorm | btn_f1 | Val btn_f1 |
+|------|-------|--------|-----------|
+| 918k (23.5%) | 4.97 | 88.6% | 87.8% |
+| 1.29M (33%) | 17.36 | 87.0% | — |
+| 2.46M (63%) | 509,047 | 0.0% | 1.1% |
+
+The instability was delayed compared to longer-context hybrid16 runs but was always fatal. No hybrid16 run has survived to completion. The flat encoder (Machine F) remained completely stable through the same training period with gnorm consistently under 1.0.
+
+---
+
+## Finding 9: 88% val btn_f1 ceiling is universal (2026-03-27)
+
+Ran 8 single-GPU experiments on Machine F (Fox data) testing every remaining HAL diff individually: plain CE, no label smoothing, no warmup, dropout 0.2, 16 heads, HAL shape (6×512), and full HAL combo. Plus DDP runs on C (HAL shape, Falco) and E (medium, Falco ctx=256).
+
+**Every single configuration landed at 87-88% val btn_f1.** No hyperparameter or architecture change broke through.
+
+Val btn_f1 plateaus at the first val checkpoint and never trends upward regardless of:
+- Model shape (4×768, 6×512)
+- Loss function (focal, plain CE)
+- Dropout (0.05, 0.1, 0.2)
+- Context length (180, 256)
+- Character (Fox, Falco)
+- Button head (independent, AR-7, AR-12)
+- Warmup (5%, none)
+- Label smoothing (0, 0.1)
+- Number of heads (8, 16)
+
+Inference test with best checkpoint showed the model learns Fox's common actions (short hop nair, laser) but doesn't react to game context.
+
+---
+
+## HAL-exact replica (2026-03-27)
+
+After reading HAL's actual code (`/home/erick/projects/hal/`), identified several differences not previously tested together:
+
+| | HAL (from code) | Us (before this change) |
+|---|---|---|
+| Loss | Plain `F.cross_entropy` all heads | Focal CE + focal BCE |
+| AMP | None (FP32) | BF16 |
+| Buttons | 5-class single-label softmax | 7 AR binary heads |
+| Shoulders | Combined max(L,R) → 3-class | Separate L, R → 4-class each |
+| Heads | LayerNorm → Linear(in, in//2) → GELU → Linear | Linear(in, 256) → GELU → Linear |
+| Warmup | None | 5% linear |
+| Cosine eta_min | 1e-6 | 0 |
+
+Implemented `--hal-mode` flag (commit `12da90c`) that enables all HAL-matching settings at once. Launched on Machine C with DDP.
+
+### Active runs (2026-03-27)
+
+| Machine | Run | Config |
+|---------|-----|--------|
+| **C** | `falco-hal-exact-ctx256-s42` | HAL-exact: 6×512, flat, FP32, plain CE, single-label 5-class buttons, combined 3-class shoulder, LN heads, no warmup, cosine to 1e-6, dropout 0.2 |
+| **E** | `falco-med-ctx256-si-lr3e4-clip1-flat-arbtn7-s43` | Previous medium run (still going) |
+| **F** | 8× single-GPU Fox sweep | Various configs (all plateaued at 88%) |
+
+---
+
+## Run Naming Convention
+
+Format: `{char}-{model}-{ctx}-{si_mode}-{lr}-s{seed}`
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `char` | `fox`, `falco`, `marth`, `all`, ... | Character dataset |
+| `model` | `med`, `huge`, `giant` | Model preset |
+| `ctx` | `ctx60`, `ctx180`, `ctx256` | Sequence length |
+| `si_mode` | `nsi` (no self-inputs), `si` (self-inputs), `sicur` (SI + curriculum) | Self-input config |
+| `lr` | `lr5e5`, `lr3e5`, `lr2e5` | Peak learning rate |
+| `s{seed}` | `s42`, `s43`, ... | Random seed |
+
+Examples:
+- `fox-med-ctx60-nsi-lr5e5-s42` — Fox only, medium model, ctx=60, no self-inputs
+- `all-huge-ctx256-nsi-lr5e5-s42` — All characters, huge model, ctx=256, no self-inputs
+- `falco-med-ctx180-sicur-lr5e5-s43` — Falco only, medium, ctx=180, self-inputs with curriculum

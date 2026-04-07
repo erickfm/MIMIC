@@ -176,19 +176,13 @@ ISO. The `MAC_*` path aliases were added for this purpose.
 
 ## Data Directories
 
-| Directory | Contents | Normalization | Format |
-|-----------|----------|--------------|--------|
-| `data/fox_hal_local` | 7,600 Fox games from HF public dataset | HAL (checkpoint stats) | Per-game shards, 5-combo controller |
-| `data/fox_public_shards` | Metadata only (no .pt shards) | HAL norm JSON present | — |
-| `data/ranked_fox` | 32,633 Fox games from ranked replays | Old (non-HAL) | Per-game shards, 32-combo controller |
-| `data/subset` | Small test set | Old | Pre-windowed |
-| `data/wavedash*` | Synthetic wavedash data | Old | Various |
-| `data/overfit_test` | Tiny overfit test | Old | — |
-| `data/fox`, `data/falco` | Unclear / legacy | Old | — |
+| Directory | Contents | Status |
+|-----------|----------|--------|
+| `data/fox_hal_local` | 7,600 Fox games, HAL-normalized, 5-combo controller | **Active — use this** |
 
-**For HAL-mode training, use `data/fox_hal_local`.** The `ranked_fox` data has
-the wrong normalization and 32 button combos instead of 5 — it won't work with
-`--hal-controller-encoding`.
+This is the only data directory. Legacy directories (ranked_fox, wavedash, etc.)
+were cleaned up on 2026-04-07. To build new shards, use `tools/slp_to_shards.py`
+with `--hal-norm` and a metadata dir containing 5-combo `controller_combos.json`.
 
 ### HuggingFace Dataset
 
@@ -236,30 +230,27 @@ Currently training: `hal-local_*` — local training run on fox_hal_local data.
 - `inference.py` — Legacy inference script (use tools/run_hal_model.py instead for HAL mode)
 
 ### Tools
-- `tools/run_hal_model.py` — **Our reimplementation** of HAL's inference. Loads HAL or MIMIC checkpoints and plays via Dolphin. Fixed 2026-04-07.
+- `tools/run_hal_model.py` — **Our reimplementation** of HAL's inference. Loads HAL checkpoints and plays via Dolphin. Fixed 2026-04-07.
 - `tools/run_mimic_via_hal_loop.py` — Runs MIMIC checkpoints through HAL-style inference loop
 - `tools/validate_checkpoint.py` — Evaluates checkpoint(s) on val data, reports per-head CE loss
 - `tools/verify_hal_pipeline.py` — Compares our preprocessing against HAL's. Run after inference changes.
-- `tools/slp_to_shards.py` — Raw .slp replays -> .pt tensor shards
+- `tools/slp_to_shards.py` — Raw .slp replays -> .pt tensor shards (core pipeline)
 - `tools/slp_to_ranked_shards.py` — Ranked replay sharding by character
-- `tools/build_norm_stats.py` — Compute normalization statistics from .slp files
-- `tools/build_clusters.py` — Compute stick/shoulder k-means clusters
-- `tools/build_controller_combos.py` — Build button combo vocabulary
 - `tools/gameplay_health.py` — Analyze inference log for gameplay quality metrics
-- `tools/compare_hal_mimic_preprocessing.py` — One-off comparison script
-- `tools/diagnose.py`, `tools/inference_diag.py` — Diagnostic tools
-- `tools/validate_pipeline.py`, `tools/verify_inference.py` — Legacy validation
-- `tools/fix_hal_shards.py` — One-off shard repair script
+- `tools/diagnose.py` — Pipeline debugging (tensor-level train vs inference comparison)
+- `tools/inference_diag.py` — Offline inference diagnostics (output distribution stats)
+- `tools/validate_pipeline.py` — Verify slp_to_shards output matches old pipeline
 - `tools/split_by_character.py` — Split dataset by character
 
 ### Docs
-- `docs/research-notes-YYYY-MM-DD.md` — Chronological research journal. **Warning:**
-  these contain claims that were believed true at the time but later proven wrong
-  (e.g., "HAL doesn't overfit", "26.3M params", specific stats file claims).
-  Treat as historical context, not ground truth. Always verify against current
-  code before acting on any specific claim from the notes.
+- `docs/research-notes-2026-04-07.md` — Most recent research notes (current findings)
+- `docs/archive/research-notes-*.md` — Historical research journal (2026-03-14 through 2026-04-06).
+  **Warning:** these contain claims that were believed true at the time but later
+  proven wrong (e.g., "HAL doesn't overfit", "26.3M params", specific stats file
+  claims). Treat as historical context, not ground truth.
+- `docs/results-2026-03-17.md` — Early training result summaries
+- `docs/hal-mimic-diff-audit.md` — HAL vs MIMIC architecture comparison (historical, 2026-04-02)
 - `GPUS.md` — Remote GPU machine addresses and status
-- `RESULTS.md` — Training result summaries (may be outdated)
 
 ## Research Notes Warning
 
