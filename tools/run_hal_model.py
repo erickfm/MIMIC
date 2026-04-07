@@ -187,9 +187,10 @@ log.info("Model loaded: %d params", sum(p.numel() for p in model.parameters()))
 
 # ── Load HAL's actual normalization stats ─────────────────────────────────────
 
-# Load HAL's own stats.json — the EXACT stats used during training.
-# Previously we used hal_norm.json which had wrong values (Fox-only data).
-HAL_STATS_PATH = Path("/home/erick/projects/hal/hal/data/stats.json")
+# Load checkpoint stats — despite play.py appearing to override to hal/data/stats.json,
+# the Preprocessor actually loads checkpoints/stats.json (Fox subset, 27M frames).
+# Verified: pp.stats["p1_percent"].max == 236.0, not 362.0.
+HAL_STATS_PATH = Path("/home/erick/projects/hal/checkpoints/stats.json")
 with open(HAL_STATS_PATH) as _f:
     _raw_stats = json.load(_f)
 
@@ -287,7 +288,7 @@ BTN_ENUMS = [melee.enums.Button[name] for name in F.BTN]
 
 def build_frame(gs, prev_sent):
     """Build a single frame dict for HAL's model."""
-    players = list(gs.players.items())
+    players = sorted(gs.players.items())
     if len(players) < 2:
         return None
 
@@ -328,20 +329,20 @@ def build_frame(gs, prev_sent):
     ego_char, ego_action, ego_nums = player_features(ps1, is_ego=True)
     opp_char, opp_action, opp_nums = player_features(ps2, is_ego=False)
 
-    # Controller: from prev_sent (HAL's frame_offset=-1)
-    if prev_sent is not None:
-        mx = prev_sent["main_x"]
-        my = prev_sent["main_y"]
-        cx = prev_sent["c_x"]
-        cy = prev_sent["c_y"]
-        ls = prev_sent["l_shldr"]
-        rs = prev_sent["r_shldr"]
-        btns = {b: prev_sent.get(f"btn_{b}", 0) for b in
-                ["BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y", "BUTTON_Z",
-                 "BUTTON_L", "BUTTON_R"]}
-    else:
-        mx, my, cx, cy, ls, rs = 0.5, 0.5, 0.5, 0.5, 0.0, 0.0
-        btns = {}
+    # Controller: read from game engine (matches HAL's extract_eval_gamestate_as_tensordict).
+    # HAL's play.py reads controller_state directly from the gamestate — the game engine
+    # naturally provides the previous frame's controller state, matching the -1 offset.
+    cs1 = ps1.controller_state
+    mx = float(cs1.main_stick[0])
+    my = float(cs1.main_stick[1])
+    cx = float(cs1.c_stick[0])
+    cy = float(cs1.c_stick[1])
+    ls = float(cs1.l_shoulder)
+    rs = float(cs1.r_shoulder)
+    btns = {}
+    for bname in ["BUTTON_A", "BUTTON_B", "BUTTON_X", "BUTTON_Y", "BUTTON_Z",
+                   "BUTTON_L", "BUTTON_R"]:
+        btns[bname] = int(cs1.button.get(melee.enums.Button[bname], False))
 
     controller = encode_controller_onehot_single(
         mx, my, cx, cy, ls, rs, btns, COMBO_MAP, N_COMBOS)
@@ -384,6 +385,13 @@ INCLUDED_BUTTONS_NO_SHOULDER = [
     melee.enums.Button.BUTTON_A, melee.enums.Button.BUTTON_B,
     melee.enums.Button.BUTTON_X, melee.enums.Button.BUTTON_Z,
 ]
+# HAL's send_controller_inputs releases ALL 7 original buttons every frame
+ALL_BUTTONS = [
+    melee.enums.Button.BUTTON_A, melee.enums.Button.BUTTON_B,
+    melee.enums.Button.BUTTON_X, melee.enums.Button.BUTTON_Y,
+    melee.enums.Button.BUTTON_Z, melee.enums.Button.BUTTON_L,
+    melee.enums.Button.BUTTON_R,
+]
 
 
 def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
@@ -413,7 +421,9 @@ def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
     ctrl.tilt_analog(melee.enums.Button.BUTTON_C, cx, cy)
     ctrl.press_shoulder(melee.enums.Button.BUTTON_L, shldr)
 
-    for btn in INCLUDED_BUTTONS_NO_SHOULDER:
+    # Release ALL 7 buttons (matching HAL's send_controller_inputs which iterates
+    # ORIGINAL_BUTTONS). Without this, Y/L/R can get stuck pressed.
+    for btn in ALL_BUTTONS:
         ctrl.release_button(btn)
     pressed = []
     if btn_idx < 4:
@@ -441,7 +451,7 @@ def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
     top3_str = " ".join(f"{NAMES[i]}={v:.3f}" for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
     gs_str = ""
     if gs is not None:
-        players = list(gs.players.items())
+        players = sorted(gs.players.items())
         if len(players) >= 2:
             ps1, ps2 = players[0][1], players[1][1]
             gs_str = f"  S={ps1.stock}({ps1.percent:.0f}%) O={ps2.stock}({ps2.percent:.0f}%)"
@@ -489,7 +499,42 @@ def _shutdown(*a):
 signal.signal(signal.SIGINT, _shutdown)
 
 step = 0
+game_frame = 0
 _was_in_game = False
+
+# Pre-allocate context window matching HAL's play.py:
+# HAL fills mock with torch.ones for all features, then preprocesses them.
+# We compute the preprocessed mock values directly.
+
+# Mock gamestate: normalize raw value 1.0 through each feature transform
+_mock_ego = []
+_mock_opp = []
+for feat in ["percent", "stock", "facing", "invulnerable", "jumps_left",
+             "on_ground", "shield_strength", "position_x", "position_y"]:
+    _mock_ego.append(HAL_TRANSFORM[feat](1.0, HAL_P1_STATS[feat]))
+    _mock_opp.append(HAL_TRANSFORM[feat](1.0, HAL_P2_STATS[feat]))
+_mock_gs_vec = torch.tensor(_mock_ego + _mock_opp, dtype=torch.float32, device=DEVICE)
+
+# Mock controller: HAL's mock fills torch.ones for all features, so
+# main_stick=(1.0,1.0), c_stick=(1.0,1.0), all buttons=1, shoulder=1.0
+# These get encoded through the target config to produce one-hot vectors.
+_mock_btns = {"BUTTON_A": 1, "BUTTON_B": 1, "BUTTON_X": 1, "BUTTON_Y": 1,
+              "BUTTON_Z": 1, "BUTTON_L": 1, "BUTTON_R": 1}
+_mock_ctrl_vec = torch.from_numpy(
+    encode_controller_onehot_single(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, _mock_btns, COMBO_MAP, N_COMBOS)
+).to(dtype=torch.float32, device=DEVICE)
+
+log.info("Mock gamestate (18d): %s", [f"{v:.4f}" for v in _mock_gs_vec.tolist()])
+log.info("Mock controller nonzero: %s", _mock_ctrl_vec.nonzero().squeeze().tolist())
+
+_ctx_stage = torch.ones(1, SEQ_LEN, dtype=torch.long, device=DEVICE)
+_ctx_ego_char = torch.ones(1, SEQ_LEN, dtype=torch.long, device=DEVICE)
+_ctx_opp_char = torch.ones(1, SEQ_LEN, dtype=torch.long, device=DEVICE)
+_ctx_ego_act = torch.ones(1, SEQ_LEN, dtype=torch.long, device=DEVICE)
+_ctx_opp_act = torch.ones(1, SEQ_LEN, dtype=torch.long, device=DEVICE)
+_ctx_gs = _mock_gs_vec.unsqueeze(0).unsqueeze(0).expand(1, SEQ_LEN, -1).clone()
+_ctx_ctrl = _mock_ctrl_vec.unsqueeze(0).unsqueeze(0).expand(1, SEQ_LEN, -1).clone()
+
 while True:
     gs = console.step()
     if gs is None:
@@ -513,18 +558,40 @@ while True:
     if frame is None:
         continue
 
-    if len(_frame_cache) == 0:
-        for _ in range(SEQ_LEN - 1):
-            _frame_cache.append(frame)
-    _frame_cache.append(frame)
+    # Fill context window matching HAL's play.py exactly:
+    # Fill from left for first SEQ_LEN frames, then shift left + append right
+    if game_frame < SEQ_LEN:
+        idx = game_frame
+        _ctx_stage[0, idx] = frame["stage"]
+        _ctx_ego_char[0, idx] = frame["ego_char"]
+        _ctx_opp_char[0, idx] = frame["opp_char"]
+        _ctx_ego_act[0, idx] = frame["ego_action"]
+        _ctx_opp_act[0, idx] = frame["opp_action"]
+        _ctx_gs[0, idx] = torch.from_numpy(frame["gamestate"])
+        _ctx_ctrl[0, idx] = torch.from_numpy(frame["controller"])
+    else:
+        _ctx_stage[0, :-1] = _ctx_stage[0, 1:].clone()
+        _ctx_ego_char[0, :-1] = _ctx_ego_char[0, 1:].clone()
+        _ctx_opp_char[0, :-1] = _ctx_opp_char[0, 1:].clone()
+        _ctx_ego_act[0, :-1] = _ctx_ego_act[0, 1:].clone()
+        _ctx_opp_act[0, :-1] = _ctx_opp_act[0, 1:].clone()
+        _ctx_gs[0, :-1] = _ctx_gs[0, 1:].clone()
+        _ctx_ctrl[0, :-1] = _ctx_ctrl[0, 1:].clone()
+        _ctx_stage[0, -1] = frame["stage"]
+        _ctx_ego_char[0, -1] = frame["ego_char"]
+        _ctx_opp_char[0, -1] = frame["opp_char"]
+        _ctx_ego_act[0, -1] = frame["ego_action"]
+        _ctx_opp_act[0, -1] = frame["opp_action"]
+        _ctx_gs[0, -1] = torch.from_numpy(frame["gamestate"])
+        _ctx_ctrl[0, -1] = torch.from_numpy(frame["controller"])
 
-    batch = stack_frames()
+    seq_idx = min(SEQ_LEN - 1, game_frame)
     with torch.no_grad():
-        preds = model(
-            batch["stage"], batch["ego_char"], batch["opp_char"],
-            batch["ego_action"], batch["opp_action"],
-            batch["gamestate"], batch["controller"],
-        )
+        preds = model(_ctx_stage, _ctx_ego_char, _ctx_opp_char,
+                       _ctx_ego_act, _ctx_opp_act, _ctx_gs, _ctx_ctrl)
+    # Index the correct position (HAL uses seq_idx, not always -1)
+    single_preds = {k: v[:, seq_idx:seq_idx+1] for k, v in preds.items()}
 
-    decode_and_press(ego_ctrl, preds, gs=gs, temperature=args.temperature)
+    decode_and_press(ego_ctrl, single_preds, gs=gs, temperature=args.temperature)
+    game_frame += 1
     step += 1
