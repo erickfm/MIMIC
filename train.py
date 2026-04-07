@@ -440,10 +440,12 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
                   rank=0, world_size=1, controller_offset=False,
                   hal_controller_encoding=False,
                   controller_combo_map=None, n_controller_combos=5,
-                  character_filter=None):
+                  character_filter=None, random_perspective=False):
     _log(f"  Using streaming dataset from {data_dir}")
     if character_filter is not None:
         _log(f"  Character filter: self_character={character_filter}")
+    if random_perspective:
+        _log(f"  Random perspective selection: enabled (HAL-style)")
     ctrl_kw = dict(
         hal_controller_encoding=hal_controller_encoding,
         controller_combo_map=controller_combo_map,
@@ -458,6 +460,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         world_size=world_size,
         controller_offset=controller_offset,
         character_filter=character_filter,
+        random_perspective=random_perspective,
         **ctrl_kw,
     )
     val_ds = StreamingMeleeDataset(
@@ -470,6 +473,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         controller_offset=controller_offset,
         distributed=False,  # all ranks see all val data — prevents DDP deadlock
         character_filter=character_filter,
+        random_perspective=random_perspective,
         **ctrl_kw,
     )
     return train_ds, val_ds
@@ -609,7 +613,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           reaction_delay_override: int = None,
           controller_offset: bool = False,
           hal_controller_encoding: bool = False,
-          character_filter: int = None):
+          character_filter: int = None,
+          random_perspective: bool = False):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -682,7 +687,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                               hal_controller_encoding=hal_controller_encoding,
                               controller_combo_map=_combo_map,
                               n_controller_combos=_n_combos,
-                              character_filter=character_filter)
+                              character_filter=character_filter,
+                              random_perspective=random_perspective)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
@@ -701,8 +707,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     est_batches = max(n_train // BATCH_SIZE, 1)
     if max_samples and max_steps is None:
-        max_steps = max_samples // BATCH_SIZE
-        _log(f"  {max_samples:,} samples / bs {BATCH_SIZE} = {max_steps:,} steps")
+        eff_bs = BATCH_SIZE * world_size * grad_accum_steps
+        max_steps = max_samples // eff_bs
+        _log(f"  {max_samples:,} samples / eff_bs {eff_bs} ({BATCH_SIZE}×{world_size}gpu×{grad_accum_steps}accum) = {max_steps:,} steps")
     elif max_steps is None:
         if epochs is None:
             epochs = 1
@@ -1305,6 +1312,8 @@ if __name__ == "__main__":
                         help="Use HAL-style one-hot controller feedback encoding (requires controller_combos.json)")
     parser.add_argument("--character-filter", type=int, default=None,
                         help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
+    parser.add_argument("--random-perspective", action="store_true",
+                        help="Randomly pick one perspective per game pair (HAL-style regularization)")
     parser.add_argument("--si-drop-start", type=float, default=None,
                         help="Fraction of training where SI dropout begins")
     parser.add_argument("--si-drop-end", type=float, default=None,
@@ -1381,4 +1390,5 @@ if __name__ == "__main__":
         controller_offset=args.controller_offset,
         hal_controller_encoding=args.hal_controller_encoding,
         character_filter=args.character_filter,
+        random_perspective=args.random_perspective,
     )

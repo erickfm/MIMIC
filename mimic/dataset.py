@@ -55,6 +55,7 @@ class StreamingMeleeDataset(IterableDataset):
         self._world_size     = world_size
         self._distributed    = kwargs.pop("distributed", True)
         self._char_filter    = kwargs.pop("character_filter", None)  # e.g. 1 for Fox
+        self._random_perspective = kwargs.pop("random_perspective", False)
         self._controller_offset = controller_offset
         self._hal_ctrl_enc   = hal_controller_encoding
         self._combo_map      = controller_combo_map
@@ -189,6 +190,18 @@ class StreamingMeleeDataset(IterableDataset):
                         f"({pct:.0f}%) in {path.name} — too short for context window",
                         stacklevel=2,
                     )
+
+            # Random perspective selection: shards store consecutive p1/p2
+            # perspective pairs per game. When enabled, randomly pick one
+            # perspective per pair — matches HAL's random.choice(["p1","p2"]).
+            if self._random_perspective and len(game_ranges) >= 2:
+                selected = []
+                for i in range(0, len(game_ranges) - 1, 2):
+                    pick = random.choice([i, i + 1])
+                    selected.append(game_ranges[pick])
+                if len(game_ranges) % 2 == 1:
+                    selected.append(game_ranges[-1])
+                game_ranges = selected
 
             # Random window sampling: N random windows per game per shard visit.
             # HAL samples one random window per __getitem__ call; across training
