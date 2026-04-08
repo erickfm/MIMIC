@@ -98,6 +98,11 @@ MODEL_PRESETS = {
                          n_kv_heads=2, use_rmsnorm=True, use_swiglu=True,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
+    "modern-relpos": dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2050,
+                         dropout=0.2, max_seq_len=256, pos_enc="relpos",
+                         n_kv_heads=2, use_rmsnorm=True, use_swiglu=True,
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
     "medium":       dict(d_model=768,  nhead=8,  num_layers=4, dim_feedforward=3072),
     "base":         dict(d_model=1024, nhead=8,  num_layers=4, dim_feedforward=4096),
     "shallow":      dict(d_model=1024, nhead=8,  num_layers=2, dim_feedforward=4096),
@@ -219,27 +224,39 @@ class CausalSelfAttentionRelPos(nn.Module):
 
 
 class HALTransformerBlock(nn.Module):
-    """HAL's pre-norm Transformer block with relative-position attention."""
+    """HAL's pre-norm Transformer block with relative-position attention.
+    Supports modern components (RMSNorm, SwiGLU) via config flags."""
 
     def __init__(self, cfg: ModelConfig):
         super().__init__()
-        self.ln_1 = nn.LayerNorm(cfg.d_model)
+        use_rmsnorm = getattr(cfg, 'use_rmsnorm', False)
+        use_swiglu = getattr(cfg, 'use_swiglu', False)
+        Norm = RMSNorm if use_rmsnorm else nn.LayerNorm
+        self.ln_1 = Norm(cfg.d_model)
         self.self_attn = CausalSelfAttentionRelPos(
             n_embd=cfg.d_model, n_head=cfg.nhead,
             block_size=1024, dropout=cfg.dropout)
-        self.ln_2 = nn.LayerNorm(cfg.d_model)
-        self.mlp = nn.ModuleDict(dict(
-            c_fc=nn.Linear(cfg.d_model, cfg.dim_feedforward),
-            c_proj=nn.Linear(cfg.dim_feedforward, cfg.d_model),
-        ))
+        self.ln_2 = Norm(cfg.d_model)
+        if use_swiglu:
+            self.mlp = SwiGLU(cfg.d_model, cfg.dim_feedforward, cfg.dropout)
+        else:
+            self.mlp = nn.ModuleDict(dict(
+                c_fc=nn.Linear(cfg.d_model, cfg.dim_feedforward),
+                c_proj=nn.Linear(cfg.dim_feedforward, cfg.d_model),
+            ))
+        self._use_swiglu = use_swiglu
         self.dropout = nn.Dropout(cfg.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x + self.self_attn(self.ln_1(x))
-        h = self.mlp.c_fc(self.ln_2(x))
-        h = Fn.gelu(h)
-        h = self.dropout(self.mlp.c_proj(h))
-        return x + h
+        if self._use_swiglu:
+            x = x + self.mlp(self.ln_2(x))
+        else:
+            h = self.mlp.c_fc(self.ln_2(x))
+            h = Fn.gelu(h)
+            h = self.dropout(self.mlp.c_proj(h))
+            x = x + h
+        return x
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -628,7 +645,10 @@ class FramePredictor(nn.Module):
         for blk in self.blocks:
             if use_hal_block:
                 nn.init.normal_(blk.self_attn.c_proj.weight, std=residual_std)
-                nn.init.normal_(blk.mlp.c_proj.weight, std=residual_std)
+                if isinstance(blk.mlp, SwiGLU):
+                    nn.init.normal_(blk.mlp.w_down.weight, std=residual_std)
+                else:
+                    nn.init.normal_(blk.mlp.c_proj.weight, std=residual_std)
             else:
                 nn.init.normal_(blk.self_attn.out_proj.weight, std=residual_std)
                 # SwiGLU uses w_down, standard FFN uses ff[-1]

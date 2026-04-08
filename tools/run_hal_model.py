@@ -178,50 +178,67 @@ class HALModel(nn.Module):
 log.info("Loading checkpoint: %s", args.checkpoint)
 raw = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
 
-# Detect checkpoint format: HAL (bare state_dict) vs MIMIC (wrapped)
+# Detect checkpoint format: HAL (bare state_dict) vs MIMIC (wrapped with config)
 _is_mimic = isinstance(raw, dict) and "model_state_dict" in raw
 
+
+class _InferenceModel(nn.Module):
+    """Universal inference wrapper for any FramePredictor checkpoint.
+
+    Bypasses the encoder's shard-format column selection and feeds pre-assembled
+    (embeddings + gamestate + controller) directly into projection → backbone → heads.
+    Works with any architecture (LayerNorm/RMSNorm, GELU/SwiGLU, MHA/GQA, RoPE/relpos).
+    """
+    def __init__(self, fp):
+        super().__init__()
+        self.fp = fp
+
+    def forward(self, stage, ego_char, opp_char, ego_action, opp_action, gamestate, controller):
+        enc = self.fp.encoder
+        combined = torch.cat([
+            enc.stage_emb((stage - 1).clamp(min=0) if enc.stage_emb.num_embeddings == 6 else stage),
+            enc.char_emb(ego_char),
+            enc.char_emb(opp_char),
+            enc.action_emb(ego_action),
+            enc.action_emb(opp_action),
+            gamestate,
+            controller,
+        ], dim=-1)
+        x = enc.drop(enc.proj(combined))
+        for blk in self.fp.blocks:
+            x = blk(x)
+        x = self.fp.final_norm(x)
+        preds = self.fp.heads(x)
+        return {
+            "shoulder": preds.get("shoulder_val", preds.get("shoulder")),
+            "c_stick": preds.get("c_dir_logits", preds.get("c_stick")),
+            "main_stick": preds.get("main_xy", preds.get("main_stick")),
+            "buttons": preds.get("btn_logits", preds.get("buttons")),
+        }
+
+
 if _is_mimic:
-    log.info("Detected MIMIC checkpoint — remapping keys to HALModel format")
-    state_dict = raw["model_state_dict"]
-    # MIMIC's FramePredictor uses different module names than HALModel.
-    # The weights are mathematically equivalent. Map MIMIC → HAL key names.
-    mapped = {}
-    for k, v in state_dict.items():
-        nk = k
-        # Embeddings
-        nk = nk.replace("encoder.stage_emb.", "stage_emb.")
-        nk = nk.replace("encoder.char_emb.", "character_emb.")
-        nk = nk.replace("encoder.action_emb.", "action_emb.")
-        # Input projection
-        nk = nk.replace("encoder.proj.", "transformer.proj_down.")
-        # Transformer blocks
-        for i in range(6):
-            nk = nk.replace(f"blocks.{i}.self_attn.", f"transformer.h.{i}.attn.")
-            nk = nk.replace(f"blocks.{i}.ln_1.", f"transformer.h.{i}.ln_1.")
-            nk = nk.replace(f"blocks.{i}.ln_2.", f"transformer.h.{i}.ln_2.")
-            nk = nk.replace(f"blocks.{i}.mlp.", f"transformer.h.{i}.mlp.")
-        # Final norm
-        nk = nk.replace("final_norm.", "transformer.ln_f.")
-        # Output heads
-        nk = nk.replace("heads.shoulder_head.", "shoulder_head.")
-        nk = nk.replace("heads.cdir_head.", "c_stick_head.")
-        nk = nk.replace("heads.main_head.", "main_stick_head.")
-        nk = nk.replace("heads.btn_head.", "button_head.")
-        mapped[nk] = v
-    state_dict = mapped
-    model = HALModel().to(DEVICE)
-    model.load_state_dict(state_dict)
-    model.eval()
-    log.info("MIMIC model loaded (remapped): %d params", sum(p.numel() for p in model.parameters()))
+    from mimic.model import FramePredictor, ModelConfig
+    import dataclasses
+    # Reconstruct model from saved config — works for any architecture
+    ckpt_cfg = raw.get("config", {})
+    valid_fields = {f.name for f in dataclasses.fields(ModelConfig)}
+    mimic_cfg = ModelConfig(**{k: v for k, v in ckpt_cfg.items() if k in valid_fields})
+    fp = FramePredictor(mimic_cfg).to(DEVICE)
+    fp.load_state_dict(raw["model_state_dict"])
+    fp.eval()
+    model = _InferenceModel(fp)
+    preset = ckpt_cfg.get("model_preset", "unknown")
+    log.info("MIMIC model loaded (preset=%s): %d params", preset,
+             sum(p.numel() for p in fp.parameters()))
 else:
-    log.info("Detected HAL checkpoint — loading via HALModel")
-    state_dict = raw
-    state_dict = {k.removeprefix("module."): v for k, v in state_dict.items()}
-    model = HALModel().to(DEVICE)
-    model.load_state_dict(state_dict)
-    model.eval()
-    log.info("HAL model loaded: %d params", sum(p.numel() for p in model.parameters()))
+    # HAL's bare state_dict — use the hardcoded HALModel
+    state_dict = {k.removeprefix("module."): v for k, v in raw.items()}
+    hal = HALModel().to(DEVICE)
+    hal.load_state_dict(state_dict)
+    hal.eval()
+    model = hal
+    log.info("HAL model loaded: %d params", sum(p.numel() for p in hal.parameters()))
 
 # ── Load HAL's actual normalization stats ─────────────────────────────────────
 
@@ -484,17 +501,29 @@ def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
         btn = INCLUDED_BUTTONS_NO_SHOULDER[btn_idx]
         _prev_sent[f"btn_{btn.name}"] = 1
 
-    top3 = btn_probs.topk(min(3, len(btn_probs)))
-    NAMES = ["A", "B", "Jump", "Z", "NONE"]
-    top3_str = " ".join(f"{NAMES[i]}={v:.3f}" for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
-    gs_str = ""
+    # Track game state for summary and stock-change events
+    global _game_start_stocks, _game_max_damage
     if gs is not None:
         players = sorted(gs.players.items())
         if len(players) >= 2:
             ps1, ps2 = players[0][1], players[1][1]
+            cur_stocks = (ps1.stock, ps2.stock)
+            if _game_start_stocks is None:
+                _game_start_stocks = cur_stocks
+            # Log stock changes
+            _game_max_damage[0] = max(_game_max_damage[0], ps1.percent)
+            _game_max_damage[1] = max(_game_max_damage[1], ps2.percent)
+
+    # Per-frame logging: only every 60 frames (~1 second)
+    if game_frame % 60 == 0:
+        top3 = btn_probs.topk(min(3, len(btn_probs)))
+        NAMES = ["A", "B", "Jump", "Z", "NONE"]
+        top3_str = " ".join(f"{NAMES[i]}={v:.3f}" for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
+        gs_str = ""
+        if gs is not None and len(players) >= 2:
             gs_str = f"  S={ps1.stock}({ps1.percent:.0f}%) O={ps2.stock}({ps2.percent:.0f}%)"
-    log.info("MAIN=(%.2f,%.2f) C=(%.2f,%.2f) L=%.2f BTN=%s  top3=[%s]%s",
-             mx, my, cx, cy, shldr, pressed, top3_str, gs_str)
+        log.info("[f%d] MAIN=(%.2f,%.2f) C=(%.2f,%.2f) L=%.2f BTN=%s  top3=[%s]%s",
+                 game_frame, mx, my, cx, cy, shldr, pressed, top3_str, gs_str)
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -539,6 +568,8 @@ signal.signal(signal.SIGINT, _shutdown)
 step = 0
 game_frame = 0
 _was_in_game = False
+_game_start_stocks = None
+_game_max_damage = [0.0, 0.0]  # track max percent seen per player
 
 # Pre-allocate context window matching HAL's play.py:
 # HAL fills mock with torch.ones for all features, then preprocesses them.
@@ -579,7 +610,27 @@ while True:
         continue
     if gs.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
         if _was_in_game:
-            log.info("Game ended.")
+            # Game ended — print summary
+            players = sorted(gs.players.items()) if gs.players else []
+            if len(players) >= 2:
+                ps1, ps2 = players[0][1], players[1][1]
+                ego_stocks = ps1.stock
+                opp_stocks = ps2.stock
+            else:
+                ego_stocks = opp_stocks = "?"
+            duration_s = game_frame / 60.0
+            log.info("=" * 60)
+            log.info("GAME OVER — %d frames (%.1fs)", game_frame, duration_s)
+            log.info("  Bot:  %s stocks remaining", ego_stocks)
+            log.info("  CPU:  %s stocks remaining", opp_stocks)
+            if isinstance(ego_stocks, int) and isinstance(opp_stocks, int):
+                if ego_stocks > opp_stocks:
+                    log.info("  Result: BOT WINS")
+                elif opp_stocks > ego_stocks:
+                    log.info("  Result: CPU WINS")
+                else:
+                    log.info("  Result: DRAW")
+            log.info("=" * 60)
             _shutdown()
         menu_bot.menu_helper_simple(gs, ego_ctrl, BOT_CHAR, STAGE,
                                      cpu_level=0, autostart=False)

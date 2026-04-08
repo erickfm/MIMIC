@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MIMIC Modern-RelPos Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,wght@0,400;0,500;0,700;1,400&family=DM+Serif+Display&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-base: #212121;
+    --bg-surface: #2A2A2A;
+    --bg-elevated: #333333;
+    --text-primary: #D9D3CB;
+    --text-secondary: #A8A198;
+    --text-tertiary: #787068;
+    --text-heading: #E4DED6;
+    --accent: #A8897C;
+    --accent-light: #B89A8D;
+    --sage: #8A9480;
+    --sage-light: #9AA48F;
+    --warm-light: #C0B8AE;
+    --blue: #7A9BB5;
+    --blue-light: #8AABC5;
+    --border-subtle: #3A3A3A;
+    --border-medium: #484848;
+    --shadow-sm: 0 1px 4px rgba(0,0,0,0.15);
+    --shadow-md: 0 4px 16px rgba(0,0,0,0.2);
+    --font-heading: 'DM Serif Display', Georgia, serif;
+    --font-body: 'DM Sans', system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', 'Menlo', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font-body); background: var(--bg-base); color: var(--text-primary); padding: 56px 48px; line-height: 1.7; font-size: 15px; }
+  .diagram { max-width: 860px; margin: 0 auto; }
+  h1 { font-family: var(--font-heading); color: var(--text-heading); margin-bottom: 6px; font-size: 34px; font-weight: normal; }
+  .subtitle { color: var(--text-tertiary); font-size: 15px; margin-bottom: 48px; letter-spacing: 0.03em; }
+  h3 { font-family: var(--font-heading); color: var(--accent); margin: 48px 0 20px; font-size: 22px; font-weight: normal; }
+  .dim { color: var(--warm-light); font-weight: 500; font-family: var(--font-mono); font-size: 14px; }
+  .arrow { text-align: center; color: var(--text-tertiary); font-size: 14px; padding: 6px 0; }
+  .note { background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 16px 18px; margin: 16px 0; font-size: 14px; color: var(--text-secondary); line-height: 1.75; }
+  .note strong { color: var(--text-primary); }
+  .divider { height: 1px; margin: 40px 0; background: linear-gradient(90deg, transparent, var(--border-medium) 30%, var(--border-medium) 70%, transparent); }
+
+  /* Stats bar */
+  .stats { display: flex; gap: 24px; margin: 24px 0; flex-wrap: wrap; }
+  .stat { background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 18px; }
+  .stat .val { color: var(--warm-light); font-family: var(--font-mono); font-size: 18px; font-weight: 500; }
+  .stat .lbl { color: var(--text-tertiary); font-size: 12px; margin-top: 2px; letter-spacing: 0.04em; text-transform: uppercase; }
+
+  /* Pipeline flow */
+  .stage { background: var(--bg-surface); border: 1px solid var(--border-medium); border-radius: 8px; padding: 20px 24px; margin: 12px 0; box-shadow: var(--shadow-sm); }
+  .stage .title { color: var(--accent); font-family: var(--font-heading); font-size: 18px; margin-bottom: 10px; }
+  .stage .step { font-size: 14px; color: var(--text-primary); margin: 4px 0; line-height: 1.8; }
+  .stage .step .op { color: var(--sage-light); font-weight: 500; }
+  .stage .step .shape { color: var(--warm-light); font-family: var(--font-mono); font-size: 13px; }
+
+  /* Component boxes */
+  .components { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 14px 0; }
+  .comp { background: var(--bg-elevated); border: 1px solid var(--border-subtle); border-radius: 6px; padding: 12px 16px; }
+  .comp .name { color: var(--blue-light); font-weight: 500; font-size: 14px; margin-bottom: 4px; }
+  .comp .desc { color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
+  .comp .formula { color: var(--warm-light); font-family: var(--font-mono); font-size: 12px; margin-top: 4px; }
+
+  /* Head chain */
+  .chain { display: flex; gap: 8px; justify-content: center; align-items: center; flex-wrap: wrap; margin: 16px 0; }
+  .chain-box { background: var(--bg-elevated); border: 1px solid var(--border-medium); border-radius: 6px; padding: 10px 16px; text-align: center; min-width: 100px; }
+  .chain-box .name { color: var(--text-primary); font-weight: 600; font-size: 14px; }
+  .chain-box .info { color: var(--text-tertiary); font-size: 12px; margin-top: 2px; }
+  .chain-box .hidden { color: var(--sage); font-family: var(--font-mono); font-size: 11px; margin-top: 2px; }
+  .chain-arrow { color: var(--text-tertiary); font-size: 16px; }
+
+  /* Comparison table */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-size: 14px; }
+  th { color: var(--text-tertiary); font-weight: 400; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border-medium); font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--border-subtle); }
+  td:first-child { color: var(--text-secondary); }
+  .highlight { color: var(--sage-light); font-weight: 500; }
+  .old { color: var(--text-tertiary); }
+</style>
+</head>
+<body>
+<div class="diagram">
+
+<h1>MIMIC Modern-RelPos</h1>
+<p class="subtitle">Causal transformer for frame-level Melee controller prediction &mdash; ~20M params</p>
+
+<div class="stats">
+  <div class="stat"><div class="val">19.97M</div><div class="lbl">Parameters</div></div>
+  <div class="stat"><div class="val">512</div><div class="lbl">d_model</div></div>
+  <div class="stat"><div class="val">6</div><div class="lbl">Layers</div></div>
+  <div class="stat"><div class="val">8</div><div class="lbl">Query Heads</div></div>
+  <div class="stat"><div class="val">2</div><div class="lbl">KV Heads</div></div>
+  <div class="stat"><div class="val">256</div><div class="lbl">Seq Length</div></div>
+</div>
+
+<!-- ─── Input ─── -->
+<h3>Input Assembly</h3>
+
+<div class="stage">
+  <div class="title">HALFlatEncoder</div>
+  <div class="step">Each frame is a Melee game state + previous controller input.</div>
+  <div class="step">Features are pre-normalized in shards (HAL normalization).</div>
+  <div class="step" style="margin-top: 12px;">
+    <span class="op">Embed categoricals:</span><br>
+    &nbsp;&nbsp;stage <span class="shape">&rarr; (4d)</span> &nbsp;|&nbsp;
+    2&times; character <span class="shape">&rarr; (12d)</span> &nbsp;|&nbsp;
+    2&times; action <span class="shape">&rarr; (32d)</span>
+    <span class="shape">&nbsp;= 92d</span>
+  </div>
+  <div class="step">
+    <span class="op">Gamestate numerics:</span>
+    9 per player &times; 2 <span class="shape">= 18d</span><br>
+    &nbsp;&nbsp;<span style="color:var(--text-secondary); font-size:13px;">percent, stock, facing, invulnerable, jumps_left, on_ground, shield, pos_x, pos_y</span>
+  </div>
+  <div class="step">
+    <span class="op">Controller one-hot:</span>
+    main_stick(37) + c_stick(9) + buttons(5) + shoulder(3) <span class="shape">= 54d</span>
+  </div>
+  <div class="step" style="margin-top: 10px;">
+    <span class="op">Concatenate &rarr; Linear projection:</span>
+    <span class="shape">(B, 256, 164) &rarr; (B, 256, 512)</span>
+  </div>
+</div>
+
+<div class="arrow">&darr;</div>
+
+<!-- ─── Transformer ─── -->
+<h3>Transformer Backbone &times; 6</h3>
+
+<div class="stage">
+  <div class="title">Pre-Norm Block (modern components)</div>
+
+  <div class="components">
+    <div class="comp">
+      <div class="name">RMSNorm</div>
+      <div class="desc">Replaces LayerNorm. No mean subtraction, single learnable &gamma;. Faster and equally effective.</div>
+      <div class="formula">x &middot; rsqrt(mean(x&sup2;) + &epsilon;) &middot; &gamma;</div>
+    </div>
+    <div class="comp">
+      <div class="name">Relative Position Attention</div>
+      <div class="desc">Shaw et al. skew-based relative position bias. Learnable E<sub>r</sub> matrix per layer. Better than RoPE for frame sequences.</div>
+      <div class="formula">Att = softmax((QK&sup1; + skew(QE<sub>r</sub>&sup1;)) / &radic;d)</div>
+    </div>
+    <div class="comp">
+      <div class="name">Grouped Query Attention</div>
+      <div class="desc">8 query heads share 2 KV heads (4:1 ratio). Reduces KV parameters while maintaining query expressiveness.</div>
+      <div class="formula">Q: 8 heads &times; 64d &nbsp;|&nbsp; K,V: 2 heads &times; 64d (repeated 4&times;)</div>
+    </div>
+    <div class="comp">
+      <div class="name">SwiGLU FFN</div>
+      <div class="desc">Gated activation replaces GELU. SiLU gate modulates a parallel up-projection. ~1-2% better than standard FFN.</div>
+      <div class="formula">SiLU(xW<sub>gate</sub>) &odot; xW<sub>up</sub> &rarr; W<sub>down</sub></div>
+    </div>
+  </div>
+
+  <div class="step" style="margin-top: 14px;">
+    <span class="op">Per block:</span><br>
+    &nbsp;&nbsp;x = x + RelPosAttn(RMSNorm(x)) <span class="shape">&nbsp;&mdash; residual + attention</span><br>
+    &nbsp;&nbsp;x = x + SwiGLU(RMSNorm(x)) <span class="shape">&nbsp;&mdash; residual + feedforward</span>
+  </div>
+  <div class="step">
+    <span class="op">Output:</span> <span class="shape">(B, 256, 512)</span> after 6 blocks + final RMSNorm
+  </div>
+</div>
+
+<div class="arrow">&darr;</div>
+
+<!-- ─── Heads ─── -->
+<h3>Autoregressive Output Heads</h3>
+
+<div class="stage">
+  <div class="title">HAL-Style Prediction Heads</div>
+  <div class="step">Each head conditions on all previous heads' outputs (detached). This lets later heads see earlier decisions without gradient coupling.</div>
+
+  <div class="chain">
+    <div class="chain-box">
+      <div class="name">Shoulder</div>
+      <div class="info">3 classes</div>
+      <div class="hidden">LN &rarr; 256 &rarr; 3</div>
+    </div>
+    <div class="chain-arrow">&rarr;</div>
+    <div class="chain-box">
+      <div class="name">C-Stick</div>
+      <div class="info">9 clusters</div>
+      <div class="hidden">LN &rarr; 257 &rarr; 9</div>
+    </div>
+    <div class="chain-arrow">&rarr;</div>
+    <div class="chain-box">
+      <div class="name">Main Stick</div>
+      <div class="info">37 clusters</div>
+      <div class="hidden">LN &rarr; 262 &rarr; 37</div>
+    </div>
+    <div class="chain-arrow">&rarr;</div>
+    <div class="chain-box">
+      <div class="name">Buttons</div>
+      <div class="info">5 classes</div>
+      <div class="hidden">LN &rarr; 280 &rarr; 5</div>
+    </div>
+  </div>
+
+  <div class="step" style="margin-top: 12px;">
+    Each head: <span class="op">LayerNorm &rarr; Linear(in, in//2) &rarr; GELU &rarr; Linear(in//2, out)</span><br>
+    Hidden dims vary per head: <span class="shape">256, 257, 262, 280</span> (= input_dim // 2)
+  </div>
+  <div class="step">
+    Loss: plain cross-entropy on all 4 heads. Multinomial sampling at inference.
+  </div>
+</div>
+
+<div class="divider"></div>
+
+<!-- ─── Comparison ─── -->
+<h3>What Changed from HAL</h3>
+
+<table>
+  <tr><th>Component</th><th>HAL Original</th><th>Modern-RelPos</th></tr>
+  <tr><td>Normalization</td><td class="old">LayerNorm</td><td class="highlight">RMSNorm</td></tr>
+  <tr><td>Feedforward</td><td class="old">GELU FFN (2048 hidden)</td><td class="highlight">SwiGLU (2050 &rarr; 1366 gated hidden)</td></tr>
+  <tr><td>KV Heads</td><td class="old">8 (standard MHA)</td><td class="highlight">2 (GQA, 4:1 sharing)</td></tr>
+  <tr><td>Position Encoding</td><td>RelPos (Shaw skew)</td><td>RelPos (Shaw skew) &mdash; kept</td></tr>
+  <tr><td>Parameters</td><td>19.98M</td><td>19.97M</td></tr>
+  <tr><td>Attention</td><td>Combined QKV (c_attn)</td><td>Combined QKV (c_attn)</td></tr>
+  <tr><td>Heads</td><td>LN + GELU MLP</td><td>LN + GELU MLP &mdash; kept</td></tr>
+</table>
+
+<div class="note">
+  <strong>Why keep RelPos?</strong> RoPE (used by LLaMA, GPT-4, etc.) was tested and performed
+  slightly worse on this task. Frame sequences have different positional structure than language tokens &mdash;
+  the learnable relative position matrix captures frame-to-frame timing patterns that fixed rotary
+  frequencies miss. All other modern components (RMSNorm, SwiGLU, GQA) improved or matched performance.
+</div>
+
+<div class="note">
+  <strong>GQA at this scale:</strong> With only 2 KV heads sharing across 8 query heads, KV parameters
+  drop significantly. The freed parameter budget goes to a slightly larger SwiGLU FFN (2050 base vs 2048),
+  keeping total params at ~20M. At inference, GQA also reduces KV-cache memory by 4&times;.
+</div>
+
+<div class="divider"></div>
+
+<!-- ─── Training ─── -->
+<h3>Training Configuration</h3>
+
+<div class="stage">
+  <div class="step"><span class="op">Optimizer:</span> AdamW (&beta;=0.9, 0.999; wd=0.01; grad clip=1.0)</div>
+  <div class="step"><span class="op">LR schedule:</span> CosineAnnealingLR, no warmup, &eta;<sub>min</sub>=1e-6</div>
+  <div class="step"><span class="op">Learning rate:</span> 3e-4</div>
+  <div class="step"><span class="op">Batch size:</span> 512 effective (64 &times; 8 grad_accum on 1 GPU, or 64 &times; 8 GPUs)</div>
+  <div class="step"><span class="op">Precision:</span> FP32 (no AMP)</div>
+  <div class="step"><span class="op">Dropout:</span> 0.2 throughout</div>
+  <div class="step"><span class="op">Loss:</span> Plain cross-entropy on all 4 heads (no focal loss, no weighting)</div>
+  <div class="step"><span class="op">Sequence:</span> 256 frames (~4.3 seconds at 60 fps)</div>
+  <div class="step"><span class="op">Init:</span> N(0, 0.02) weights, zero bias, residual scaling 0.02/&radic;(2&times;6)</div>
+</div>
+
+<div class="divider"></div>
+
+<p style="color: var(--text-tertiary); font-size: 13px; text-align: center;">
+  MIMIC &mdash; Melee Imitation Model for Input Cloning<br>
+  <span class="dim">--model modern-relpos</span>
+</p>
+
+</div>
+</body>
+</html>

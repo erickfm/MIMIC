@@ -1092,6 +1092,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     if _is_main:
                         os.makedirs("checkpoints", exist_ok=True)
                         best_path = f"checkpoints/{run_name}_best.pt"
+                        _cfg_save = {**cfg.__dict__, "model_preset": model_preset, "run_name": run_name}
                         best_ckpt = {
                             "global_step":          step,
                             "model_state_dict":     _raw_model.state_dict(),
@@ -1099,7 +1100,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                             "scheduler_state_dict": scheduler.state_dict(),
                             "loss_weights":         loss_weights.cpu(),
                             "norm_stats":           ds.norm_stats,
-                            "config":               cfg.__dict__,
+                            "config":               _cfg_save,
                         }
                         if stick_centers_np is not None:
                             best_ckpt["stick_centers"] = stick_centers_np.tolist()
@@ -1165,6 +1166,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             if _is_main:
                 os.makedirs("checkpoints", exist_ok=True)
                 ckpt_path = f"checkpoints/{run_name}_step{step:06d}.pt"
+                _cfg_save = {**cfg.__dict__, "model_preset": model_preset, "run_name": run_name}
                 ckpt_data = {
                     "global_step":          step,
                     "model_state_dict":     _raw_model.state_dict(),
@@ -1172,7 +1174,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     "scheduler_state_dict": scheduler.state_dict(),
                     "loss_weights":         loss_weights.cpu(),
                     "norm_stats":           ds.norm_stats,
-                    "config":               cfg.__dict__,
+                    "config":               _cfg_save,
                 }
                 if stick_centers_np is not None:
                     ckpt_data["stick_centers"] = stick_centers_np.tolist()
