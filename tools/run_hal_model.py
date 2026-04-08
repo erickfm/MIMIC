@@ -519,7 +519,7 @@ def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
         top3_str = " ".join(f"{NAMES[i]}={v:.3f}" for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
         gs_str = ""
         if gs is not None and len(players) >= 2:
-            gs_str = f"  S={ps1.stock}({ps1.percent:.0f}%) O={ps2.stock}({ps2.percent:.0f}%)"
+            gs_str = f"  Bot {ps1.stock}stk {ps1.percent:.0f}% | CPU {ps2.stock}stk {ps2.percent:.0f}%"
         log.info("[f%d] MAIN=(%.2f,%.2f) C=(%.2f,%.2f) L=%.2f BTN=%s  top3=[%s]%s",
                  game_frame, mx, my, cx, cy, shldr, pressed, top3_str, gs_str)
 
