@@ -39,7 +39,10 @@ from mimic.features import (
 )
 
 log = logging.getLogger("hal_inf")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s  [%(levelname)s]  %(message)s")
+_h = logging.StreamHandler(sys.stderr)
+_h.setFormatter(logging.Formatter("%(asctime)s  [%(levelname)s]  %(message)s"))
+log.addHandler(_h)
+log.setLevel(logging.INFO)
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Run HAL model via MIMIC inference")
@@ -501,18 +504,13 @@ def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
         btn = INCLUDED_BUTTONS_NO_SHOULDER[btn_idx]
         _prev_sent[f"btn_{btn.name}"] = 1
 
-    # Track game state for summary and stock-change events
-    global _game_start_stocks, _game_max_damage
+    # Track game state for summary
+    global _last_stocks
     if gs is not None:
         players = sorted(gs.players.items())
         if len(players) >= 2:
             ps1, ps2 = players[0][1], players[1][1]
-            cur_stocks = (ps1.stock, ps2.stock)
-            if _game_start_stocks is None:
-                _game_start_stocks = cur_stocks
-            # Log stock changes
-            _game_max_damage[0] = max(_game_max_damage[0], ps1.percent)
-            _game_max_damage[1] = max(_game_max_damage[1], ps2.percent)
+            _last_stocks = (ps1.stock, ps2.stock)
 
     # Per-frame logging: only every 60 frames (~1 second)
     if game_frame % 60 == 0:
@@ -556,12 +554,31 @@ BOT_CHAR = melee.Character[args.character]
 CPU_CHAR = melee.Character[args.cpu_character]
 STAGE = melee.Stage[args.stage]
 
+_last_stocks = None
+
+def _print_summary():
+    """Print game result summary."""
+    if _last_stocks:
+        s, o = _last_stocks
+        duration_s = game_frame / 60.0
+        log.info("=" * 60)
+        log.info("GAME OVER — %d frames (%.1fs)", game_frame, duration_s)
+        log.info("  Bot:  %s stocks remaining", s)
+        log.info("  CPU:  %s stocks remaining", o)
+        if s > o: log.info("  Result: BOT WINS")
+        elif o > s: log.info("  Result: CPU WINS")
+        else: log.info("  Result: DRAW")
+        log.info("=" * 60)
+
 def _shutdown(*a):
+    _print_summary()
     ego_ctrl.disconnect()
     cpu_ctrl.disconnect()
     console.stop()
-    log.info("Done.")
     sys.exit(0)
+
+import atexit
+atexit.register(_print_summary)
 
 signal.signal(signal.SIGINT, _shutdown)
 
@@ -610,27 +627,6 @@ while True:
         continue
     if gs.menu_state not in [melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH]:
         if _was_in_game:
-            # Game ended — print summary
-            players = sorted(gs.players.items()) if gs.players else []
-            if len(players) >= 2:
-                ps1, ps2 = players[0][1], players[1][1]
-                ego_stocks = ps1.stock
-                opp_stocks = ps2.stock
-            else:
-                ego_stocks = opp_stocks = "?"
-            duration_s = game_frame / 60.0
-            log.info("=" * 60)
-            log.info("GAME OVER — %d frames (%.1fs)", game_frame, duration_s)
-            log.info("  Bot:  %s stocks remaining", ego_stocks)
-            log.info("  CPU:  %s stocks remaining", opp_stocks)
-            if isinstance(ego_stocks, int) and isinstance(opp_stocks, int):
-                if ego_stocks > opp_stocks:
-                    log.info("  Result: BOT WINS")
-                elif opp_stocks > ego_stocks:
-                    log.info("  Result: CPU WINS")
-                else:
-                    log.info("  Result: DRAW")
-            log.info("=" * 60)
             _shutdown()
         menu_bot.menu_helper_simple(gs, ego_ctrl, BOT_CHAR, STAGE,
                                      cpu_level=0, autostart=False)
