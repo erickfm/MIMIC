@@ -175,15 +175,53 @@ class HALModel(nn.Module):
 
 # ── Load model ───────────────────────────────────────────────────────────────
 
-log.info("Loading HAL checkpoint: %s", args.checkpoint)
-state_dict = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
-# Strip "module." prefix from DDP
-state_dict = {k.removeprefix("module."): v for k, v in state_dict.items()}
+log.info("Loading checkpoint: %s", args.checkpoint)
+raw = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
 
-model = HALModel().to(DEVICE)
-model.load_state_dict(state_dict)
-model.eval()
-log.info("Model loaded: %d params", sum(p.numel() for p in model.parameters()))
+# Detect checkpoint format: HAL (bare state_dict) vs MIMIC (wrapped)
+_is_mimic = isinstance(raw, dict) and "model_state_dict" in raw
+
+if _is_mimic:
+    log.info("Detected MIMIC checkpoint — remapping keys to HALModel format")
+    state_dict = raw["model_state_dict"]
+    # MIMIC's FramePredictor uses different module names than HALModel.
+    # The weights are mathematically equivalent. Map MIMIC → HAL key names.
+    mapped = {}
+    for k, v in state_dict.items():
+        nk = k
+        # Embeddings
+        nk = nk.replace("encoder.stage_emb.", "stage_emb.")
+        nk = nk.replace("encoder.char_emb.", "character_emb.")
+        nk = nk.replace("encoder.action_emb.", "action_emb.")
+        # Input projection
+        nk = nk.replace("encoder.proj.", "transformer.proj_down.")
+        # Transformer blocks
+        for i in range(6):
+            nk = nk.replace(f"blocks.{i}.self_attn.", f"transformer.h.{i}.attn.")
+            nk = nk.replace(f"blocks.{i}.ln_1.", f"transformer.h.{i}.ln_1.")
+            nk = nk.replace(f"blocks.{i}.ln_2.", f"transformer.h.{i}.ln_2.")
+            nk = nk.replace(f"blocks.{i}.mlp.", f"transformer.h.{i}.mlp.")
+        # Final norm
+        nk = nk.replace("final_norm.", "transformer.ln_f.")
+        # Output heads
+        nk = nk.replace("heads.shoulder_head.", "shoulder_head.")
+        nk = nk.replace("heads.cdir_head.", "c_stick_head.")
+        nk = nk.replace("heads.main_head.", "main_stick_head.")
+        nk = nk.replace("heads.btn_head.", "button_head.")
+        mapped[nk] = v
+    state_dict = mapped
+    model = HALModel().to(DEVICE)
+    model.load_state_dict(state_dict)
+    model.eval()
+    log.info("MIMIC model loaded (remapped): %d params", sum(p.numel() for p in model.parameters()))
+else:
+    log.info("Detected HAL checkpoint — loading via HALModel")
+    state_dict = raw
+    state_dict = {k.removeprefix("module."): v for k, v in state_dict.items()}
+    model = HALModel().to(DEVICE)
+    model.load_state_dict(state_dict)
+    model.eval()
+    log.info("HAL model loaded: %d params", sum(p.numel() for p in model.parameters()))
 
 # ── Load HAL's actual normalization stats ─────────────────────────────────────
 
