@@ -54,6 +54,10 @@ class ModelConfig:
     attn_variant: str    = "standard"
     n_kv_heads: int      = 0
 
+    # modern components
+    use_rmsnorm: bool    = False
+    use_swiglu: bool     = False
+
     # loss / output configuration
     stick_loss: str      = "clusters"
     btn_loss: str        = "focal"
@@ -87,6 +91,11 @@ MODEL_PRESETS = {
     "small":        dict(d_model=512,  nhead=8,  num_layers=4, dim_feedforward=2048),
     "hal":          dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=256, pos_enc="relpos",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "modern":       dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2500,
+                         dropout=0.2, max_seq_len=256, pos_enc="rope",
+                         n_kv_heads=2, use_rmsnorm=True, use_swiglu=True,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
     "medium":       dict(d_model=768,  nhead=8,  num_layers=4, dim_feedforward=3072),
@@ -234,6 +243,38 @@ class HALTransformerBlock(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 2c. Modern components: RMSNorm, SwiGLU
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization (Zhang & Sennrich 2019).
+    Faster than LayerNorm: no mean subtraction, one learnable param (gamma)."""
+    def __init__(self, d: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d))
+        self.eps = eps
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
+
+
+class SwiGLU(nn.Module):
+    """SwiGLU feedforward: SiLU(xW_gate) * (xW_up) -> W_down.
+    Uses 2/3 * dim_feedforward for gate/up to match param count of standard FFN."""
+    def __init__(self, d_model: int, dim_feedforward: int, dropout: float = 0.0):
+        super().__init__()
+        # Scale hidden dim to 2/3 so total params ≈ standard FFN (2 * d * ff)
+        hidden = int(2 * dim_feedforward / 3)
+        self.w_gate = nn.Linear(d_model, hidden, bias=False)
+        self.w_up = nn.Linear(d_model, hidden, bias=False)
+        self.w_down = nn.Linear(hidden, d_model, bias=False)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.dropout(self.w_down(Fn.silu(self.w_gate(x)) * self.w_up(x)))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 3. Attention + Transformer block
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -309,7 +350,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class TransformerBlock(nn.Module):
-    """Pre-norm Transformer block with configurable attention."""
+    """Pre-norm Transformer block with configurable attention, norm, and FFN."""
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.self_attn = CausalSelfAttention(
@@ -317,16 +358,22 @@ class TransformerBlock(nn.Module):
             pos_enc=cfg.pos_enc, attn_variant=cfg.attn_variant,
             n_kv_heads=cfg.n_kv_heads,
         )
-        self.norm1 = nn.LayerNorm(cfg.d_model)
+        use_rmsnorm = getattr(cfg, 'use_rmsnorm', False)
+        use_swiglu = getattr(cfg, 'use_swiglu', False)
+        Norm = RMSNorm if use_rmsnorm else nn.LayerNorm
+        self.norm1 = Norm(cfg.d_model)
         self.drop1 = nn.Dropout(cfg.dropout)
 
-        self.ff = nn.Sequential(
-            nn.Linear(cfg.d_model, cfg.dim_feedforward),
-            nn.GELU(),
-            nn.Dropout(cfg.dropout),
-            nn.Linear(cfg.dim_feedforward, cfg.d_model),
-        )
-        self.norm2 = nn.LayerNorm(cfg.d_model)
+        if use_swiglu:
+            self.ff = SwiGLU(cfg.d_model, cfg.dim_feedforward, cfg.dropout)
+        else:
+            self.ff = nn.Sequential(
+                nn.Linear(cfg.d_model, cfg.dim_feedforward),
+                nn.GELU(),
+                nn.Dropout(cfg.dropout),
+                nn.Linear(cfg.dim_feedforward, cfg.d_model),
+            )
+        self.norm2 = Norm(cfg.d_model)
         self.drop2 = nn.Dropout(cfg.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -556,7 +603,8 @@ class FramePredictor(nn.Module):
             self.blocks = nn.ModuleList([HALTransformerBlock(cfg) for _ in range(cfg.num_layers)])
         else:
             self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
-        self.final_norm = nn.LayerNorm(cfg.d_model)
+        FinalNorm = RMSNorm if getattr(cfg, 'use_rmsnorm', False) else nn.LayerNorm
+        self.final_norm = FinalNorm(cfg.d_model)
         if cfg.hal_mode:
             self.heads = HALPredictionHeads(
                 cfg.d_model,
@@ -583,7 +631,11 @@ class FramePredictor(nn.Module):
                 nn.init.normal_(blk.mlp.c_proj.weight, std=residual_std)
             else:
                 nn.init.normal_(blk.self_attn.out_proj.weight, std=residual_std)
-                nn.init.normal_(blk.ff[-1].weight, std=residual_std)
+                # SwiGLU uses w_down, standard FFN uses ff[-1]
+                if isinstance(blk.ff, SwiGLU):
+                    nn.init.normal_(blk.ff.w_down.weight, std=residual_std)
+                else:
+                    nn.init.normal_(blk.ff[-1].weight, std=residual_std)
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
