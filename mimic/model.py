@@ -49,6 +49,8 @@ class ModelConfig:
 
     # positional encoding
     pos_enc: str         = "rope"
+    rope_theta: float    = 10000.0      # base frequency for RoPE
+    rope_learnable_freqs: bool = False  # make per-dimension RoPE frequencies trainable
 
     # attention variant
     attn_variant: str    = "standard"
@@ -93,6 +95,34 @@ MODEL_PRESETS = {
                          dropout=0.2, max_seq_len=256, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
+    "hal-learned":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=256, pos_enc="learned",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-rope":     dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=256, pos_enc="rope",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-rope-lt":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=256, pos_enc="rope", rope_theta=1000.0,
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-rope-lf":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=256, pos_enc="rope", rope_learnable_freqs=True,
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-flex":     dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=256, pos_enc="flexbias",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-ropeflex": dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=256, pos_enc="rope+flexbias",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-rope-deep":dict(d_model=512,  nhead=8,  num_layers=12, dim_feedforward=2048,
+                         dropout=0.1, max_seq_len=256, pos_enc="rope",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
     "modern":       dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2500,
                          dropout=0.2, max_seq_len=256, pos_enc="rope",
                          n_kv_heads=2, use_rmsnorm=True, use_swiglu=True,
@@ -129,22 +159,38 @@ def _sinusoidal_embeddings(max_len: int, d_model: int) -> torch.Tensor:
     return pe.unsqueeze(0)
 
 
-def _apply_rope(q: torch.Tensor, k: torch.Tensor, head_dim: int) -> tuple:
-    """Apply rotary position embeddings to q, k of shape (B, nhead, T, head_dim)."""
-    T = q.size(2)
-    device = q.device
-    half = head_dim // 2
-    theta = 1.0 / (10000.0 ** (torch.arange(0, half, device=device).float() / half))
-    pos = torch.arange(T, device=device).float()
-    freqs = torch.outer(pos, theta)
-    cos_f = freqs.cos().unsqueeze(0).unsqueeze(0)
-    sin_f = freqs.sin().unsqueeze(0).unsqueeze(0)
+def _apply_rope(q: torch.Tensor, k: torch.Tensor,
+                 cos_f: torch.Tensor, sin_f: torch.Tensor) -> tuple:
+    """Apply rotary position embeddings to q, k of shape (B, nhead, T, head_dim).
+
+    cos_f, sin_f: (1, 1, T, half) precomputed by CausalSelfAttention.
+    """
+    half = cos_f.size(-1)
 
     def rotate(x):
         x1, x2 = x[..., :half], x[..., half:]
         return torch.cat([x1 * cos_f - x2 * sin_f, x2 * cos_f + x1 * sin_f], dim=-1)
 
     return rotate(q), rotate(k)
+
+
+def _build_rope_freqs(head_dim: int, theta: float) -> torch.Tensor:
+    """Return base frequency vector of shape (head_dim // 2,)."""
+    half = head_dim // 2
+    return 1.0 / (theta ** (torch.arange(0, half).float() / half))
+
+
+def _flex_bias_attention(q, k, v, dist_bias, T, device):
+    """FlexAttention with learned per-distance bias (Shaw relpos via fused kernel)."""
+    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+    bias = dist_bias  # (nhead, max_seq_len)
+    def score_mod(score, b, h, q_idx, kv_idx):
+        return score + bias[h, q_idx - kv_idx]
+    block_mask = create_block_mask(
+        lambda b, h, q_idx, kv_idx: q_idx >= kv_idx,
+        B=None, H=None, Q_LEN=T, KV_LEN=T, device=device,
+    )
+    return flex_attention(q, k, v, score_mod=score_mod, block_mask=block_mask)
 
 
 def _alibi_slopes(nhead: int) -> torch.Tensor:
@@ -296,11 +342,12 @@ class SwiGLU(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class CausalSelfAttention(nn.Module):
-    """Multi-head self-attention with support for RoPE, ALiBi, GQA, sliding window."""
+    """Multi-head self-attention with support for RoPE, ALiBi, FlexBias, GQA, sliding window."""
 
     def __init__(self, d_model: int, nhead: int, dropout: float, max_seq_len: int,
                  pos_enc: str = "learned", attn_variant: str = "standard",
-                 n_kv_heads: int = 0, window_size: int = 30):
+                 n_kv_heads: int = 0, window_size: int = 30,
+                 rope_theta: float = 10000.0, rope_learnable_freqs: bool = False):
         super().__init__()
         assert d_model % nhead == 0
         self.nhead = nhead
@@ -322,6 +369,18 @@ class CausalSelfAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, kv_dim)
         self.out_proj = nn.Linear(d_model, d_model)
 
+        if pos_enc in ("rope", "rope+flexbias"):
+            base_freqs = _build_rope_freqs(self.head_dim, rope_theta)
+            if rope_learnable_freqs:
+                self.rope_log_freqs = nn.Parameter(base_freqs.log())
+            else:
+                self.register_buffer("rope_freqs", base_freqs)
+            self.rope_learnable_freqs = rope_learnable_freqs
+
+        if pos_enc in ("flexbias", "rope+flexbias"):
+            # Learned per-distance bias per head via FlexAttention fused kernel
+            self.dist_bias = nn.Parameter(torch.zeros(nhead, max_seq_len))
+
         if pos_enc == "alibi":
             slopes = _alibi_slopes(nhead)
             self.register_buffer("alibi_slopes", slopes)
@@ -336,8 +395,13 @@ class CausalSelfAttention(nn.Module):
             k = k.repeat_interleave(self.kv_group_size, dim=1)
             v = v.repeat_interleave(self.kv_group_size, dim=1)
 
-        if self.pos_enc == "rope":
-            q, k = _apply_rope(q, k, self.head_dim)
+        if self.pos_enc in ("rope", "rope+flexbias"):
+            freqs = self.rope_log_freqs.exp() if self.rope_learnable_freqs else self.rope_freqs
+            pos = torch.arange(T, device=x.device).float()
+            angles = torch.outer(pos, freqs)
+            cos_f = angles.cos().unsqueeze(0).unsqueeze(0)
+            sin_f = angles.sin().unsqueeze(0).unsqueeze(0)
+            q, k = _apply_rope(q, k, cos_f, sin_f)
 
         attn_mask = None
         use_causal = True
@@ -358,10 +422,13 @@ class CausalSelfAttention(nn.Module):
                 attn_mask = sw_mask.unsqueeze(0).unsqueeze(0)
             use_causal = False
 
-        out = Fn.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, is_causal=use_causal,
-            dropout_p=self.dropout if self.training else 0.0,
-        )
+        if self.pos_enc in ("flexbias", "rope+flexbias"):
+            out = _flex_bias_attention(q, k, v, self.dist_bias, T, x.device)
+        else:
+            out = Fn.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, is_causal=use_causal,
+                dropout_p=self.dropout if self.training else 0.0,
+            )
         out = out.transpose(1, 2).contiguous().view(B, T, C)
         return self.out_proj(out)
 
@@ -374,6 +441,7 @@ class TransformerBlock(nn.Module):
             cfg.d_model, cfg.nhead, cfg.dropout, cfg.max_seq_len,
             pos_enc=cfg.pos_enc, attn_variant=cfg.attn_variant,
             n_kv_heads=cfg.n_kv_heads,
+            rope_theta=cfg.rope_theta, rope_learnable_freqs=cfg.rope_learnable_freqs,
         )
         use_rmsnorm = getattr(cfg, 'use_rmsnorm', False)
         use_swiglu = getattr(cfg, 'use_swiglu', False)

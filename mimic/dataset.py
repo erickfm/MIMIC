@@ -119,7 +119,7 @@ class StreamingMeleeDataset(IterableDataset):
         random.shuffle(files)
 
         for path in files:
-            shard = torch.load(path, weights_only=True)
+            shard = torch.load(path, weights_only=True, mmap=True)
             n = shard["n"]
             indices = list(range(n))
             random.shuffle(indices)
@@ -159,7 +159,7 @@ class StreamingMeleeDataset(IterableDataset):
         W, R = self.sequence_length, self.reaction_delay
 
         for path in files:
-            shard = torch.load(path, weights_only=True)
+            shard = torch.load(path, weights_only=True, mmap=True)
             offsets = shard["offsets"]
             n_games = shard["n_games"]
             states = shard["states"]

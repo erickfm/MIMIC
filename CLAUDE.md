@@ -196,10 +196,14 @@ ISO. The `MAC_*` path aliases were added for this purpose.
 
 | Directory | Contents | Status |
 |-----------|----------|--------|
-| `data/fox_hal_local` | 7,600 Fox games, HAL-normalized, 5-combo controller | **Active — use this** |
+| `data/fox_hal_full` | ~10K Fox games, HAL-normalized, 800MB shards, quality-filtered | **Active — use this** |
+| `data/fox_hal_800m` | 7,600 Fox games, HAL-normalized, 800MB shards (resharded from fox_hal_local) | Available |
+| `data/fox_hal_local` | 7,600 Fox games, HAL-normalized, 3.8GB shards (original) | Legacy |
 
-This is the only data directory. Legacy directories (ranked_fox, wavedash, etc.)
-were cleaned up on 2026-04-07. To build new shards, use `tools/slp_to_shards.py`
+Use 800MB shards with `mmap=True` in DataLoader for optimal throughput. The
+`tools/reshard.py` script can split large shards: `python tools/reshard.py --src <dir> --dst <dir> --target-mb 800`.
+
+To build new shards, use `tools/slp_to_shards.py`
 with `--hal-norm` and a metadata dir containing 5-combo `controller_combos.json`.
 
 **Game quality filters (added 2026-04-08, matching HAL):** `slp_to_shards.py`

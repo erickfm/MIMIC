@@ -78,6 +78,8 @@ CKPT_FRAC          = 0.05     # checkpoint every ~5%
 # 1b. Speed settings
 # -----------------------------------------------------------------------------
 torch.backends.cudnn.benchmark = True
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 torch.set_float32_matmul_precision("high")
 
 # -----------------------------------------------------------------------------
@@ -491,6 +493,7 @@ def get_dataloader(ds, shuffle=True, persistent=True, sampler=None):
         drop_last=True,
         pin_memory=(nw > 0),
         persistent_workers=(persistent and nw > 0),
+        prefetch_factor=4 if nw > 0 else None,
     )
 
 def get_model(compile_model=True, model_preset=None, num_layers_override=None,
@@ -546,7 +549,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
-        model = torch.compile(model)
+        model = torch.compile(model, mode="reduce-overhead")
     return model, cfg
 
 def infinite_loader(dl, sampler=None):
@@ -970,7 +973,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
             with maybe_no_sync:
                 micro_loss.backward()
-            accum_loss += micro_loss.item()
+            accum_loss += micro_loss.detach()
 
             # Accumulate metrics (use last micro-batch for per-step logging)
             accum_metrics = metrics
@@ -992,7 +995,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         optimiser.step()
         scheduler.step()
 
-        total_loss_val = accum_loss  # already averaged across micro-batches
+        total_loss_val = accum_loss.item() if isinstance(accum_loss, torch.Tensor) else accum_loss
         metrics = accum_metrics
         _run_sums["total"]     += total_loss_val
         _run_sums["grad_norm"] += grad_norm
