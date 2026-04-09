@@ -184,6 +184,13 @@ This is the only data directory. Legacy directories (ranked_fox, wavedash, etc.)
 were cleaned up on 2026-04-07. To build new shards, use `tools/slp_to_shards.py`
 with `--hal-norm` and a metadata dir containing 5-combo `controller_combos.json`.
 
+**btns_single encoding (fixed 2026-04-08):** The `btns_single` field in shards
+encodes multi-hot buttons as single-label using early-release logic (match HAL's
+`convert_multi_hot_to_one_hot_early_release`). When buttons change but nothing
+new is pressed (partial release), the label is NO_BUTTON (4). Previously MIMIC
+kept the surviving held button — this was fixed in both `slp_to_shards.py` and
+the existing shard data (524K frames affected, 0.71%).
+
 ### HuggingFace Dataset
 
 `erickfm/slippi-public-dataset-v3.7` — 95K unique replays organized by
@@ -231,7 +238,8 @@ Currently training: `hal-local_*` — local training run on fox_hal_local data.
 
 ### Tools
 - `tools/run_hal_model.py` — **Our reimplementation** of HAL's inference. Loads HAL checkpoints and plays via Dolphin. Fixed 2026-04-07.
-- `tools/run_mimic_via_hal_loop.py` — Runs MIMIC checkpoints through HAL-style inference loop
+- `tools/run_mimic_via_hal_loop.py` — Runs MIMIC checkpoints through HAL-style inference loop. Fixed stats path and player ordering 2026-04-08.
+- `tools/head_to_head.py` — Runs two checkpoints (HAL/MIMIC) against each other in Dolphin. Added 2026-04-08.
 - `tools/validate_checkpoint.py` — Evaluates checkpoint(s) on val data, reports per-head CE loss
 - `tools/verify_hal_pipeline.py` — Compares our preprocessing against HAL's. Run after inference changes.
 - `tools/slp_to_shards.py` — Raw .slp replays -> .pt tensor shards (core pipeline)
@@ -243,7 +251,8 @@ Currently training: `hal-local_*` — local training run on fox_hal_local data.
 - `tools/split_by_character.py` — Split dataset by character
 
 ### Docs
-- `docs/research-notes-2026-04-07.md` — Most recent research notes (current findings)
+- `docs/research-notes-2026-04-08.md` — HAL vs MIMIC pipeline audit, button encoding, shoulder analog/digital
+- `docs/research-notes-2026-04-07.md` — max_steps bug fix, inference bug fixes, training results
 - `docs/archive/research-notes-*.md` — Historical research journal (2026-03-14 through 2026-04-06).
   **Warning:** these contain claims that were believed true at the time but later
   proven wrong (e.g., "HAL doesn't overfit", "26.3M params", specific stats file
@@ -255,7 +264,7 @@ Currently training: `hal-local_*` — local training run on fox_hal_local data.
 ## Research Notes Warning
 
 The `docs/research-notes-*.md` files are a chronological journal spanning
-2026-03-14 to 2026-04-07. They record what was believed true at each point
+2026-03-14 to 2026-04-08. They record what was believed true at each point
 in time. Several claims in the notes were later found to be incorrect:
 
 - "HAL's val loss is stable" — Actually HAL overfits too (val rises from 0.744 to 0.802 after 5.2M samples)
@@ -311,3 +320,20 @@ This is Eric Gu's original HAL codebase. Key files:
 
 8. **Check `sorted()` on player dicts.** melee-py's `gamestate.players` dict
    order is not guaranteed to match port order. Always `sorted()`.
+
+9. **Use `blocking_input=True` for inference.** This makes Dolphin wait for
+   controller input before advancing each frame. Without it, slow model
+   inference causes frame drops (the game advances without receiving input).
+   In head-to-head, non-blocking mode systematically disadvantages whichever
+   model's inputs are flushed second. Fixed 2026-04-08.
+
+11. **Shoulder is analog-only.** Neither HAL nor MIMIC triggers the digital L/R
+   click (`press_button(BUTTON_L)`). Only analog values are sent via
+   `press_shoulder(BUTTON_L, value)`. The game's tech input appears to use the
+   analog threshold, not the digital click. See research notes 2026-04-08.
+
+12. **Button encoding is single-label.** The 5-class button head (A, B, Jump,
+    Z, None) cannot represent two simultaneous action buttons. Multi-button
+    overlaps (2.65% of frames) are collapsed via early-release encoding: the
+    newest button (0→1 transition) gets the label. Shoulder+button combos ARE
+    representable since shoulder is a separate head.

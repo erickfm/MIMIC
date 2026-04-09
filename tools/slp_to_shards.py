@@ -649,8 +649,8 @@ def build_targets_from_arrays(
                 if new_buttons:
                     single[i] = min(new_buttons)  # newest press, tie-break by priority
                 else:
-                    # buttons were released, not pressed — keep the remaining one
-                    single[i] = min(curr_buttons) if curr_buttons else 4
+                    # buttons were released, not pressed — match HAL: NO_BUTTON
+                    single[i] = 4
                 prev_buttons = curr_buttons
             else:
                 # same buttons held — keep previous label

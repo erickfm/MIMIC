@@ -199,7 +199,7 @@ class _InferenceModel(nn.Module):
     def forward(self, stage, ego_char, opp_char, ego_action, opp_action, gamestate, controller):
         enc = self.fp.encoder
         combined = torch.cat([
-            enc.stage_emb((stage - 1).clamp(min=0) if enc.stage_emb.num_embeddings == 6 else stage),
+            enc.stage_emb(stage),  # inference uses 0-based stage indices from HAL_STAGE_MAP
             enc.char_emb(ego_char),
             enc.char_emb(opp_char),
             enc.action_emb(ego_action),
@@ -531,7 +531,7 @@ console = melee.Console(
     is_dolphin=True,
     tmp_home_directory=True,
     copy_home_directory=False,
-    blocking_input=False,
+    blocking_input=True,
     online_delay=0,
     setup_gecko_codes=True,
     fullscreen=False,

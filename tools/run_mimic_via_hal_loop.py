@@ -57,7 +57,7 @@ model.to(DEVICE)
 log.info("Loaded MIMIC model: %d params, encoder=%s", sum(p.numel() for p in model.parameters()), cfg.encoder_type)
 
 # ── HAL stats ───────────────────────────────────────────────────────────────
-HAL_STATS_PATH = Path("/home/erick/projects/hal/hal/data/stats.json")
+HAL_STATS_PATH = Path("/home/erick/projects/hal/checkpoints/stats.json")
 with open(HAL_STATS_PATH) as f:
     _raw_stats = json.load(f)
 p1s = {k.removeprefix("p1_"): _raw_stats[k] for k in _raw_stats if k.startswith("p1_")}
@@ -97,7 +97,7 @@ MIMIC_FLAGS = ["on_ground", "facing", "invulnerable"]  # HAL flag indices [0, 2,
 
 def build_frame(gs, prev_sent):
     """Build MIMIC-format frame dict from gamestate."""
-    players = list(gs.players.items())
+    players = sorted(gs.players.items())
     if len(players) < 2:
         return None
     _, ps1 = players[0]
@@ -224,7 +224,7 @@ def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
     top3_str = " ".join(f"{NAMES[i]}={v:.3f}" for v, i in zip(top3.values.tolist(), top3.indices.tolist()))
     gs_str = ""
     if gs is not None:
-        players = list(gs.players.items())
+        players = sorted(gs.players.items())
         if len(players) >= 2:
             ps1, ps2 = players[0][1], players[1][1]
             gs_str = f"  S={ps1.stock}({ps1.percent:.0f}%) O={ps2.stock}({ps2.percent:.0f}%)"
@@ -234,7 +234,7 @@ def decode_and_press(ctrl, preds, gs=None, temperature=1.0):
 
 # ── Dolphin loop ────────────────────────────────────────────────────────────
 console = melee.Console(path=args.dolphin_path, is_dolphin=True, tmp_home_directory=True,
-    copy_home_directory=False, blocking_input=False, online_delay=0, setup_gecko_codes=True,
+    copy_home_directory=False, blocking_input=True, online_delay=0, setup_gecko_codes=True,
     fullscreen=False, gfx_backend="", disable_audio=False, use_exi_inputs=False, enable_ffw=False)
 ego_ctrl = melee.Controller(console=console, port=1, type=melee.ControllerType.STANDARD)
 cpu_ctrl = melee.Controller(console=console, port=2, type=melee.ControllerType.STANDARD)
