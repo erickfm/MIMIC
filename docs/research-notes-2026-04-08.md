@@ -104,11 +104,17 @@ Trained on fixed shards with `--random-perspective`, bs=128, accum=4, single 409
 Stopped at step ~13,100 (6.7M samples). Best val loss **1.038** (vs HAL's 1.089).
 
 Head-to-head results against HAL Original (Fox vs Fox, FD):
-- hal-fixed-pipeline_best (2.5M samples, val 1.03): **HAL 4-0**
-- hal-fixed-pipeline_step9828 (5.0M samples, val 1.05): **HAL 2-0**
-- For reference, pre-fix hal-local_best: **HAL 2-0**
+- hal-fixed-pipeline_best (2.5M samples, val 1.03): **HAL 4-0** (MIMIC=P2, blocking=False)
+- hal-fixed-pipeline_step9828 (5.0M samples, val 1.05): **HAL 2-0** (MIMIC=P2, blocking=False)
+- hal-fixed-pipeline_step9828 (ports swapped): **HAL 1-0** (MIMIC=P1, blocking=True)
+- For reference, pre-fix hal-local_best: **HAL 2-0** (MIMIC=P2, blocking=False)
 
-Lower val loss did not translate to better gameplay.
+The blocking_input fix and port swap dramatically improved results — from
+consistent 2-stock losses to a last-stock game. The P2 timing disadvantage
+with blocking_input=False was a real, significant factor in earlier tests.
+
+Remaining gap (1 stock) is likely due to data quality (no filtering in MIMIC
+shards). Next step: add HAL's game filters and retrain.
 
 ### Data filtering — CRITICAL FINDING (identified after training)
 
