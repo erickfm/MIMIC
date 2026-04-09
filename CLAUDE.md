@@ -77,19 +77,25 @@ fixed on 2026-04-07 after multiple rounds of debugging.
 
 ```bash
 torchrun --nproc_per_node=8 train.py \
-  --model hal --encoder hal_flat \
+  --model hal-learned --encoder hal_flat \
   --hal-mode --hal-minimal-features --hal-controller-encoding \
-  --stick-clusters hal37 --plain-ce --no-amp \
+  --stick-clusters hal37 --plain-ce \
   --lr 3e-4 --batch-size 64 \
   --max-samples 16777216 \
   --data-dir data/fox_hal_local \
   --controller-offset --self-inputs \
-  --no-compile --run-name <name> \
+  --run-name <name> \
   --nccl-timeout 7200 --no-warmup --cosine-min-lr 1e-6
 ```
 
 For single-GPU training, add `--grad-accum-steps 8` to match the effective
 batch size of 512. Remove `torchrun --nproc_per_node=8`.
+
+**Throughput notes (RTX 4090):** BF16 AMP and torch.compile are enabled by
+default. The `hal-learned` preset uses learned position embeddings instead of
+relative position, which enables Flash Attention via PyTorch's SDPA. Combined
+these give ~2.5-4x throughput vs. the old FP32/no-compile/relpos config. For
+strict HAL reproduction, use `--model hal --no-amp --no-compile` instead.
 
 ### max_steps Bug (Fixed 2026-04-07)
 
@@ -183,6 +189,14 @@ ISO. The `MAC_*` path aliases were added for this purpose.
 This is the only data directory. Legacy directories (ranked_fox, wavedash, etc.)
 were cleaned up on 2026-04-07. To build new shards, use `tools/slp_to_shards.py`
 with `--hal-norm` and a metadata dir containing 5-combo `controller_combos.json`.
+
+**Game quality filters (added 2026-04-08, matching HAL):** `slp_to_shards.py`
+now filters replays the same way HAL's `process_replays.py` does:
+- Minimum 1,500 frames (~25 seconds) — rejects disconnects and junk
+- Damage check — both players must take at least some damage
+- Completion check — one player must lose all stocks (no ragequits)
+Existing `fox_hal_local` shards were built WITHOUT these filters and contain
+low-quality games. Rebuild shards from .slp source to get clean data.
 
 **btns_single encoding (fixed 2026-04-08):** The `btns_single` field in shards
 encodes multi-hot buttons as single-label using early-release logic (match HAL's

@@ -73,6 +73,7 @@ log = logging.getLogger(__name__)
 # --- Constants ---------------------------------------------------------------
 MAX_PROJ = 8
 MAX_FRAMES = 30000          # ~8 min at 60fps
+MIN_FRAMES = 1500           # ~25 sec — match HAL's minimum game length filter
 BTN_ENUMS = [Button[name] for name in BTN]
 METADATA_FILES = ["norm_stats.json", "cat_maps.json", "stick_clusters.json"]
 _CSTICK_PREFIXES = ("self", "opp", "self_nana", "opp_nana")
@@ -855,7 +856,27 @@ def _extract_replay_inner(
 
         n_frames += 1
 
-    if n_frames < 2:
+    if n_frames < MIN_FRAMES:
+        return None
+
+    # --- HAL-matching game quality filters ---
+    # Read percent and stock from p1-perspective arrays (self=p1, opp=p2)
+    _p1_pct_key, _p1_pct_idx = p1_self_wmap["percent"]
+    _p2_pct_key, _p2_pct_idx = p1_opp_wmap["percent"]
+    _p1_stk_key, _p1_stk_idx = p1_self_wmap["stock"]
+    _p2_stk_key, _p2_stk_idx = p1_opp_wmap["stock"]
+
+    p1_pct = p1_arrays[_p1_pct_key][:n_frames, _p1_pct_idx]
+    p2_pct = p1_arrays[_p2_pct_key][:n_frames, _p2_pct_idx]
+    p1_stk = p1_arrays[_p1_stk_key][:n_frames, _p1_stk_idx]
+    p2_stk = p1_arrays[_p2_stk_key][:n_frames, _p2_stk_idx]
+
+    # Damage check: skip if either player took 0 damage the entire game
+    if np.all(p1_pct == 0) or np.all(p2_pct == 0):
+        return None
+
+    # Completion check: skip if neither player lost all stocks
+    if p1_stk[-1] != 0 and p2_stk[-1] != 0:
         return None
 
     # Bulk-write static stage geometry (constant across all frames)
