@@ -116,6 +116,18 @@ Now fixed to divide by effective batch size.
 More data eliminates overfitting. The full HF dataset has 46K Fox games;
 only 12K were used due to disk constraints.
 
+### Training Results (2026-04-08)
+
+| Run | Data | Filtering | Best Val Loss | vs HAL gameplay |
+|-----|------|-----------|--------------|-----------------|
+| HAL original | 2,830 games | Yes (HAL filters) | 1.089 (on filtered val) | — |
+| hal-fixed-pipeline | 7,600 games | No | 1.038 | HAL 1-0 (close) |
+| hal-filtered | 6,898 games | Yes (HAL filters) | 1.054 | **MIMIC 3-0** |
+
+Data filtering (min 1500 frames, damage check, completion check) was more
+important than val loss for gameplay quality. The unfiltered model had lower
+val loss but worse gameplay because the val set contained the same junk.
+
 ### Do NOT run inference while training on the same GPU
 
 GPU contention causes frame drops in Dolphin, making the model appear

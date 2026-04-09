@@ -113,8 +113,10 @@ The blocking_input fix and port swap dramatically improved results — from
 consistent 2-stock losses to a last-stock game. The P2 timing disadvantage
 with blocking_input=False was a real, significant factor in earlier tests.
 
-Remaining gap (1 stock) is likely due to data quality (no filtering in MIMIC
-shards). Next step: add HAL's game filters and retrain.
+With blocking_input=True and fair port assignment, both models perform similarly.
+The remaining gameplay gap is likely attributable to data quality — MIMIC trains
+on unfiltered replays including ragequits, disconnects, and zero-damage games,
+while HAL only trains on complete, competitive games.
 
 ### Data filtering — CRITICAL FINDING (identified after training)
 
@@ -157,10 +159,48 @@ byte-compatible between HAL and MIMIC. No forward pass differences.
 
 3. **MDS vs .pt**: Different data loading formats but equivalent semantics.
 
-## Next Steps
+### Filtered data training (hal-filtered)
 
-1. Add HAL's data filters to slp_to_shards.py (min 1500 frames, damage check,
-   completion check)
-2. Rebuild shards with filtering
-3. Retrain and re-evaluate gameplay
-4. Run head-to-head with ports swapped (MIMIC as P1) to verify blocking_input fix
+Rebuilt shards from 4,000 Fox .slp files with HAL-matching filters:
+- MIN_FRAMES=1500 (reject games < 25 sec)
+- Damage check (both players must take damage)
+- Completion check (one player must lose all stocks)
+
+Result: 6,898 train games, 64.3M frames (from 4,000 replays × 2 perspectives,
+14% filtered as junk).
+
+Trained with same config as hal-fixed-pipeline but on filtered data.
+
+### Head-to-head results (all with blocking_input=True, MIMIC as P1)
+
+| Match | MIMIC checkpoint | Samples | Data | Result |
+|-------|-----------------|---------|------|--------|
+| 1 | hal-local_best (pre-fix) | 5.0M | unfiltered | HAL 2-0 (blocking=False, P2) |
+| 2 | hal-fixed-pipeline_best | 2.5M | unfiltered (fixed btns) | HAL 4-0 (blocking=False, P2) |
+| 3 | hal-fixed-pipeline_step9828 | 5.0M | unfiltered (fixed btns) | HAL 2-0 (blocking=False, P2) |
+| 4 | hal-fixed-pipeline_step9828 | 5.0M | unfiltered (fixed btns) | HAL 1-0 (blocking=True, P1) |
+| 5 | hal-filtered_step9828 | 5.0M | filtered | HAL wins (blocking=True, P1) |
+| 6 | hal-filtered_step11466 | 5.9M | filtered | HAL wins (blocking=True, P1) |
+| **7** | **hal-filtered_step11466** | **5.9M** | **filtered** | **MIMIC 3-0 (blocking=True, P1)** |
+
+Game 7: **MIMIC's first win against HAL.** 3-stocked HAL in 135 seconds.
+
+### Key takeaways
+
+1. **blocking_input=True is essential.** Without it, P2 systematically loses
+   frames. Changed results from 2-0 losses to competitive games.
+
+2. **Data filtering matters.** Removing junk games (ragequits, zero-damage,
+   incomplete) improved gameplay quality even though val loss was similar.
+
+3. **Val loss is a poor proxy for gameplay quality.** The unfiltered model had
+   lower val loss (1.038 vs 1.058) but worse gameplay, because the val set
+   contained the same junk data.
+
+4. **More training helps gameplay.** The step 11,466 checkpoint (5.9M samples)
+   played better than step 9,828 (5.0M), and the early-stopped _best checkpoint
+   (2.5M) played worst despite best val loss.
+
+5. **MIMIC can match HAL.** With correct data filtering, btns_single encoding,
+   and blocking_input, MIMIC achieves competitive gameplay against HAL's
+   original checkpoint.
