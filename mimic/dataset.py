@@ -13,6 +13,7 @@
 # ---------------------------------------------------------------------------
 
 import json
+import os
 import random
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -60,6 +61,8 @@ class StreamingMeleeDataset(IterableDataset):
         self._hal_ctrl_enc   = hal_controller_encoding
         self._combo_map      = controller_combo_map
         self._n_combos       = n_controller_combos
+        # Only slice keys the model uses (if known) — avoids loading 58 unused keys
+        self._state_keys     = None  # set by caller to filter state dict keys
 
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
@@ -214,7 +217,11 @@ class StreamingMeleeDataset(IterableDataset):
                     window_indices.append(game_start + random.randint(0, max_w))
             random.shuffle(window_indices)
             for abs_start in window_indices:
-                state = {k: v[abs_start: abs_start + W] for k, v in states.items()}
+                _sk = self._state_keys
+                if _sk is not None:
+                    state = {k: states[k][abs_start: abs_start + W] for k in _sk}
+                else:
+                    state = {k: v[abs_start: abs_start + W] for k, v in states.items()}
                 target = {k: v[abs_start + R: abs_start + W + R] for k, v in targets.items()}
                 # HAL-style: shift self-controller by -1 so position i sees frame i-1's controller
                 if self._controller_offset and W > 1:
@@ -244,7 +251,6 @@ class StreamingMeleeDataset(IterableDataset):
                     del state["self_buttons"]
                     del state["self_analog"]
                     del state["self_c_dir"]
-
                 yield state, target
 
     # ------------------------------------------------------------------

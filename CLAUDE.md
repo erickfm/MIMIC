@@ -92,10 +92,16 @@ For single-GPU training, add `--grad-accum-steps 8` to match the effective
 batch size of 512. Remove `torchrun --nproc_per_node=8`.
 
 **Throughput notes (RTX 4090):** BF16 AMP and torch.compile are enabled by
-default. The `hal-learned` preset uses learned position embeddings instead of
-relative position, which enables Flash Attention via PyTorch's SDPA. Combined
-these give ~2.5-4x throughput vs. the old FP32/no-compile/relpos config. For
-strict HAL reproduction, use `--model hal --no-amp --no-compile` instead.
+default. BF16 AMP is enabled by default with FP32 attention upcast in the
+relpos path (prevents BF16 overflow in manual attention score computation).
+For strict HAL reproduction, use `--model hal --no-amp --no-compile` instead.
+
+**BF16 + relpos stability:** The Shaw relpos attention computes Q@K^T + Srel
+manually. In BF16 this overflows due to limited mantissa precision (7 bits).
+The fix is an `autocast(enabled=False)` block around the attention math in
+`CausalSelfAttentionRelPos.forward()`, keeping Q/K/Er in FP32 for the dot
+products while the rest of the model (FFN, embeddings, heads) stays in BF16.
+Do NOT use GradScaler with BF16 — it's only needed for FP16.
 
 ### max_steps Bug (Fixed 2026-04-07)
 

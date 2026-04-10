@@ -200,7 +200,8 @@ def load_model(path, device):
         valid_fields = {f.name for f in dataclasses.fields(ModelConfig)}
         mc = ModelConfig(**{k: v for k, v in cfg.items() if k in valid_fields})
         fp = FramePredictor(mc).to(device)
-        fp.load_state_dict(raw["model_state_dict"])
+        sd = {k.removeprefix("_orig_mod."): v for k, v in raw["model_state_dict"].items()}
+        fp.load_state_dict(sd)
         fp.eval()
         model = _InferenceModel(fp)
         desc = f"MIMIC({cfg.get('model_preset', '?')})"

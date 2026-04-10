@@ -51,6 +51,7 @@ class ModelConfig:
     pos_enc: str         = "rope"
     rope_theta: float    = 10000.0      # base frequency for RoPE
     rope_learnable_freqs: bool = False  # make per-dimension RoPE frequencies trainable
+    xpos_scale_base: float = 0.0       # xPos decay base (0 = default 512)
 
     # attention variant
     attn_variant: str    = "standard"
@@ -123,6 +124,22 @@ MODEL_PRESETS = {
                          dropout=0.1, max_seq_len=256, pos_enc="rope",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
+    "hal-xpos":     dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.1, max_seq_len=256, pos_enc="xpos", xpos_scale_base=128.0,
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-selrope":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.1, max_seq_len=256, pos_enc="selective_rope",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-ropenope": dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.1, max_seq_len=256, pos_enc="rope_nope",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "hal-xpos-64":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.1, max_seq_len=256, pos_enc="xpos", xpos_scale_base=64.0,
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
     "modern":       dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2500,
                          dropout=0.2, max_seq_len=256, pos_enc="rope",
                          n_kv_heads=2, use_rmsnorm=True, use_swiglu=True,
@@ -178,6 +195,32 @@ def _build_rope_freqs(head_dim: int, theta: float) -> torch.Tensor:
     """Return base frequency vector of shape (head_dim // 2,)."""
     half = head_dim // 2
     return 1.0 / (theta ** (torch.arange(0, half).float() / half))
+
+
+def _apply_rope_xpos(q: torch.Tensor, k: torch.Tensor,
+                     cos_f: torch.Tensor, sin_f: torch.Tensor,
+                     scale: torch.Tensor) -> tuple:
+    """RoPE with xPos exponential decay. scale: (1, 1, T, half)."""
+    half = cos_f.size(-1)
+    scale2 = scale.repeat_interleave(2, dim=-1)  # (1, 1, T, head_dim)
+
+    def rotate(x):
+        x1, x2 = x[..., :half], x[..., half:]
+        return torch.cat([x1 * cos_f - x2 * sin_f, x2 * cos_f + x1 * sin_f], dim=-1)
+
+    return rotate(q) * scale2, rotate(k) / scale2
+
+
+def _build_xpos_scale(head_dim: int, seq_len: int, scale_base: float = 512.0) -> torch.Tensor:
+    """Build xPos position-dependent scale tensor. Returns (1, 1, seq_len, half)."""
+    half = head_dim // 2
+    # Per-dimension base scale
+    base_scale = (torch.arange(0, half).float() + 0.4 * head_dim) / (1.4 * head_dim)
+    # Position-dependent power (centered)
+    pos = torch.arange(seq_len).float() - seq_len // 2
+    power = pos.unsqueeze(1) / scale_base  # (T, 1)
+    scale = base_scale.unsqueeze(0) ** power  # (T, half)
+    return scale.unsqueeze(0).unsqueeze(0)
 
 
 def _flex_bias_attention(q, k, v, dist_bias, T, device):
@@ -253,16 +296,20 @@ class CausalSelfAttentionRelPos(nn.Module):
         q = q.view(B, L, self.n_head, self.hs).transpose(1, 2)
         v = v.view(B, L, self.n_head, self.hs).transpose(1, 2)
 
-        start = self.block_size - L
-        Er_t = self.Er[start:, :].transpose(0, 1)
-        QEr = q @ Er_t
-        Srel = _skew(QEr)
+        # Attention math in FP32 to avoid BF16 overflow on Q@K^T + Srel
+        with torch.autocast("cuda", enabled=False):
+            q, k = q.float(), k.float()
+            start = self.block_size - L
+            Er_t = self.Er[start:, :].float().transpose(0, 1)
+            QEr = q @ Er_t
+            Srel = _skew(QEr)
 
-        QK_t = q @ k.transpose(-2, -1)
-        scale = 1.0 / math.sqrt(k.size(-1))
-        att = (QK_t + Srel) * scale
-        att = att.masked_fill(self.bias[:, :, :L, :L] == 0, float("-inf"))
-        att = Fn.softmax(att, dim=-1)
+            QK_t = q @ k.transpose(-2, -1)
+            scale = 1.0 / math.sqrt(k.size(-1))
+            att = (QK_t + Srel) * scale
+            att = att.masked_fill(self.bias[:, :, :L, :L] == 0, float("-inf"))
+            att = Fn.softmax(att, dim=-1)
+
         att = self.attn_dropout(att)
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, L, D)
@@ -347,7 +394,8 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, d_model: int, nhead: int, dropout: float, max_seq_len: int,
                  pos_enc: str = "learned", attn_variant: str = "standard",
                  n_kv_heads: int = 0, window_size: int = 30,
-                 rope_theta: float = 10000.0, rope_learnable_freqs: bool = False):
+                 rope_theta: float = 10000.0, rope_learnable_freqs: bool = False,
+                 xpos_scale_base: float = 0.0):
         super().__init__()
         assert d_model % nhead == 0
         self.nhead = nhead
@@ -357,6 +405,7 @@ class CausalSelfAttention(nn.Module):
         self.pos_enc = pos_enc
         self.attn_variant = attn_variant
         self.window_size = window_size
+        self.xpos_scale_base = xpos_scale_base
 
         self.n_kv_heads = n_kv_heads if (n_kv_heads and n_kv_heads < nhead) else nhead
         assert nhead % self.n_kv_heads == 0, f"nhead ({nhead}) must be divisible by n_kv_heads ({self.n_kv_heads})"
@@ -369,7 +418,8 @@ class CausalSelfAttention(nn.Module):
         self.v_proj = nn.Linear(d_model, kv_dim)
         self.out_proj = nn.Linear(d_model, d_model)
 
-        if pos_enc in ("rope", "rope+flexbias"):
+        uses_rope = pos_enc in ("rope", "rope+flexbias", "xpos", "selective_rope")
+        if uses_rope:
             base_freqs = _build_rope_freqs(self.head_dim, rope_theta)
             if rope_learnable_freqs:
                 self.rope_log_freqs = nn.Parameter(base_freqs.log())
@@ -377,8 +427,18 @@ class CausalSelfAttention(nn.Module):
                 self.register_buffer("rope_freqs", base_freqs)
             self.rope_learnable_freqs = rope_learnable_freqs
 
+        if pos_enc == "xpos":
+            sb = xpos_scale_base if xpos_scale_base > 0 else 512.0
+            self.register_buffer("xpos_scale",
+                _build_xpos_scale(self.head_dim, max_seq_len, sb))
+
+        if pos_enc == "selective_rope":
+            half = self.head_dim // 2
+            # Conv1d to produce per-position angular velocity from input
+            self.sel_omega_proj = nn.Linear(d_model, half)
+            self.sel_temperature = nn.Parameter(torch.ones(half))
+
         if pos_enc in ("flexbias", "rope+flexbias"):
-            # Learned per-distance bias per head via FlexAttention fused kernel
             self.dist_bias = nn.Parameter(torch.zeros(nhead, max_seq_len))
 
         if pos_enc == "alibi":
@@ -401,6 +461,24 @@ class CausalSelfAttention(nn.Module):
             angles = torch.outer(pos, freqs)
             cos_f = angles.cos().unsqueeze(0).unsqueeze(0)
             sin_f = angles.sin().unsqueeze(0).unsqueeze(0)
+            q, k = _apply_rope(q, k, cos_f, sin_f)
+
+        if self.pos_enc == "xpos":
+            freqs = self.rope_log_freqs.exp() if self.rope_learnable_freqs else self.rope_freqs
+            pos = torch.arange(T, device=x.device).float()
+            angles = torch.outer(pos, freqs)
+            cos_f = angles.cos().unsqueeze(0).unsqueeze(0)
+            sin_f = angles.sin().unsqueeze(0).unsqueeze(0)
+            scale = self.xpos_scale[:, :, :T, :]
+            q, k = _apply_rope_xpos(q, k, cos_f, sin_f, scale)
+
+        if self.pos_enc == "selective_rope":
+            # Content-dependent angular velocity
+            omega = self.sel_omega_proj(x)  # (B, T, half)
+            omega = omega * self.sel_temperature.unsqueeze(0).unsqueeze(0)
+            angles = omega.cumsum(dim=1)  # (B, T, half)
+            cos_f = angles.cos().unsqueeze(1)  # (B, 1, T, half)
+            sin_f = angles.sin().unsqueeze(1)
             q, k = _apply_rope(q, k, cos_f, sin_f)
 
         attn_mask = None
@@ -442,6 +520,7 @@ class TransformerBlock(nn.Module):
             pos_enc=cfg.pos_enc, attn_variant=cfg.attn_variant,
             n_kv_heads=cfg.n_kv_heads,
             rope_theta=cfg.rope_theta, rope_learnable_freqs=cfg.rope_learnable_freqs,
+            xpos_scale_base=getattr(cfg, 'xpos_scale_base', 0.0),
         )
         use_rmsnorm = getattr(cfg, 'use_rmsnorm', False)
         use_swiglu = getattr(cfg, 'use_swiglu', False)
@@ -686,6 +765,15 @@ class FramePredictor(nn.Module):
         use_hal_block = (cfg.pos_enc == "relpos")
         if use_hal_block:
             self.blocks = nn.ModuleList([HALTransformerBlock(cfg) for _ in range(cfg.num_layers)])
+        elif cfg.pos_enc == "rope_nope":
+            # Alternating RoPE / NoPE layers
+            blocks = []
+            from copy import copy
+            for i in range(cfg.num_layers):
+                layer_cfg = copy(cfg)
+                layer_cfg.pos_enc = "rope" if i % 2 == 0 else "none"
+                blocks.append(TransformerBlock(layer_cfg))
+            self.blocks = nn.ModuleList(blocks)
         else:
             self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
         FinalNorm = RMSNorm if getattr(cfg, 'use_rmsnorm', False) else nn.LayerNorm

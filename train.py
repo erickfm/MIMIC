@@ -453,6 +453,12 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         controller_combo_map=controller_combo_map,
         n_controller_combos=n_controller_combos,
     )
+    # Keys the HAL encoder actually reads — skip slicing/collating the rest
+    _HAL_STATE_KEYS = [
+        "stage", "self_character", "opp_character", "self_action", "opp_action",
+        "self_numeric", "opp_numeric", "self_flags", "opp_flags", "self_controller",
+        "self_port", "opp_port",
+    ]
     train_ds = StreamingMeleeDataset(
         data_dir=data_dir,
         sequence_length=SEQUENCE_LENGTH,
@@ -465,6 +471,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         random_perspective=random_perspective,
         **ctrl_kw,
     )
+    train_ds._state_keys = _HAL_STATE_KEYS
     val_ds = StreamingMeleeDataset(
         data_dir=data_dir,
         sequence_length=SEQUENCE_LENGTH,
@@ -478,6 +485,7 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         random_perspective=random_perspective,
         **ctrl_kw,
     )
+    val_ds._state_keys = _HAL_STATE_KEYS
     return train_ds, val_ds
 
 def get_dataloader(ds, shuffle=True, persistent=True, sampler=None):
@@ -549,7 +557,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
-        model = torch.compile(model, mode="reduce-overhead")
+        model = torch.compile(model)
     return model, cfg
 
 def infinite_loader(dl, sampler=None):
@@ -780,7 +788,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            n_controller_combos=_n_combos)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
-    _log(f"  Intervals: log={log_interval}  val={ckpt_interval}  "
+    _log(f"  Intervals: log={log_interval}  val={val_interval}  "
          f"ckpt={ckpt_interval}  warmup={warmup_steps}")
 
     loss_weights = torch.ones(len(TASK_NAMES), device=DEVICE)
