@@ -27,6 +27,18 @@ done
 
 echo "=== MIMIC setup ==="
 
+# ── 0. Git LFS ─────────────────────────────────────────────────────────────
+echo ""
+echo "── Ensuring Git LFS files are pulled ──"
+if ! command -v git-lfs &>/dev/null && ! git lfs version &>/dev/null 2>&1; then
+    echo "  Installing git-lfs ..."
+    (curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | bash && \
+     apt-get install -y -qq git-lfs) 2>&1 | tail -1
+fi
+git lfs install --skip-smudge 2>/dev/null || true
+git lfs pull 2>/dev/null || true
+echo "  LFS files ready."
+
 # ── 1. Python deps ──────────────────────────────────────────────────────────
 echo ""
 echo "── Installing Python dependencies ──"
@@ -93,7 +105,44 @@ else
     echo "  Skipping data setup."
 fi
 
-# ── 5. GPU check ────────────────────────────────────────────────────────────
+# ── 5. GitHub CLI ──────────────────────────────────────────────────────────
+echo ""
+echo "── Installing GitHub CLI ──"
+if command -v gh &>/dev/null; then
+    echo "  gh already installed."
+else
+    echo "  Installing gh ..."
+    (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null && \
+     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        | tee /etc/apt/sources.list.d/github-cli.list >/dev/null && \
+     apt-get update -qq && apt-get install -y -qq gh) 2>&1 | tail -1
+    echo "  gh installed."
+fi
+
+# ── 6. Claude Code ──────────────────────────────────────────────────────────
+echo ""
+echo "── Installing Claude Code ──"
+if command -v claude &>/dev/null; then
+    echo "  Claude Code already installed."
+else
+    curl -fsSL https://claude.ai/install.sh | sh
+    echo "  Claude Code installed."
+fi
+
+# ── 7. Shell alias ─────────────────────────────────────────────────────────
+echo ""
+echo "── Setting up 'ai' alias ──"
+ALIAS_LINE='alias ai="claude --dangerously-skip-permissions"'
+if grep -qF "$ALIAS_LINE" ~/.bashrc 2>/dev/null; then
+    echo "  Alias already in ~/.bashrc"
+else
+    echo "" >> ~/.bashrc
+    echo "$ALIAS_LINE" >> ~/.bashrc
+    echo "  Added alias: ai -> claude --dangerously-skip-permissions"
+fi
+
+# ── 8. GPU check ────────────────────────────────────────────────────────────
 echo ""
 echo "── GPU check ──"
 python3 -c "
@@ -101,7 +150,7 @@ import torch
 if torch.cuda.is_available():
     for i in range(torch.cuda.device_count()):
         name = torch.cuda.get_device_name(i)
-        mem = torch.cuda.get_device_properties(i).total_mem / 1e9
+        mem = torch.cuda.get_device_properties(i).total_memory / 1e9
         print(f'  GPU {i}: {name} ({mem:.0f} GB)')
 else:
     print('  WARNING: No CUDA GPU detected. Training will be very slow.')
@@ -113,7 +162,7 @@ echo "  Dolphin:  $EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu"
 echo "  ISO:      $ISO_PATH"
 echo "  Data:     $DATA_DIR"
 
-# ── 6. Optionally start training ────────────────────────────────────────────
+# ── 9. Optionally start training ────────────────────────────────────────────
 if $RUN_AFTER; then
     echo ""
     echo "── Starting training ──"
