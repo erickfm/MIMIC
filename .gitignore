@@ -203,3 +203,6 @@ checkpoints/
 data/
 logs/
 *_log*.txt
+emulator/
+melee.iso
+melee.zip
