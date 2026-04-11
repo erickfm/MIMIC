@@ -706,6 +706,39 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     _log(f"  Train: {n_train:,} windows from {n_train_games} games")
     _log(f"  Val:   {n_val:,} windows from {n_val_games} games")
 
+    # --- Gamestate-leaks-button sanity check ---
+    # Verify that the game state at frame i does NOT already reflect button[i].
+    # In Melee, if the game state is recorded after input processing, then
+    # action=KNEE_BEND already appears on the same frame as JUMP button press,
+    # letting the model read the answer from the action embedding instead of
+    # learning to initiate actions.  This check samples the first train shard
+    # and reports how often this leak occurs.
+    if _is_main and hal_mode and REACTION_DELAY == 0:
+        _shard_files = sorted(Path(data_dir).glob("train_shard_*.pt"))
+        if _shard_files:
+            _cs = torch.load(_shard_files[0], map_location="cpu", weights_only=True)
+            _c_action = _cs["states"]["self_action"]
+            _c_btns = _cs["targets"]["btns_single"]
+            _n = len(_c_action)
+            # JUMP onset: btns goes from non-JUMP to JUMP; check for KNEE_BEND (24)
+            _jump_onsets = 0
+            _jump_leaked = 0
+            for _ci in range(1, _n):
+                if _c_btns[_ci].item() == 3 and _c_btns[_ci - 1].item() != 3:
+                    _jump_onsets += 1
+                    if _c_action[_ci].item() == 24:  # KNEE_BEND
+                        _jump_leaked += 1
+            if _jump_onsets > 0:
+                _leak_pct = _jump_leaked / _jump_onsets * 100
+                _log(f"  ⚠ Gamestate leak check (rd=0): {_jump_leaked}/{_jump_onsets} "
+                     f"JUMP onsets ({_leak_pct:.1f}%) already show KNEE_BEND in self_action. "
+                     f"The model can read the answer from the action embedding.")
+                if _leak_pct > 50:
+                    _log(f"  ⚠ CRITICAL: >50% leak rate. With rd=0, the model learns to copy "
+                         f"action→button instead of learning to initiate actions. "
+                         f"Consider --reaction-delay 1.")
+            del _cs, _c_action, _c_btns
+
     train_sampler, val_sampler = None, None
     if is_distributed and not isinstance(ds, IterableDataset):
         train_sampler = DistributedSampler(ds, shuffle=True)
