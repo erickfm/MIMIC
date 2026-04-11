@@ -71,19 +71,54 @@ example, percent=50 normalizes to -0.576 (correct) vs -0.724 (wrong). This
 makes the model see garbage inputs and play terribly. This bug was found and
 fixed on 2026-04-07 after multiple rounds of debugging.
 
+## Shard Alignment (Critical — 2026-04-11)
+
+melee-py's `console.step()` returns **post-frame** game state (action,
+position, percent — after engine processes inputs) alongside **pre-frame**
+controller inputs (the buttons themselves). This means the game state at
+frame `i` already reflects button[i] — e.g., action=KNEE_BEND appears on the
+same frame as button=JUMP.
+
+**v2 shards** (`data/fox_hal_v2`) fix this by shifting targets forward by 1
+frame: `target[i] = buttons[i+1]`. The model sees the current game state and
+predicts what to press NEXT. This matches inference exactly.
+
+**Do NOT use `--controller-offset` or `--reaction-delay 1` with v2 shards.**
+The alignment is already correct. Adding offsets would double-shift the data.
+
+**Old shards** (`data/fox_hal_full`, `data/fox_hal_match_shards`) have the
+leak. With those shards, use `--reaction-delay 1` to achieve the same effect
+at dataloader time (this is what HAL does).
+
 ## Training
 
-### Command (current best config)
+### Command (current best config — v2 shards)
+
+```bash
+python3 train.py \
+  --model hal --encoder hal_flat \
+  --hal-mode --hal-minimal-features --hal-controller-encoding \
+  --stick-clusters hal37 --plain-ce \
+  --lr 3e-4 --batch-size 512 \
+  --max-samples 16777216 \
+  --data-dir data/fox_hal_v2 \
+  --reaction-delay 0 \
+  --run-name <name> \
+  --no-warmup --cosine-min-lr 1e-6
+```
+
+### Command (old shards, HAL-compatible)
 
 ```bash
 torchrun --nproc_per_node=8 train.py \
-  --model hal-learned --encoder hal_flat \
+  --model hal --encoder hal_flat \
   --hal-mode --hal-minimal-features --hal-controller-encoding \
   --stick-clusters hal37 --plain-ce \
   --lr 3e-4 --batch-size 64 \
   --max-samples 16777216 \
-  --data-dir data/fox_hal_local \
+  --data-dir data/fox_hal_full \
   --controller-offset --self-inputs \
+  --reaction-delay 1 \
   --run-name <name> \
   --nccl-timeout 7200 --no-warmup --cosine-min-lr 1e-6
 ```
@@ -200,11 +235,12 @@ ISO. The `MAC_*` path aliases were added for this purpose.
 
 ## Data Directories
 
-| Directory | Contents | Status |
-|-----------|----------|--------|
-| `data/fox_hal_full` | ~10K Fox games, HAL-normalized, 800MB shards, quality-filtered | **Active — use this** |
-| `data/fox_hal_800m` | 7,600 Fox games, HAL-normalized, 800MB shards (resharded from fox_hal_local) | Available |
-| `data/fox_hal_local` | 7,600 Fox games, HAL-normalized, 3.8GB shards (original) | Legacy |
+| Directory | Contents | Target alignment | Status |
+|-----------|----------|-----------------|--------|
+| `data/fox_hal_v2` | ~17K Fox games, HAL-normalized, 800MB shards, quality-filtered, **next-frame targets** | target[i] = buttons[i+1] (clean) | **Active — use with rd=0, no offset** |
+| `data/fox_hal_full` | ~10K Fox games, HAL-normalized, 800MB shards, quality-filtered | target[i] = buttons[i] (leaked) | Legacy — use with rd=1 |
+| `data/fox_hal_800m` | 7,600 Fox games, HAL-normalized, 800MB shards | target[i] = buttons[i] (leaked) | Legacy |
+| `data/fox_hal_local` | 7,600 Fox games, HAL-normalized, 3.8GB shards | target[i] = buttons[i] (leaked) | Legacy |
 
 Use 800MB shards with `mmap=True` in DataLoader for optimal throughput. The
 `tools/reshard.py` script can split large shards: `python tools/reshard.py --src <dir> --dst <dir> --target-mb 800`.
@@ -373,3 +409,15 @@ This is Eric Gu's original HAL codebase. Key files:
     overlaps (2.65% of frames) are collapsed via early-release encoding: the
     newest button (0→1 transition) gets the label. Shoulder+button combos ARE
     representable since shoulder is a separate head.
+
+13. **Post-frame game state leak (fixed 2026-04-11).** melee-py returns
+    post-frame game state (action already reflects button press) with
+    pre-frame controller inputs. Old shards (`fox_hal_full`) have target[i]
+    = buttons[i], so the model can read the answer from self_action. v2
+    shards (`fox_hal_v2`) shift targets to buttons[i+1], fixing the leak.
+    **Do NOT use `--controller-offset` or `--reaction-delay 1` with v2 shards.**
+
+14. **Don't compare val loss across shard versions.** v2 shards produce
+    higher val loss because the model can no longer cheat via action→button
+    memorization. A val loss of ~1.0 on v2 shards may correspond to better
+    gameplay than 0.74 on old shards.
