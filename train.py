@@ -557,7 +557,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
-        model = torch.compile(model)
+        model = torch.compile(model, mode="reduce-overhead")
     return model, cfg
 
 def infinite_loader(dl, sampler=None):
