@@ -930,7 +930,16 @@ def _extract_replay_inner(
             for k in ("self_buttons", "self_analog", "self_c_dir"):
                 states.pop(k, None)
 
-        results.append((states, targets, n_frames))
+        # Shift targets forward by 1 frame so that target[i] = next frame's
+        # inputs.  The shard stores post-frame game state at frame i (result of
+        # processing frame i's inputs).  We want the model to predict what the
+        # human presses NEXT given the current state — that's frame i+1's
+        # inputs.  Drop the last frame (no next-frame target available).
+        shifted_targets = {k: v[1:] for k, v in targets.items()}
+        shifted_states = {k: v[:-1] for k, v in states.items()}
+        n_frames_shifted = n_frames - 1
+
+        results.append((shifted_states, shifted_targets, n_frames_shifted))
 
     return results
 
