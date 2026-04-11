@@ -283,7 +283,7 @@ def main():
     data_dir = args.data_dir
 
     # Load data
-    combos, combo_map = load_controller_combos(data_dir)
+    combos, combo_map, _ = load_controller_combos(data_dir)
     val_ds = StreamingMeleeDataset(
         data_dir=data_dir, sequence_length=256, reaction_delay=1, split="val",
         hal_controller_encoding=True, controller_combo_map=combo_map, n_controller_combos=5,

@@ -176,7 +176,7 @@ def evaluate(checkpoint_path: str, data_dir: str, max_batches: int = 500,
         else:
             combos_path = Path(data_dir) / "controller_combos.json"
             if combos_path.exists():
-                combos, combo_map = load_controller_combos(data_dir)
+                combos, combo_map, _ = load_controller_combos(data_dir)
             else:
                 print(f"  WARNING: hal_controller_encoding but no combos found")
         if combo_map:

@@ -682,8 +682,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         from mimic.features import load_controller_combos
         combos_path = Path(data_dir) / "controller_combos.json"
         if combos_path.exists():
-            combos, _combo_map = load_controller_combos(data_dir)
-            _n_combos = len(combos)
+            combos, _combo_map, _n_combos = load_controller_combos(data_dir)
             _log(f"  Controller encoding: {_n_combos} button combos from {combos_path}")
         else:
             raise RuntimeError(

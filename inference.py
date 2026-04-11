@@ -163,8 +163,7 @@ if _hal_ctrl_enc:
             for _cd in _combo_dirs:
                 _cc_path = _cd / "controller_combos.json"
                 if _cc_path.exists():
-                    _ctrl_combos, _ctrl_combo_map = F.load_controller_combos(_cd)
-                    _n_ctrl_combos = len(_ctrl_combos)
+                    _ctrl_combos, _ctrl_combo_map, _n_ctrl_combos = F.load_controller_combos(_cd)
                     log.info("Loaded %d controller combos from %s", _n_ctrl_combos, _cc_path)
                     break
         if not _ctrl_combo_map:

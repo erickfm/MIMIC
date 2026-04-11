@@ -384,13 +384,24 @@ HAL_FLAG_COLS = ["on_ground", "facing", "invulnerable"]
 # ---------------------------------------------------------------------------
 
 def load_controller_combos(data_dir: Path):
-    """Load controller_combos.json → (combo_list, combo_to_idx dict)."""
+    """Load controller_combos.json → (combo_list, combo_to_idx dict).
+
+    For 7-class (melee_7class scheme), combo_to_idx is empty — the
+    7-class collapse uses rule-based logic, not lookup.
+    """
     path = Path(data_dir) / "controller_combos.json"
     with open(path) as f:
         data = json.load(f)
-    combos = [tuple(c) for c in data["combos"]]
-    combo_to_idx = {c: i for i, c in enumerate(combos)}
-    return combos, combo_to_idx
+    if "combos" in data:
+        combos = [tuple(c) for c in data["combos"]]
+        combo_to_idx = {c: i for i, c in enumerate(combos)}
+        n_combos = len(combos)
+    else:
+        # 7-class rule-based scheme — no lookup needed
+        combos = []
+        combo_to_idx = {}
+        n_combos = data.get("n_combos", BTN7_N_CLASSES)
+    return combos, combo_to_idx, n_combos
 
 
 def _nearest_2d(points: np.ndarray, centers: np.ndarray) -> np.ndarray:
@@ -405,7 +416,7 @@ def _nearest_1d(values: np.ndarray, centers: np.ndarray) -> np.ndarray:
     return np.argmin(dists, axis=1)
 
 
-def _collapse_buttons_np(btns: np.ndarray) -> np.ndarray:
+def _collapse_buttons_5class_np(btns: np.ndarray) -> np.ndarray:
     """Collapse 12-dim raw buttons to 5-dim logical: [A, B, Jump, Z, Shoulder].
 
     Input cols: A=0, B=1, X=2, Y=3, Z=4, L=5, R=6, ...
@@ -416,6 +427,74 @@ def _collapse_buttons_np(btns: np.ndarray) -> np.ndarray:
     z = btns[:, 4] > 0.5
     shoulder = (btns[:, 5] > 0.5) | (btns[:, 6] > 0.5)
     return np.stack([a, b, jump, z, shoulder], axis=-1).astype(np.int32)
+
+
+# 7-class Melee behavior labels
+BTN7_A = 0
+BTN7_B = 1
+BTN7_Z = 2
+BTN7_JUMP = 3
+BTN7_TRIG = 4
+BTN7_A_TRIG = 5
+BTN7_NONE = 6
+BTN7_NAMES = ["A", "B", "Z", "JUMP", "TRIG", "A_TRIG", "NONE"]
+BTN7_N_CLASSES = 7
+
+
+def _collapse_buttons_7class_np(btns: np.ndarray) -> np.ndarray:
+    """Collapse 12-dim raw buttons to 7-class Melee behavior label.
+
+    Applies Melee's input resolution rules (priority cascade):
+      1. B pressed → B (hard override)
+      2. A + TRIG both pressed (no B) → A_TRIG (shield grab)
+      3. Else highest priority: Z > A ≈ TRIG > JUMP
+
+    Input cols: A=0, B=1, X=2, Y=3, Z=4, L=5, R=6, ...
+    Returns: (T,) int64 — A=0, B=1, Z=2, JUMP=3, TRIG=4, A_TRIG=5, NONE=6
+    """
+    a    = btns[:, 0] > 0.5
+    b    = btns[:, 1] > 0.5
+    jump = (btns[:, 2] > 0.5) | (btns[:, 3] > 0.5)
+    z    = btns[:, 4] > 0.5
+    trig = (btns[:, 5] > 0.5) | (btns[:, 6] > 0.5)
+
+    # Bottom-up assignment: later overwrites earlier (higher priority wins)
+    result = np.full(len(btns), BTN7_NONE, dtype=np.int64)
+    result[jump] = BTN7_JUMP           # lowest priority
+    result[trig] = BTN7_TRIG
+    result[a]    = BTN7_A
+    result[z]    = BTN7_Z
+    result[a & trig & ~b] = BTN7_A_TRIG  # protected, broken only by B
+    result[b]    = BTN7_B               # hard override
+    return result
+
+
+def _collapse_buttons_7class_single(buttons: dict) -> int:
+    """Single-frame 7-class collapse for inference.
+
+    Args:
+        buttons: dict {button_name: 0/1} with keys like "BUTTON_A", etc.
+    Returns: int class index 0-6
+    """
+    a    = bool(buttons.get("BUTTON_A", 0))
+    b    = bool(buttons.get("BUTTON_B", 0))
+    z    = bool(buttons.get("BUTTON_Z", 0))
+    jump = bool(buttons.get("BUTTON_X", 0) or buttons.get("BUTTON_Y", 0))
+    trig = bool(buttons.get("BUTTON_L", 0) or buttons.get("BUTTON_R", 0))
+
+    if b:
+        return BTN7_B
+    if a and trig:
+        return BTN7_A_TRIG
+    if z:
+        return BTN7_Z
+    if a:
+        return BTN7_A
+    if trig:
+        return BTN7_TRIG
+    if jump:
+        return BTN7_JUMP
+    return BTN7_NONE
 
 
 def encode_controller_onehot(
@@ -458,12 +537,15 @@ def encode_controller_onehot(
     c_idx = CDIR_5_TO_9_MAP[c_dir.astype(np.int64)]
     c_onehot = np.eye(9, dtype=np.float32)[c_idx]
 
-    # 3. Buttons → collapse → lookup combo → n_combos-dim one-hot
-    collapsed = _collapse_buttons_np(buttons)
-    btn_indices = np.zeros(T, dtype=np.int64)
-    for t in range(T):
-        combo = tuple(collapsed[t].tolist())
-        btn_indices[t] = combo_to_idx.get(combo, 0)  # default to NONE
+    # 3. Buttons → collapse → one-hot
+    if n_combos == BTN7_N_CLASSES:
+        btn_indices = _collapse_buttons_7class_np(buttons)
+    else:
+        collapsed = _collapse_buttons_5class_np(buttons)
+        btn_indices = np.zeros(T, dtype=np.int64)
+        for t in range(T):
+            combo = tuple(collapsed[t].tolist())
+            btn_indices[t] = combo_to_idx.get(combo, 0)
     btn_onehot = np.eye(n_combos, dtype=np.float32)[btn_indices]
 
     # 4. Shoulder → max(L,R) → nearest of [0.0, 0.4, 1.0] → 3-dim one-hot
@@ -505,14 +587,17 @@ def encode_controller_onehot_single(
     c_idx = _nearest_2d(c_xy, HAL_CSTICK_CLUSTERS_9)[0]
     c_onehot = np.eye(9, dtype=np.float32)[c_idx]
 
-    # 3. Buttons — collapse and lookup combo
-    a = int(buttons.get("BUTTON_A", 0))
-    b = int(buttons.get("BUTTON_B", 0))
-    jump = int(buttons.get("BUTTON_X", 0) or buttons.get("BUTTON_Y", 0))
-    z = int(buttons.get("BUTTON_Z", 0))
-    shoulder = int(buttons.get("BUTTON_L", 0) or buttons.get("BUTTON_R", 0))
-    combo = (a, b, jump, z, shoulder)
-    btn_idx = combo_to_idx.get(combo, 0)
+    # 3. Buttons — collapse to class index
+    if n_combos == BTN7_N_CLASSES:
+        btn_idx = _collapse_buttons_7class_single(buttons)
+    else:
+        a = int(buttons.get("BUTTON_A", 0))
+        b = int(buttons.get("BUTTON_B", 0))
+        jump = int(buttons.get("BUTTON_X", 0) or buttons.get("BUTTON_Y", 0))
+        z = int(buttons.get("BUTTON_Z", 0))
+        shoulder = int(buttons.get("BUTTON_L", 0) or buttons.get("BUTTON_R", 0))
+        combo = (a, b, jump, z, shoulder)
+        btn_idx = combo_to_idx.get(combo, 0)
     btn_onehot = np.eye(n_combos, dtype=np.float32)[btn_idx]
 
     # 4. Shoulder
