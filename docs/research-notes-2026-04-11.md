@@ -373,16 +373,73 @@ explanations to investigate:
 4. **Something in HAL's inference pipeline** — HAL's `play.py` may handle the
    feedback loop differently
 
+### 5-Class Baseline Attempt (Invalid)
+
+Attempted to train a 5-class early-release baseline for comparison. This
+required restoring the early-release code in `slp_to_shards.py` (dual path
+gated on `n_combos`) and creating a 5-class `controller_combos.json`.
+
+**Critical finding:** The 5-class combo file we created had the wrong index
+ordering. Our file mapped `[0,0,0,0,0]` (no buttons) to index 0. But the
+early-release target encoding uses A=0, B=1, Jump=2, Z=3, **NONE=4**. HAL's
+actual combo map (from `tools/run_hal_model.py`) maps:
+
+```python
+COMBO_MAP = {
+    (1, 0, 0, 0, 0): 0,  # A
+    (0, 1, 0, 0, 0): 1,  # B
+    (0, 0, 1, 0, 0): 2,  # Jump
+    (0, 0, 0, 1, 0): 3,  # Z
+    (0, 0, 0, 0, 0): 4,  # NONE
+    (0, 0, 0, 0, 1): 4,  # shoulder only → NONE
+    (1, 0, 0, 0, 1): 0,  # A + shoulder → A
+    ...
+}
+```
+
+So `(0,0,0,0,0)` should map to index **4**, not 0. With our wrong file, the
+input controller encoded "no buttons" as class 0 (A position) while the target
+encoded it as class 4 (NONE). The shard data confirmed this: **85% of input
+controller frames were class 0 (A) while 83% of targets were class 4 (NONE)**.
+
+The 5-class model trained on this data achieved similar metrics (val loss 0.745,
+btn F1 89.5%) but the results are meaningless — the model learned contradictory
+input/target mappings.
+
+**The 7-class encoding avoids this entirely** because both input and target use
+`_collapse_buttons_7class_np` which returns the same indices. No combo file
+lookup needed. This is a structural advantage of the 7-class approach.
+
+To produce a valid 5-class baseline, the combo file must match HAL's exact
+ordering, including the shoulder-combo entries. This was not completed.
+
+### Verified: Not an Encoding Issue
+
+The controller dependency experiment (95.5% accuracy with controller, 31.8%
+without) combined with the replay analysis (model correctly predicts actions
+when given real human replay context) proves the model has learned the task
+correctly. The NONE-bias is a closed-loop deployment problem, not a training
+or encoding problem.
+
+The model can predict every action class with high confidence when the input
+context contains real gameplay. It fails at inference because its own NONE
+predictions create a degenerate context that perpetuates NONE.
+
 ### Next Steps
 
-1. **Train with si_drop** — the most promising avenue. The `--si-drop-start`,
-   `--si-drop-end`, `--si-drop-max` flags exist. This explicitly teaches the
-   model to predict actions without controller input.
-2. **Train 5-class baseline for comparison** — in progress. If the 5-class
-   early-release model also exhibits NONE-bias, the problem is not
-   encoding-specific.
-3. **Compare HAL's actual inference pipeline** — trace what HAL's `play.py`
-   does differently for controller feedback.
+1. **Self-input dropout (si_drop)** — the codebase has `--si-drop-start`,
+   `--si-drop-end`, `--si-drop-max` flags that stochastically zero the
+   controller input during training. This explicitly forces the model to learn
+   to initiate actions from game state alone, breaking the controller
+   dependency. Most promising approach.
+2. **Fix 5-class combo file** — use HAL's exact combo map ordering (including
+   shoulder combos) for a valid 5-class baseline comparison.
+3. **Compare HAL's inference pipeline** — trace what HAL's `play.py` does
+   differently for controller feedback. HAL may have different feedback
+   dynamics that avoid the NONE loop.
+4. **Scheduled sampling** — during training, occasionally replace the teacher
+   controller input with the model's own prediction. This directly addresses
+   the exposure bias.
 
 ---
 
