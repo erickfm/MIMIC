@@ -206,3 +206,6 @@ logs/
 emulator/
 melee.iso
 melee.zip
+mimic_best_checkpoints.zip
+replays/
+.claude/
