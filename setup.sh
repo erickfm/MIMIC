@@ -72,6 +72,10 @@ if [[ -f "$ISO_PATH" ]]; then
     echo "  ISO found at $ISO_PATH"
 else
     echo "  Downloading ISO ..."
+    if ! command -v unzip &>/dev/null; then
+        echo "  Installing unzip ..."
+        apt-get install -y -qq unzip 2>&1 | tail -1
+    fi
     curl -L -o melee.zip "https://melee.today/download/melee.zip"
     unzip -o melee.zip -d _iso_tmp
     # Find the .iso inside the zip and move it to repo root
