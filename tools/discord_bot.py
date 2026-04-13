@@ -498,7 +498,7 @@ async def announce_result(channel, req: MatchRequest, result: str, replay_path: 
         )
         score_line = f"\nFinal: {score_fmt}"
 
-    msg_lines = [f"{emoji} {verb} — {req.character} ditto"]
+    msg_lines = [f"{emoji} {verb} — MIMIC as **{req.character}** vs {req.user_name}"]
     msg_lines.append(f"Opponent code: `{req.connect_code}`")
     if ckpt_name:
         msg_lines.append(f"Checkpoint: `{ckpt_name}`")
