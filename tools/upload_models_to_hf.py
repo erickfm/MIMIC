@@ -66,18 +66,20 @@ CHARACTERS: list[CharacterEntry] = [
         name="fox",
         display="Fox",
         melee_enum="FOX",
-        checkpoint=REPO_ROOT / "checkpoints/hal-7class-v2-long_best.pt",
+        checkpoint=REPO_ROOT / "checkpoints/fox-rope-v2_best.pt",
         data_dir=REPO_ROOT / "data/fox_hal_v2",
         games_trained=17319,
-        val_btn_f1="~59%",
-        val_main_f1="~15%",
-        val_loss="2.27",
+        val_btn_f1="87.7%",
+        val_main_f1="~55%",
+        val_loss="0.77",
         training_notes=(
-            "Legacy checkpoint from the 2026-04-11 hal-7class-v2-long run. "
-            "Trained WITHOUT --self-inputs, which is why the val metrics look "
-            "much lower than the other characters. Still plays actively in "
-            "Dolphin but performance is below the Falco/CptFalcon/Luigi models. "
-            "A new Fox run with --self-inputs is a todo."
+            "Trained 2026-04-13, fox-rope-v2 run. v2 shards, RoPE position "
+            "encoding (hal-rope preset), --self-inputs, dropout 0.1, 32K "
+            "steps at batch 512. Replaces the legacy hal-7class-v2-long "
+            "checkpoint which was trained without --self-inputs and stuck "
+            "at val loss 2.27. The self-inputs flag was the real fix — "
+            "RoPE vs relpos is secondary. Metrics land alongside "
+            "Falco/CptFalcon/Luigi."
         ),
     ),
     CharacterEntry(
