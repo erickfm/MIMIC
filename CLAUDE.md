@@ -502,7 +502,18 @@ This is Eric Gu's original HAL codebase. Key files:
     the repo to a new machine carries the bot's Slippi login with it.
     Never commit `slippi_home/` — it contains the bot's `playKey`.
 
-15. **Setup Xvfb for headless machines.** Dolphin crashes at startup with
+15. **Dolphin needs runtime shared libraries.** The AppImage-extracted
+    `dolphin-emu` binary links against `libasound2`, `libusb-1.0-0`,
+    `libgtk-3-0`, `libbluetooth3`, `libhidapi-hidraw0`, and friends. Missing
+    any of them makes the binary exit 127, which libmelee surfaces as
+    `RuntimeError: Unexpected return code 127 from dolphin` inside
+    `Console.__init__` — `play_netplay.py` then exits 1 with an empty
+    `RESULT:` line and the Discord bot reports `result=failed score=`.
+    `setup.sh` installs the full list; on existing machines, run
+    `ldd emulator/squashfs-root/usr/bin/dolphin-emu | grep 'not found'` to
+    see what's missing.
+
+16. **Setup Xvfb for headless machines.** Dolphin crashes at startup with
     "Unable to initialize GTK+, is DISPLAY set properly?" if no display
     server is available. `setup.sh` installs and starts Xvfb on `:99` and
     adds `export DISPLAY=:99` to `~/.bashrc`. On existing machines, check

@@ -65,6 +65,19 @@ else
     echo "  Dolphin ready at $EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu"
 fi
 
+# Dolphin runtime libs — missing any of these makes the binary fail with
+# exit code 127, which libmelee surfaces as "Unexpected return code 127
+# from dolphin" during Console.__init__.
+DOLPHIN_LIBS="libasound2 libusb-1.0-0 libevdev2 libgl1 libglu1-mesa libegl1 libgles2 libpulse0 libsm6 libxkbcommon0 libfontconfig1 libxi6 libxrender1 libgtk-3-0 libbluetooth3 libhidapi-hidraw0"
+if "$EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu" --version >/dev/null 2>&1 \
+   || "$EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu" --version 2>&1 | grep -q '^[0-9]'; then
+    echo "  Dolphin runtime libs OK."
+else
+    echo "  Installing Dolphin runtime libs ..."
+    apt-get update -qq 2>&1 | tail -1
+    apt-get install -y -qq $DOLPHIN_LIBS 2>&1 | tail -1
+fi
+
 # ── 3. Melee ISO ───────────────────────────────────────────────────────────
 echo ""
 echo "── Setting up Melee ISO ──"
@@ -189,6 +202,16 @@ else
     echo "  Added 'export DISPLAY=:99' to ~/.bashrc"
 fi
 export DISPLAY=:99
+
+# Ensure ~/.local/bin is on PATH (pip --user installs land there)
+LOCAL_BIN_LINE='export PATH="$HOME/.local/bin:$PATH"'
+if grep -qF "$LOCAL_BIN_LINE" ~/.bashrc 2>/dev/null; then
+    echo "  ~/.local/bin already on PATH in ~/.bashrc"
+else
+    echo "$LOCAL_BIN_LINE" >> ~/.bashrc
+    echo "  Added ~/.local/bin to PATH in ~/.bashrc"
+fi
+export PATH="$HOME/.local/bin:$PATH"
 
 # ── 10. Discord bot config (.env) ───────────────────────────────────────────
 echo ""
