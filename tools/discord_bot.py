@@ -253,11 +253,15 @@ async def on_ready():
 
 @bot.command(name="info")
 async def cmd_info(ctx: commands.Context):
-    chars = ", ".join(sorted(CHARACTERS.keys()))
+    char_lines = []
+    for name in sorted(CHARACTERS.keys()):
+        ckpt = os.path.basename(CHARACTERS[name][0])
+        char_lines.append(f"  • **{name}** — `{ckpt}`")
+    char_block = "\n".join(char_lines)
     msg = (
         f"**MIMIC Melee bot**\n"
-        f"Bot's Slippi connect code: `{BOT_SLIPPI_CODE}` — enter this on YOUR side.\n"
-        f"Characters: {chars}\n\n"
+        f"Bot's Slippi connect code: `{BOT_SLIPPI_CODE}` — enter this on YOUR side.\n\n"
+        f"**Characters + checkpoints:**\n{char_block}\n\n"
         f"Usage: `!play <character> <your_connect_code>`\n"
         f"Example: `!play falco ERIK#456`\n\n"
         f"The bot joins your Slippi Direct Connect lobby. Launch Slippi Online → "
@@ -366,24 +370,28 @@ async def match_worker():
             continue
 
         current_match = req
-        log.info("Starting match: %s -> %s (%s)", req.user_name, req.character, req.connect_code)
+        ckpt_name = os.path.basename(CHARACTERS[req.character][0])
+        log.info("Starting match: %s -> %s (%s) checkpoint=%s",
+                 req.user_name, req.character, req.connect_code, ckpt_name)
 
         channel = bot.get_channel(req.channel_id)
         if channel is not None:
             try:
                 await channel.send(
                     f"▶️ **Match starting**: {req.user_name} vs MIMIC ({req.character})\n"
+                    f"Checkpoint: `{ckpt_name}`\n"
                     f"Enter `{BOT_SLIPPI_CODE}` in Slippi Online → Direct Connect now."
                 )
             except Exception:
                 log.exception("Failed to send match-starting message")
 
         result, replay_path, err_tail, score = await run_match(req)
-        log.info("Match finished: result=%s score=%s replay=%s", result, score, replay_path)
+        log.info("Match finished: result=%s score=%s checkpoint=%s replay=%s",
+                 result, score, ckpt_name, replay_path)
 
         if channel is not None:
             try:
-                await announce_result(channel, req, result, replay_path, err_tail, score)
+                await announce_result(channel, req, result, replay_path, err_tail, score, ckpt_name)
             except Exception:
                 log.exception("Failed to send result message")
 
@@ -456,7 +464,7 @@ async def run_match(req: MatchRequest) -> tuple[str, str, str]:
 
 
 async def announce_result(channel, req: MatchRequest, result: str, replay_path: str,
-                           err_tail: str, score: str = ""):
+                           err_tail: str, score: str = "", ckpt_name: str = ""):
     emoji_map = {
         "win":         "🏆",
         "loss":        "💀",
@@ -490,11 +498,13 @@ async def announce_result(channel, req: MatchRequest, result: str, replay_path: 
         )
         score_line = f"\nFinal: {score_fmt}"
 
-    msg = (
-        f"{emoji} {verb} — {req.character} ditto\n"
-        f"Opponent code: `{req.connect_code}`"
-        f"{score_line}"
-    )
+    msg_lines = [f"{emoji} {verb} — {req.character} ditto"]
+    msg_lines.append(f"Opponent code: `{req.connect_code}`")
+    if ckpt_name:
+        msg_lines.append(f"Checkpoint: `{ckpt_name}`")
+    if score_line:
+        msg_lines.append(score_line.lstrip("\n"))
+    msg = "\n".join(msg_lines)
 
     files = []
     if replay_path and os.path.exists(replay_path):
