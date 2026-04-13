@@ -449,20 +449,26 @@ This is Eric Gu's original HAL codebase. Key files:
    In head-to-head, non-blocking mode systematically disadvantages whichever
    model's inputs are flushed second. Fixed 2026-04-08.
 
-9. **The TRIG (L/R) class must actually press something.** In Melee, shield,
-   airdodge, L-cancel, tech, and wavedash all read the analog shoulder
-   threshold (plus rising-edge detection for the event-based ones). Either
-   `press_shoulder(BUTTON_L, 1.0)` or `press_button(BUTTON_L)` will trigger
-   them — the digital path is just `press_shoulder(BUTTON_L, 1.0)` plus a
-   button bit. The real bug in `decode_and_press` before 2026-04-13 was that
-   the TRIG branch did *nothing* at all — no analog, no digital — so the
-   model could predict "press L" at 99% confidence and the game received a
-   neutral shoulder. The 7-class button head's TRIG (class 4) and A_TRIG
-   (class 5) classes now call `ctrl.press_button(BUTTON_L)`, which sets both
-   the digital bit and implies full analog. See `tools/inference_utils.py:decode_and_press`
-   and research notes 2026-04-13 for the full debug story. HAL's 5-class
-   button head has no TRIG class at all, so HAL-lineage bots can't produce
-   any shoulder event — even a correctly-pressed one.
+9. **The TRIG (L/R) class must call `press_button`, not just `press_shoulder`.**
+   Melee's shoulder events split on analog-vs-digital:
+   - **Shield**: analog threshold (any shoulder value above ~0.3)
+   - **L-cancel**: analog threshold, rising edge during the L-cancel window
+   - **Tech**: digital L/R press
+   - **Airdodge**: digital L/R press
+   - **Wavedash**: airdodge into ground → digital press required
+
+   So `press_shoulder(BUTTON_L, 1.0)` alone is enough for shield + L-cancel,
+   but tech / airdodge / wavedash need `press_button(BUTTON_L)`. The 7-class
+   button head's TRIG (class 4) and A_TRIG (class 5) classes call
+   `ctrl.press_button(BUTTON_L)` to cover all four cases at once.
+
+   The real bug in `decode_and_press` before 2026-04-13 was that the TRIG
+   branch did *nothing* at all — no analog, no digital — so the model could
+   predict "press L" at 99% confidence and the game received a neutral
+   shoulder. See `tools/inference_utils.py:decode_and_press` and research
+   notes 2026-04-13 for the full debug story. HAL's 5-class button head has
+   no TRIG class, so HAL-lineage bots can't produce a shoulder event even in
+   principle.
 
 10. **Button encoding is single-label.** The 5-class button head (A, B, Jump,
     Z, None) cannot represent two simultaneous action buttons. Multi-button
