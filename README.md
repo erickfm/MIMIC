@@ -15,23 +15,6 @@ In bot-vs-bot Luigi dittos, 70–83% of jumps convert into wavedashes.
 
 Weights on HuggingFace: **[erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC)**
 
-### Lineage
-
-MIMIC started as an independent BC-for-Melee project and cycled through a
-lot of ideas before settling on its current shape — different encoders,
-attention variants, position encodings, stick tokenization schemes, button
-vocabularies, reaction-delay schedules, and data-filtering strategies. At
-one point the model, data pipeline, and training loop were all
-re-bootstrapped from [HAL](https://github.com/ericyuegu/hal) (by Eric Gu)
-to get a known-good baseline — HAL's GPTv5Controller architecture, its
-controller encoding, and its normalization stats are all still visible in
-the core. From there MIMIC diverged again: a 7-class button head (vs HAL's
-5-class, adding the TRIG class that makes airdodge / wavedash / L-cancel
-/ tech possible at all), v2 shard target alignment (fixing a post-frame
-game-state leak we found in HAL's pipeline), RoPE as an alternative to
-Shaw relative-position attention, and the Slippi netplay + Discord bot
-frontend. The dev journal in [`docs/`](docs/) walks through the evolution.
-
 ---
 
 ## Results
@@ -278,7 +261,5 @@ See [`LICENSE`](LICENSE).
 
 ## Credits
 
-Core architecture (GPTv5Controller) and an early version of the data
-pipeline and training loop were bootstrapped from [HAL](https://github.com/ericyuegu/hal)
-by Eric Gu — see Lineage above for how MIMIC diverged from there.
-Slippi and libmelee by the [Project Slippi](https://slippi.gg/) team.
+- Architecture and early data pipeline built on [HAL](https://github.com/ericyuegu/hal) (Eric Gu).
+- Slippi and [libmelee](https://github.com/altf4/libmelee) by the [Project Slippi](https://slippi.gg/) team.
