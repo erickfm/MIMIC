@@ -449,17 +449,20 @@ This is Eric Gu's original HAL codebase. Key files:
    In head-to-head, non-blocking mode systematically disadvantages whichever
    model's inputs are flushed second. Fixed 2026-04-08.
 
-9. **Analog shoulder is enough for shielding, NOT for airdodge/wavedash/L-cancel/tech.**
-   `press_shoulder(BUTTON_L, value)` sets only the analog component — sufficient
-   for shielding (which reads the analog threshold) but not for any rising-edge
-   event that requires a "button click." Airdodge, L-cancel, tech, and wavedash
-   all require `press_button(BUTTON_L)` to send the digital press.
-   The 7-class button head's TRIG (class 4) and A_TRIG (class 5) classes MUST
-   call `ctrl.press_button(BUTTON_L)` — see `tools/inference_utils.py:decode_and_press`.
-   This was silently broken until 2026-04-13. HAL's 5-class button head has no
-   TRIG class at all, so HAL simply can't airdodge by design (explains why
-   HAL-lineage bots have never demonstrated wavedashes). See research notes
-   2026-04-13 for the full debug story.
+9. **The TRIG (L/R) class must actually press something.** In Melee, shield,
+   airdodge, L-cancel, tech, and wavedash all read the analog shoulder
+   threshold (plus rising-edge detection for the event-based ones). Either
+   `press_shoulder(BUTTON_L, 1.0)` or `press_button(BUTTON_L)` will trigger
+   them — the digital path is just `press_shoulder(BUTTON_L, 1.0)` plus a
+   button bit. The real bug in `decode_and_press` before 2026-04-13 was that
+   the TRIG branch did *nothing* at all — no analog, no digital — so the
+   model could predict "press L" at 99% confidence and the game received a
+   neutral shoulder. The 7-class button head's TRIG (class 4) and A_TRIG
+   (class 5) classes now call `ctrl.press_button(BUTTON_L)`, which sets both
+   the digital bit and implies full analog. See `tools/inference_utils.py:decode_and_press`
+   and research notes 2026-04-13 for the full debug story. HAL's 5-class
+   button head has no TRIG class at all, so HAL-lineage bots can't produce
+   any shoulder event — even a correctly-pressed one.
 
 10. **Button encoding is single-label.** The 5-class button head (A, B, Jump,
     Z, None) cannot represent two simultaneous action buttons. Multi-button

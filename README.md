@@ -223,9 +223,10 @@ python3 tools/slp_to_shards.py \
   main_stick(37 k-means clusters) → buttons(7)
 
 The 7-class button vocabulary extends HAL's 5-class `{A, B, Jump, Z, None}`
-with `TRIG` (digital L/R) and `A_TRIG` (shield grab). The digital press on
-TRIG is what enables airdodge, L-cancel, tech, and **wavedash** — HAL's
-5-class head has no TRIG class at all.
+with `TRIG` (L/R shoulder) and `A_TRIG` (shield grab). Having a dedicated
+class for the shoulder press is what lets MIMIC express airdodge,
+L-cancel, tech, and **wavedash** at all — HAL's 5-class head has no TRIG
+class, so HAL-lineage bots can't produce a shoulder event.
 
 v2 shards shift button targets forward by one frame
 (`target[i] = buttons[i+1]`) so the model learns to predict the *next*
