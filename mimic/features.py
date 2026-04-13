@@ -61,9 +61,12 @@ def analog_cols(prefix: str) -> List[str]:
             f"{prefix}_l_shldr", f"{prefix}_r_shldr"]
 
 
-def numeric_state(prefix: str, hal_minimal: bool = False) -> List[str]:
-    if hal_minimal:
-        # HAL uses only these 9 features per player (no speeds, ECB, hitlag/hitstun)
+def numeric_state(prefix: str, minimal: bool = False, hal_minimal: bool = None) -> List[str]:
+    # Backwards-compat: old callers passed hal_minimal=
+    if hal_minimal is not None:
+        minimal = hal_minimal
+    if minimal:
+        # Minimal mode: 9 features per player (no speeds, ECB, hitlag/hitstun)
         return [
             f"{prefix}_pos_x", f"{prefix}_pos_y",
             f"{prefix}_percent", f"{prefix}_stock",
@@ -102,7 +105,11 @@ def categorical_ids(prefix: str) -> List[str]:
 # ---------------------------------------------------------------------------
 def build_feature_groups(no_opp_inputs: bool = False,
                          no_self_inputs: bool = False,
-                         hal_minimal: bool = False) -> Dict[str, Dict]:
+                         minimal: bool = False,
+                         hal_minimal: bool = None) -> Dict[str, Dict]:
+    # Backwards-compat: old callers passed hal_minimal=
+    if hal_minimal is not None:
+        minimal = hal_minimal
     opp_cats = categorical_ids("opp")
     if not no_opp_inputs:
         opp_cats = opp_cats + ["opp_c_dir"]
@@ -114,7 +121,7 @@ def build_feature_groups(no_opp_inputs: bool = False,
     opp_group: Dict[str, Any] = {
         "categorical": opp_cats,
         "flags":   flags("opp"),
-        "numeric": numeric_state("opp", hal_minimal=hal_minimal),
+        "numeric": numeric_state("opp", minimal=minimal),
         "action_elapsed": ["opp_action_frame"],
     }
     if not no_opp_inputs:
@@ -142,7 +149,7 @@ def build_feature_groups(no_opp_inputs: bool = False,
     self_group: Dict[str, Any] = {
         "categorical": self_cats,
         "flags":   flags("self"),
-        "numeric": numeric_state("self", hal_minimal=hal_minimal),
+        "numeric": numeric_state("self", minimal=minimal),
         "action_elapsed": ["self_action_frame"],
     }
     if not no_self_inputs:
@@ -304,9 +311,9 @@ def load_cluster_centers(data_dir: Path = None, clusters_path: Path = None,
 
 
 # ---------------------------------------------------------------------------
-# HAL's hand-designed stick clusters (Melee-mechanical angles)
+# MIMIC's 37 hand-designed stick clusters (Melee-mechanical angles)
 # ---------------------------------------------------------------------------
-HAL_STICK_CLUSTERS_37 = np.array([
+MIMIC_STICK_CLUSTERS_37 = np.array([
     [0.5000, 0.5000],  # neutral
     [0.6750, 0.5000], [0.3250, 0.5000], [0.5000, 0.6750], [0.5000, 0.3250],  # partial tilts
     [0.8375, 0.5000], [0.1625, 0.5000], [0.5000, 0.8375], [0.5000, 0.1625],  # full tilts
@@ -319,32 +326,44 @@ HAL_STICK_CLUSTERS_37 = np.array([
     [0.6500, 0.0250], [0.6500, 0.9750], [0.3500, 0.0250], [0.3500, 0.9750],  # 72.5deg
 ], dtype=np.float32)
 
-HAL_CSTICK_CLUSTERS_9 = np.array([
+MIMIC_CSTICK_CLUSTERS_9 = np.array([
     [0.5000, 0.5000],  # neutral
     [1.0000, 0.5000], [0.0000, 0.5000], [0.5000, 0.0000], [0.5000, 1.0000],  # cardinals
     [0.1500, 0.1500], [0.8500, 0.1500], [0.8500, 0.8500], [0.1500, 0.8500],  # diagonals
 ], dtype=np.float32)
 
-HAL_SHOULDER_CLUSTERS_3 = np.array([0.0, 0.4, 1.0], dtype=np.float32)
+MIMIC_SHOULDER_CLUSTERS_3 = np.array([0.0, 0.4, 1.0], dtype=np.float32)
 
-# Map 5-class c_dir → 9-cluster index (verified against HAL_CSTICK_CLUSTERS_9):
+# Map 5-class c_dir → 9-cluster index:
 #   0(neutral)→0, 1(up)→4, 2(down)→3, 3(left)→2, 4(right)→1
 CDIR_5_TO_9_MAP = np.array([0, 4, 3, 2, 1], dtype=np.int64)
 
+# Backwards-compat aliases
+HAL_STICK_CLUSTERS_37 = MIMIC_STICK_CLUSTERS_37
+HAL_CSTICK_CLUSTERS_9 = MIMIC_CSTICK_CLUSTERS_9
+HAL_SHOULDER_CLUSTERS_3 = MIMIC_SHOULDER_CLUSTERS_3
+
 
 # ---------------------------------------------------------------------------
-# HAL-style normalization
+# MIMIC normalization (HAL-compatible — same transforms, same stats file)
 # ---------------------------------------------------------------------------
 
-def load_hal_norm(data_dir: Path) -> dict:
-    """Load hal_norm.json → dict of {feature_suffix: {transform, min, max, mean, std}}."""
-    path = Path(data_dir) / "hal_norm.json"
+def load_mimic_norm(data_dir: Path) -> dict:
+    """Load mimic_norm.json (fallback: hal_norm.json) → dict of
+    {feature_suffix: {transform, min, max, mean, std}}.
+    """
+    data_dir = Path(data_dir)
+    path = data_dir / "mimic_norm.json"
+    if not path.exists():
+        legacy = data_dir / "hal_norm.json"
+        if legacy.exists():
+            path = legacy
     with open(path) as f:
         return json.load(f)["features"]
 
 
-def hal_normalize(raw_value: float, params: dict) -> float:
-    """Apply HAL's normalization to a raw value."""
+def mimic_normalize(raw_value: float, params: dict) -> float:
+    """Apply MIMIC's normalization to a raw value."""
     t = params["transform"]
     if t == "standardize":
         return (raw_value - params["mean"]) / params["std"] if params["std"] else 0.0
@@ -357,8 +376,8 @@ def hal_normalize(raw_value: float, params: dict) -> float:
     return raw_value
 
 
-def hal_normalize_array(values: np.ndarray, params: dict) -> np.ndarray:
-    """Vectorized HAL normalization for a 1D array."""
+def mimic_normalize_array(values: np.ndarray, params: dict) -> np.ndarray:
+    """Vectorized MIMIC normalization for a 1D array."""
     t = params["transform"]
     mn, mx = float(params["min"]), float(params["max"])
     rng = mx - mn
@@ -372,11 +391,21 @@ def hal_normalize_array(values: np.ndarray, params: dict) -> np.ndarray:
     return values
 
 
-# Column suffixes in the order they appear in self_numeric (hal_minimal=True)
-HAL_NUMERIC_COLS = ["pos_x", "pos_y", "percent", "stock", "jumps_left",
-                    "invuln_left", "shield_strength"]
+# Backwards-compat aliases (old HAL-prefixed names)
+load_hal_norm = load_mimic_norm
+hal_normalize = mimic_normalize
+hal_normalize_array = mimic_normalize_array
+
+
+# Column suffixes in the order they appear in self_numeric (minimal_features=True)
+NUMERIC_COLS = ["pos_x", "pos_y", "percent", "stock", "jumps_left",
+                "invuln_left", "shield_strength"]
 # Flag indices [0, 2, 3] from the 5-flag tensor → on_ground, facing, invulnerable
-HAL_FLAG_COLS = ["on_ground", "facing", "invulnerable"]
+FLAG_COLS = ["on_ground", "facing", "invulnerable"]
+
+# Backwards-compat aliases
+HAL_NUMERIC_COLS = NUMERIC_COLS
+HAL_FLAG_COLS = FLAG_COLS
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """Shared inference utilities for MIMIC model evaluation.
 
-Used by run_mimic_via_hal_loop.py and head_to_head.py to ensure
+Used by play_vs_cpu.py, head_to_head.py, and play_netplay.py to ensure
 consistent frame construction, model invocation, and controller decoding.
 """
 

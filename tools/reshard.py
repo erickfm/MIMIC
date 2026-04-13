@@ -22,9 +22,10 @@ def reshard(src_dir: Path, dst_dir: Path, target_bytes: int):
 
     dst_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy metadata files
+    # Copy metadata files (include both new mimic_norm.json and legacy hal_norm.json)
     for meta_file in ["norm_stats.json", "cat_maps.json", "stick_clusters.json",
-                       "controller_combos.json", "hal_norm.json", "tensor_manifest.json"]:
+                       "controller_combos.json", "mimic_norm.json", "hal_norm.json",
+                       "tensor_manifest.json"]:
         src_path = src_dir / meta_file
         if src_path.exists():
             shutil.copy2(src_path, dst_dir / meta_file)

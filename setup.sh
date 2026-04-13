@@ -10,7 +10,7 @@ set -euo pipefail
 #   bash setup.sh --models              # also pull released checkpoints from HuggingFace
 #   bash setup.sh --run --model small   # extra args forwarded to train.py
 
-DATA_DIR="${DATA_DIR:-data/fox_hal_v2}"
+DATA_DIR="${DATA_DIR:-data/fox_v2}"
 EMULATOR_DIR="emulator"
 ISO_PATH="melee.iso"
 RUN_AFTER=false
@@ -101,7 +101,7 @@ elif $RSYNC_DATA; then
     echo "  Pulling pre-built shards from Machine A ..."
     mkdir -p "$DATA_DIR"
     rsync -avz --progress -e "ssh -p 22877" \
-        root@194.14.47.19:/root/MIMIC/data/fox_hal_v2/ "$DATA_DIR/"
+        root@194.14.47.19:/root/MIMIC/data/fox_v2/ "$DATA_DIR/"
     echo "  Data synced to $DATA_DIR"
 else
     echo "  No shards found in $DATA_DIR."
@@ -253,7 +253,7 @@ snapshot_download('erickfm/MIMIC', local_dir='hf_checkpoints')
       [luigi]="luigi-20260412-relpos-5k.pt"
     )
     declare -A DATA_DIRS=(
-      [fox]="data/fox_hal_v2"
+      [fox]="data/fox_v2"
       [falco]="data/falco_v2"
       [cptfalcon]="data/cptfalcon_v2"
       [luigi]="data/luigi_v2"
@@ -265,7 +265,7 @@ snapshot_download('erickfm/MIMIC', local_dir='hf_checkpoints')
         if [[ -f "$src/model.pt" ]]; then
             ln -sf "../$src/model.pt" "checkpoints/$cp_name"
             mkdir -p "$data_dir"
-            for f in hal_norm.json controller_combos.json cat_maps.json stick_clusters.json norm_stats.json; do
+            for f in mimic_norm.json controller_combos.json cat_maps.json stick_clusters.json norm_stats.json; do
                 if [[ -f "$src/$f" ]]; then
                     ln -sf "../../$src/$f" "$data_dir/$f"
                 fi
@@ -294,7 +294,7 @@ if ! $PULL_MODELS; then
 fi
 echo "  • Make sure .env is filled in  (scp from another machine is fastest)"
 echo "  • Run the Discord bot:         python3 tools/discord_bot.py"
-echo "  • Or play vs a CPU locally:    python3 tools/run_mimic_via_hal_loop.py --help"
+echo "  • Or play vs a CPU locally:    python3 tools/play_vs_cpu.py --help"
 
 # ── 12. Optionally start training ───────────────────────────────────────────
 if $RUN_AFTER; then

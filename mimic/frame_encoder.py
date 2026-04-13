@@ -69,7 +69,8 @@ class _GroupAttention(nn.Module):
 class _BaseFrameEncoder(nn.Module):
     GLOBAL_NUM   = 20
     PLAYER_NUM   = 22
-    PLAYER_NUM_HAL_MINIMAL = 7  # HAL uses only 7 numeric per player
+    PLAYER_NUM_MINIMAL = 7  # minimal mode: only 7 numeric per player
+    PLAYER_NUM_HAL_MINIMAL = PLAYER_NUM_MINIMAL  # legacy alias
     NANA_NUM     = 27
     ANALOG_DIM   = 4
     BTN_DIM      = 12
@@ -95,18 +96,29 @@ class _BaseFrameEncoder(nn.Module):
         no_opp_inputs: bool = False,
         no_self_inputs: bool = False,
         lean_features: bool = False,
-        hal_minimal_features: bool = False,
-        hal_controller_encoding: bool = False,
+        mimic_minimal_features: bool = False,
+        mimic_controller_encoding: bool = False,
         n_controller_combos: int = 5,
+        # Legacy kwarg aliases
+        hal_minimal_features: bool = None,
+        hal_controller_encoding: bool = None,
     ) -> None:
         super().__init__()
+        # Accept legacy kwargs
+        if hal_minimal_features is not None:
+            mimic_minimal_features = hal_minimal_features
+        if hal_controller_encoding is not None:
+            mimic_controller_encoding = hal_controller_encoding
         self._d_intra = d_intra
         self._dropout = dropout
         self._lean = lean_features
-        self._hal_minimal = hal_minimal_features
+        self._minimal = mimic_minimal_features
         self._no_opp_inputs = no_opp_inputs
         self._no_self_inputs = no_self_inputs
-        self._hal_ctrl_enc = hal_controller_encoding
+        self._ctrl_enc = mimic_controller_encoding
+        # Legacy aliases (read-only by the old callers)
+        self._hal_minimal = self._minimal
+        self._hal_ctrl_enc = self._ctrl_enc
         self.si_drop_prob: float = 0.0
 
         def _emb_dim(n_vocab: int) -> int:
@@ -131,10 +143,10 @@ class _BaseFrameEncoder(nn.Module):
         self.ptype_emb = cat_block(num_proj_types)
         self.psub_emb  = cat_block(num_proj_subtypes)
 
-        _player_num = self.PLAYER_NUM_HAL_MINIMAL if hal_minimal_features else self.PLAYER_NUM
-        # hal_minimal: 7 numeric + 3 flags (on_ground, facing, invulnerable) = 10
+        _player_num = self.PLAYER_NUM_MINIMAL if mimic_minimal_features else self.PLAYER_NUM
+        # minimal: 7 numeric + 3 flags (on_ground, facing, invulnerable) = 10
         # normal: 22 numeric + 1 action_elapsed = 23
-        _player_enc_in = _player_num + 3 if hal_minimal_features else _player_num + 1
+        _player_enc_in = _player_num + 3 if mimic_minimal_features else _player_num + 1
         self.glob_enc      = _mlp(self.GLOBAL_NUM, d_intra, dropout)
         self.player_enc    = _mlp(_player_enc_in, d_intra, dropout)
         self.nana_enc      = _mlp(self.NANA_NUM + 1, d_intra, dropout)
@@ -675,21 +687,21 @@ class HybridFrameEncoder(_BaseFrameEncoder):
 
 
 # ---------------------------------------------------------------------------
-# HAL-exact encoder: concat all raw features → single Linear (no per-group MLPs)
+# Flat encoder: concat all raw features → single Linear (no per-group MLPs).
+# MIMIC's canonical encoder, bootstrapped from HAL's input projection.
 # ---------------------------------------------------------------------------
 
-class HALFlatEncoder(nn.Module):
-    """Match HAL's input projection exactly.
+class MimicFlatEncoder(nn.Module):
+    """Flat concat + Linear input projection.
 
     Per frame:
       concat([stage_emb(4), char_emb(12)*2, action_emb(32)*2,
               gamestate(numeric), controller(one-hot)]) → Linear → d_model
 
-    No per-group MLPs. Categorical embeddings are small (HAL sizes).
-    Requires --hal-minimal-features and --hal-controller-encoding.
+    No per-group MLPs. Categorical embeddings are small.
+    Requires --mimic-minimal-features and --mimic-controller-encoding.
     """
 
-    # HAL's exact embedding sizes
     STAGE_EMB_DIM = 4
     CHAR_EMB_DIM = 12
     ACTION_EMB_DIM = 32
@@ -702,15 +714,24 @@ class HALFlatEncoder(nn.Module):
         num_stages: int,
         num_characters: int,
         num_actions: int,
-        hal_minimal_features: bool = True,
-        hal_controller_encoding: bool = True,
+        mimic_minimal_features: bool = True,
+        mimic_controller_encoding: bool = True,
         n_controller_combos: int = 5,
         no_self_inputs: bool = False,
+        # Legacy aliases
+        hal_minimal_features: bool = None,
+        hal_controller_encoding: bool = None,
         **kwargs,  # absorb unused params from build_encoder
     ) -> None:
         super().__init__()
+        if hal_minimal_features is not None:
+            mimic_minimal_features = hal_minimal_features
+        if hal_controller_encoding is not None:
+            mimic_controller_encoding = hal_controller_encoding
         self._no_self_inputs = no_self_inputs
-        self._hal_ctrl_enc = hal_controller_encoding
+        self._ctrl_enc = mimic_controller_encoding
+        # Legacy alias
+        self._hal_ctrl_enc = self._ctrl_enc
         self.si_drop_prob: float = 0.0
 
         # Categorical embeddings (HAL sizes)
@@ -727,7 +748,7 @@ class HALFlatEncoder(nn.Module):
 
         # Controller: one-hot vector (37 stick + 9 cstick + N combos + 3 shoulder)
         ctrl_dim = 0
-        if hal_controller_encoding and not no_self_inputs:
+        if mimic_controller_encoding and not no_self_inputs:
             ctrl_dim = 37 + 9 + n_controller_combos + 3
 
         self._input_dim = emb_dim + numeric_dim + ctrl_dim
@@ -809,8 +830,13 @@ ENCODER_REGISTRY = {
     "flat": FlatFrameEncoder,
     "composite8": CompositeFrameEncoder,
     "hybrid16": HybridFrameEncoder,
-    "hal_flat": HALFlatEncoder,
+    "mimic_flat": MimicFlatEncoder,
+    # Legacy alias
+    "hal_flat": MimicFlatEncoder,
 }
+
+# Legacy class alias
+HALFlatEncoder = MimicFlatEncoder
 
 
 def build_encoder(
@@ -825,9 +851,12 @@ def build_encoder(
     no_opp_inputs: bool = False,
     no_self_inputs: bool = False,
     lean_features: bool = False,
-    hal_minimal_features: bool = False,
-    hal_controller_encoding: bool = False,
+    mimic_minimal_features: bool = False,
+    mimic_controller_encoding: bool = False,
     n_controller_combos: int = 5,
+    # Legacy aliases
+    hal_minimal_features: bool = None,
+    hal_controller_encoding: bool = None,
     num_stages: int,
     num_ports: int,
     num_characters: int,
@@ -837,6 +866,12 @@ def build_encoder(
     num_proj_subtypes: int,
     num_c_dirs: int = 5,
 ) -> _BaseFrameEncoder:
+    # Accept legacy kwargs
+    if hal_minimal_features is not None:
+        mimic_minimal_features = hal_minimal_features
+    if hal_controller_encoding is not None:
+        mimic_controller_encoding = hal_controller_encoding
+
     cls = ENCODER_REGISTRY.get(encoder_type)
     if cls is None:
         raise ValueError(f"Unknown encoder type: {encoder_type!r}. "
@@ -848,14 +883,14 @@ def build_encoder(
         num_proj_types=num_proj_types, num_proj_subtypes=num_proj_subtypes,
         num_c_dirs=num_c_dirs, no_opp_inputs=no_opp_inputs,
         no_self_inputs=no_self_inputs, lean_features=lean_features,
-        hal_minimal_features=hal_minimal_features,
-        hal_controller_encoding=hal_controller_encoding,
+        mimic_minimal_features=mimic_minimal_features,
+        mimic_controller_encoding=mimic_controller_encoding,
         n_controller_combos=n_controller_combos,
     )
 
     common = dict(d_model=d_model, d_intra=d_intra, dropout=dropout, scaled_emb=scaled_emb)
 
-    if encoder_type == "hal_flat":
+    if encoder_type in ("mimic_flat", "hal_flat"):
         return cls(d_model=d_model, dropout=dropout, **vocab_kwargs)
     elif encoder_type == "flat":
         return cls(**common, **vocab_kwargs)

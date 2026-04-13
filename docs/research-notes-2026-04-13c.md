@@ -25,7 +25,7 @@ python3 train.py \
   --stick-clusters hal37 --plain-ce \
   --lr 3e-4 --batch-size 512 \
   --max-samples 16777216 \
-  --data-dir data/fox_hal_v2 \
+  --data-dir data/fox_v2 \
   --reaction-delay 0 --self-inputs \
   --dropout 0.1 \
   --run-name fox-rope-v2 \

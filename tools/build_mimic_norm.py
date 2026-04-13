@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Generate hal_norm.json from norm_stats.json and norm_minmax.json.
+"""Generate mimic_norm.json from norm_stats.json and norm_minmax.json.
 
 Usage:
-    python tools/build_hal_norm.py --norm-stats data/fox_meta/norm_stats.json \
-        --minmax data/fox_meta/norm_minmax.json --out data/fox_meta/hal_norm.json
+    python tools/build_mimic_norm.py --norm-stats data/fox_meta/norm_stats.json \
+        --minmax data/fox_meta/norm_minmax.json --out data/fox_meta/mimic_norm.json
 """
 import argparse
 import json
 
-# HAL's transform type per feature (from hal/preprocess/input_configs.py baseline())
-HAL_TRANSFORMS = {
+# Per-feature transform type (bootstrapped from HAL's input_configs.py baseline())
+MIMIC_TRANSFORMS = {
     "percent": "normalize",
     "stock": "normalize",
     "facing": "normalize",
@@ -30,7 +30,7 @@ BINARY_DEFAULTS = {
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate hal_norm.json")
+    parser = argparse.ArgumentParser(description="Generate mimic_norm.json")
     parser.add_argument("--norm-stats", type=str, required=True)
     parser.add_argument("--minmax", type=str, required=True)
     parser.add_argument("--out", type=str, required=True)
@@ -42,7 +42,7 @@ def main():
         minmax = json.load(f)
 
     features = {}
-    for suffix, transform in HAL_TRANSFORMS.items():
+    for suffix, transform in MIMIC_TRANSFORMS.items():
         if suffix in BINARY_DEFAULTS:
             features[suffix] = BINARY_DEFAULTS[suffix]
             continue
@@ -66,7 +66,7 @@ def main():
     result = {"features": features}
     with open(args.out, "w") as f:
         json.dump(result, f, indent=2)
-    print(f"Saved hal_norm.json with {len(features)} features to {args.out}")
+    print(f"Saved mimic_norm.json with {len(features)} features to {args.out}")
     for k, v in features.items():
         print(f"  {k}: {v['transform']} min={v['min']:.3f} max={v['max']:.3f} mean={v['mean']:.3f} std={v['std']:.3f}")
 

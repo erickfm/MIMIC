@@ -8,7 +8,7 @@ contains:
     model.pt                 # the raw PyTorch checkpoint
     config.json              # ModelConfig from ckpt (for reading without torch.load)
     metadata.json            # provenance: step, run name, games, val metrics, etc.
-    hal_norm.json            # normalization stats (required by inference)
+    mimic_norm.json          # normalization stats (required by inference)
     controller_combos.json   # 7-class button combo config
     cat_maps.json
     stick_clusters.json
@@ -74,7 +74,7 @@ CHARACTERS: list[CharacterEntry] = [
         display="Fox",
         melee_enum="FOX",
         checkpoint=REPO_ROOT / "checkpoints/fox-20260413-rope-32k.pt",
-        data_dir=REPO_ROOT / "data/fox_hal_v2",
+        data_dir=REPO_ROOT / "data/fox_v2",
         games_trained=17319,
         val_btn_f1="87.7%",
         val_main_f1="~55%",
@@ -191,7 +191,7 @@ MIMIC/
 │   ├── model.pt                   # raw PyTorch checkpoint
 │   ├── config.json                # ModelConfig (copied from ckpt["config"])
 │   ├── metadata.json              # provenance (step, val metrics, notes)
-│   ├── hal_norm.json              # normalization stats
+│   ├── mimic_norm.json            # normalization stats
 │   ├── controller_combos.json     # 7-class button combo spec
 │   ├── cat_maps.json
 │   ├── stick_clusters.json
@@ -224,7 +224,7 @@ snapshot_download('erickfm/MIMIC', local_dir='./hf_checkpoints')
 Run a character against a level-9 CPU:
 
 ```bash
-python3 tools/run_mimic_via_hal_loop.py \\
+python3 tools/play_vs_cpu.py \\
   --checkpoint hf_checkpoints/falco/model.pt \\
   --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \\
   --iso-path ./melee.iso \\
@@ -382,7 +382,7 @@ def stage_character(entry: CharacterEntry, out_dir: Path) -> None:
     (out_dir / "config.json").write_text(json.dumps(config_clean, indent=2))
 
     # 3. Copy metadata JSONs from the training data dir
-    for fname in ("hal_norm.json", "controller_combos.json", "cat_maps.json",
+    for fname in ("mimic_norm.json", "controller_combos.json", "cat_maps.json",
                   "stick_clusters.json", "norm_stats.json"):
         src = entry.data_dir / fname
         if src.exists():

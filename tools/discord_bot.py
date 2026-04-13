@@ -176,7 +176,7 @@ if not _ensure_user_json(SLIPPI_HOME):
 
 # Character -> (best checkpoint, data dir, melee name)
 CHARACTERS = {
-    "FOX":       ("checkpoints/fox-20260413-rope-32k.pt",      "data/fox_hal_v2",   "FOX"),
+    "FOX":       ("checkpoints/fox-20260413-rope-32k.pt",      "data/fox_v2",       "FOX"),
     "FALCO":     ("checkpoints/falco-20260412-relpos-28k.pt", "data/falco_v2",     "FALCO"),
     "CPTFALCON": ("checkpoints/cptfalcon-20260412-relpos-27k.pt",  "data/cptfalcon_v2", "CPTFALCON"),
     "LUIGI":     ("checkpoints/luigi-20260412-relpos-5k.pt", "data/luigi_v2",     "LUIGI"),

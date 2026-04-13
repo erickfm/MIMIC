@@ -102,7 +102,7 @@ separate `wandb login` / `huggingface-cli login` step.
 ### Against a CPU locally
 
 ```bash
-python3 tools/run_mimic_via_hal_loop.py \
+python3 tools/play_vs_cpu.py \
   --checkpoint checkpoints/falco-20260412-relpos-28k.pt \
   --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \
   --iso-path ./melee.iso \
@@ -189,7 +189,7 @@ python3 train.py \
   --stick-clusters hal37 --plain-ce \
   --lr 3e-4 --batch-size 512 \
   --max-samples 16777216 \
-  --data-dir data/fox_hal_v2 \
+  --data-dir data/fox_v2 \
   --reaction-delay 0 --self-inputs \
   --run-name fox-$(date +%Y%m%d)-rope \
   --no-warmup --cosine-min-lr 1e-6
@@ -203,8 +203,8 @@ To build fresh v2 shards from `.slp` replays:
 
 ```bash
 python3 tools/slp_to_shards.py \
-  --slp-dir data/falco_all_slp --meta-dir data/fox_hal_full \
-  --staging-dir data/falco_v2 --hal-norm data/fox_hal_full/hal_norm.json \
+  --slp-dir data/falco_all_slp --meta-dir data/fox_v2 \
+  --staging-dir data/falco_v2 --mimic-norm data/fox_v2/mimic_norm.json \
   --character 22 --shard-gb 0.8 --val-frac 0.1 --workers 8
 ```
 
@@ -245,7 +245,7 @@ state encoding the answer. Train with `--reaction-delay 0` on v2 shards.
 │   ├── features.py                   # Feature encoding, 7-class collapse
 │   └── dataset.py                    # Shard streaming
 ├── tools/
-│   ├── run_mimic_via_hal_loop.py     # Bot vs CPU (local)
+│   ├── play_vs_cpu.py     # Bot vs CPU (local)
 │   ├── head_to_head.py               # Bot vs bot (local)
 │   ├── play_netplay.py               # Bot vs human (Slippi netplay)
 │   ├── discord_bot.py                # Discord queue/frontend

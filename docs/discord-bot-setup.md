@@ -38,15 +38,15 @@ uploaded back to the channel as attachments.
   Read Messages/View Channels. **Enable the "Message Content Intent"** under
   Bot → Privileged Gateway Intents — the bot uses prefix commands which
   require reading message content.
-- A **checkpoint per character** you want to serve. The easiest way is to
-  grab `mimic_best_checkpoints.zip` (built in the last session — not in git)
-  and unzip into `checkpoints/`.
-- **Data dir per character**. Each needs a `tensor_manifest.json`,
-  `hal_norm.json`, `controller_combos.json`, `cat_maps.json`,
-  `stick_clusters.json`, `norm_stats.json`. The .pt shard files are NOT
-  needed for inference — only these metadata JSONs. If you trained on this
-  machine the dirs are already there at `data/fox_hal_v2`, `data/falco_v2`,
-  `data/cptfalcon_v2`, `data/luigi_v2`.
+- **Checkpoints + per-character data dirs.** The easiest way to get both is
+  `bash setup.sh --models`, which pulls [erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC)
+  from HuggingFace and symlinks each character's `model.pt` into
+  `checkpoints/<name>.pt` and each character's metadata JSONs
+  (`mimic_norm.json`, `controller_combos.json`, `cat_maps.json`,
+  `stick_clusters.json`, `norm_stats.json`) into `data/<char>_v2/`.
+  The `.pt` shard files are NOT needed for inference — only the metadata
+  JSONs, which HF ships in the bundle. If you trained on this machine the
+  `data/*_v2/` dirs are already there with the same layout.
 
 ## Install
 

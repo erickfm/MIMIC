@@ -1538,8 +1538,8 @@ def main():
                         help="Resume an interrupted --stream run")
     parser.add_argument("--workers", type=int, default=0,
                         help="Parallel workers (0=auto)")
-    parser.add_argument("--hal-norm", type=str, default=None,
-                        help="Path to hal_norm.json for HAL-style normalization")
+    parser.add_argument("--mimic-norm", "--hal-norm", dest="mimic_norm", type=str, default=None,
+                        help="Path to mimic_norm.json for MIMIC normalization stats")
     parser.add_argument("--character", type=int, default=None,
                         help="Only keep perspective where self_character matches "
                              "this index (e.g. 1 for Fox)")
@@ -1581,10 +1581,10 @@ def main():
         print(f"Found {len(slp_files)} .slp files in {args.slp_dir}")
 
         hal_norm = None
-        if args.hal_norm:
-            with open(args.hal_norm) as f:
+        if args.mimic_norm:
+            with open(args.mimic_norm) as f:
                 hal_norm = json.load(f)["features"]
-            print(f"  HAL normalization: {len(hal_norm)} features from {args.hal_norm}")
+            print(f"  MIMIC normalization: {len(hal_norm)} features from {args.mimic_norm}")
 
         if not slp_files:
             print("No .slp files found. Exiting.")

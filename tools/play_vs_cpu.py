@@ -2,11 +2,11 @@
 """Run a MIMIC checkpoint against a CPU opponent in Dolphin.
 
 Usage:
-    python tools/run_mimic_via_hal_loop.py \
-      --checkpoint checkpoints/hal-7class_best.pt \
+    python tools/play_vs_cpu.py \
+      --checkpoint checkpoints/falco-20260412-relpos-28k.pt \
       --dolphin-path /path/to/dolphin-emu \
       --iso-path /path/to/melee.iso \
-      --data-dir data/fox_hal_full \
+      --data-dir data/falco_v2 \
       --cpu-level 9
 """
 

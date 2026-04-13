@@ -68,15 +68,22 @@ class ModelConfig:
     no_self_inputs: bool = True
 
     # prediction heads
-    head_hidden: int            = 256
-    n_stick_clusters: int       = 63
-    n_shoulder_bins: int        = 4
-    autoregressive_heads: bool  = True
-    hal_mode: bool              = False  # use HAL-style heads (single-label buttons, combined shoulder, LN)
-    lean_features: bool         = False  # drop nana/projectiles/nana-flags (match HAL's lean feature set)
-    hal_minimal_features: bool  = False  # drop ECB/speeds/hitlag from numeric (match HAL's exact input set)
-    hal_controller_encoding: bool = False  # one-hot controller feedback (stick clusters + button combos)
-    n_controller_combos: int    = 5       # number of button combo classes (from controller_combos.json)
+    head_hidden: int                = 256
+    n_stick_clusters: int           = 63
+    n_shoulder_bins: int            = 4
+    autoregressive_heads: bool      = True
+    mimic_mode: bool                = False  # single-label buttons, combined shoulder, LN heads
+    lean_features: bool             = False  # drop nana/projectiles/nana-flags
+    mimic_minimal_features: bool    = False  # drop ECB/speeds/hitlag from numeric
+    mimic_controller_encoding: bool = False  # one-hot controller feedback (stick clusters + button combos)
+    n_controller_combos: int        = 5       # number of button combo classes (from controller_combos.json)
+
+    # Legacy hal_* fields — kept for checkpoint backwards compatibility.
+    # __post_init__ migrates them onto the mimic_* fields above. Always
+    # read the mimic_* fields in new code.
+    hal_mode: bool                  = False
+    hal_minimal_features: bool      = False
+    hal_controller_encoding: bool   = False
 
     # fixed categorical vocab sizes
     num_stages: int       = len(STAGE_MAP)
@@ -88,55 +95,72 @@ class ModelConfig:
     num_proj_types: int   = len(PROJECTILE_TYPE_MAP)
     num_proj_subtypes: int= 40
 
+    def __post_init__(self):
+        # Migrate legacy hal_* fields onto mimic_* fields.
+        # If the caller set hal_mode=True but didn't touch mimic_mode,
+        # honor hal_mode. Forward-going code should only read mimic_*.
+        if self.hal_mode and not self.mimic_mode:
+            self.mimic_mode = True
+        if self.hal_minimal_features and not self.mimic_minimal_features:
+            self.mimic_minimal_features = True
+        if self.hal_controller_encoding and not self.mimic_controller_encoding:
+            self.mimic_controller_encoding = True
+        # Keep legacy fields in sync so old code paths still read them
+        # correctly without a sweep.
+        self.hal_mode = self.mimic_mode
+        self.hal_minimal_features = self.mimic_minimal_features
+        self.hal_controller_encoding = self.mimic_controller_encoding
+
 
 MODEL_PRESETS = {
     "tiny":         dict(d_model=256,  nhead=4,  num_layers=4, dim_feedforward=1024),
     "small":        dict(d_model=512,  nhead=8,  num_layers=4, dim_feedforward=2048),
-    "hal":          dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    # MIMIC's canonical config (bootstrapped from HAL's GPTv5Controller, then diverged).
+    "mimic":        dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=256, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-learned":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-learned":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=256, pos_enc="learned",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-rope":     dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-rope":   dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=256, pos_enc="rope",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-rope-lt":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-rope-lt":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=256, pos_enc="rope", rope_theta=1000.0,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-rope-lf":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-rope-lf":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=256, pos_enc="rope", rope_learnable_freqs=True,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-flex":     dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-flex":   dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=256, pos_enc="flexbias",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-ropeflex": dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-ropeflex":dict(d_model=512, nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=256, pos_enc="rope+flexbias",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-rope-deep":dict(d_model=512,  nhead=8,  num_layers=12, dim_feedforward=2048,
+    "mimic-rope-deep":dict(d_model=512,nhead=8,  num_layers=12, dim_feedforward=2048,
                          dropout=0.1, max_seq_len=256, pos_enc="rope",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-xpos":     dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-xpos":   dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.1, max_seq_len=256, pos_enc="xpos", xpos_scale_base=128.0,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-selrope":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-selrope":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.1, max_seq_len=256, pos_enc="selective_rope",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-ropenope": dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-ropenope":dict(d_model=512, nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.1, max_seq_len=256, pos_enc="rope_nope",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "hal-xpos-64":  dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+    "mimic-xpos-64":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.1, max_seq_len=256, pos_enc="xpos", xpos_scale_base=64.0,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
@@ -162,6 +186,26 @@ MODEL_PRESETS = {
     "giant":        dict(d_model=3072, nhead=24, num_layers=12, dim_feedforward=12288,
                          d_intra=512, head_hidden=768),
 }
+
+# Backwards-compat aliases: old "hal*" preset names map to the new "mimic*"
+# entries. Saved checkpoints with `model_preset="hal"` / "hal-rope" / etc.
+# still load via these.
+for _old, _new in [
+    ("hal",           "mimic"),
+    ("hal-learned",   "mimic-learned"),
+    ("hal-rope",      "mimic-rope"),
+    ("hal-rope-lt",   "mimic-rope-lt"),
+    ("hal-rope-lf",   "mimic-rope-lf"),
+    ("hal-flex",      "mimic-flex"),
+    ("hal-ropeflex",  "mimic-ropeflex"),
+    ("hal-rope-deep", "mimic-rope-deep"),
+    ("hal-xpos",      "mimic-xpos"),
+    ("hal-selrope",   "mimic-selrope"),
+    ("hal-ropenope",  "mimic-ropenope"),
+    ("hal-xpos-64",   "mimic-xpos-64"),
+]:
+    MODEL_PRESETS[_old] = MODEL_PRESETS[_new]
+del _old, _new
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. Positional encoding helpers
@@ -316,7 +360,7 @@ class CausalSelfAttentionRelPos(nn.Module):
         return self.resid_dropout(self.c_proj(y))
 
 
-class HALTransformerBlock(nn.Module):
+class MimicTransformerBlock(nn.Module):
     """HAL's pre-norm Transformer block with relative-position attention.
     Supports modern components (RMSNorm, SwiGLU) via config flags."""
 
@@ -661,7 +705,7 @@ class PredictionHeads(nn.Module):
         return torch.sigmoid(btn_logits) >= self.btn_threshold
 
 
-class HALPredictionHeads(nn.Module):
+class MimicPredictionHeads(nn.Module):
     """HAL-style prediction heads: single-label buttons, combined shoulder, LayerNorm.
 
     Autoregressive chain:
@@ -750,8 +794,8 @@ class FramePredictor(nn.Module):
             no_opp_inputs=cfg.no_opp_inputs,
             no_self_inputs=cfg.no_self_inputs,
             lean_features=cfg.lean_features,
-            hal_minimal_features=cfg.hal_minimal_features,
-            hal_controller_encoding=cfg.hal_controller_encoding,
+            mimic_minimal_features=cfg.mimic_minimal_features,
+            mimic_controller_encoding=cfg.mimic_controller_encoding,
             n_controller_combos=cfg.n_controller_combos,
         )
 
@@ -762,9 +806,9 @@ class FramePredictor(nn.Module):
         else:
             self.pos_emb = None  # relpos / rope / alibi have no separate pos_emb
 
-        use_hal_block = (cfg.pos_enc == "relpos")
-        if use_hal_block:
-            self.blocks = nn.ModuleList([HALTransformerBlock(cfg) for _ in range(cfg.num_layers)])
+        use_relpos_block = (cfg.pos_enc == "relpos")
+        if use_relpos_block:
+            self.blocks = nn.ModuleList([MimicTransformerBlock(cfg) for _ in range(cfg.num_layers)])
         elif cfg.pos_enc == "rope_nope":
             # Alternating RoPE / NoPE layers
             blocks = []
@@ -778,13 +822,13 @@ class FramePredictor(nn.Module):
             self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
         FinalNorm = RMSNorm if getattr(cfg, 'use_rmsnorm', False) else nn.LayerNorm
         self.final_norm = FinalNorm(cfg.d_model)
-        if cfg.hal_mode:
-            self.heads = HALPredictionHeads(
+        if cfg.mimic_mode:
+            self.heads = MimicPredictionHeads(
                 cfg.d_model,
                 n_stick_clusters=cfg.n_stick_clusters,
-                n_shoulder_bins=3,  # HAL uses 3-class combined shoulder
+                n_shoulder_bins=3,  # 3-class combined shoulder (LOW/MID/HIGH)
                 n_cdir=cfg.num_c_dirs,
-                n_btn_classes=cfg.n_controller_combos if cfg.hal_controller_encoding else 5,
+                n_btn_classes=cfg.n_controller_combos if cfg.mimic_controller_encoding else 5,
             )
         else:
             self.heads = PredictionHeads(
@@ -799,7 +843,7 @@ class FramePredictor(nn.Module):
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * cfg.num_layers)
         for blk in self.blocks:
-            if use_hal_block:
+            if use_relpos_block:
                 nn.init.normal_(blk.self_attn.c_proj.weight, std=residual_std)
                 if isinstance(blk.mlp, SwiGLU):
                     nn.init.normal_(blk.mlp.w_down.weight, std=residual_std)
@@ -832,3 +876,10 @@ class FramePredictor(nn.Module):
             x = blk(x)
         x = self.final_norm(x)                           # (B, T, d_model)
         return self.heads(x, btn_targets=btn_targets)    # all T positions
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backwards-compat aliases (old HAL-prefixed symbol names)
+# ─────────────────────────────────────────────────────────────────────────────
+HALTransformerBlock = MimicTransformerBlock
+HALPredictionHeads = MimicPredictionHeads

@@ -6,50 +6,48 @@ MIMIC is a behavior-cloning bot for Super Smash Bros. Melee. It watches human
 replays and learns to predict controller inputs from game state. At inference
 it drives a controller through Dolphin (the GameCube emulator) via libmelee.
 
-The reference implementation is **HAL** (by Eric Gu), a separate project at
-`/home/erick/projects/hal`. HAL's architecture and training pipeline are the
-target we're reproducing. HAL can 4-stock a level 9 CPU. MIMIC is our
-reimplementation that trains on the same data and aims to match or exceed
-HAL's gameplay quality.
+MIMIC started as an independent BC-for-Melee project, cycled through a lot
+of ideas, and at one point re-bootstrapped its architecture and data
+pipeline from [HAL](https://github.com/ericyuegu/hal) (by Eric Gu) to get a
+known-good baseline. From there it diverged again: 7-class button head
+(adding TRIG / A_TRIG for airdodge-wavedash-tech), v2 shard target
+alignment, RoPE as an alternative to Shaw relpos, netplay + Discord bot
+frontend. The active code path is MIMIC's own; HAL is just historically
+where the transformer backbone came from.
 
-## Critical: Naming Confusion
+## Lineage hazards (things that look like HAL)
 
-**Read this first. This will save you hours.**
+- `tools/run_hal_model.py` — **still loads actual HAL checkpoints** (Eric
+  Gu's original weights). Kept as a reference implementation. Not used by
+  any production code path. Don't rename it; don't delete it.
+- `tools/validate_checkpoint.py` has an inner `HALModel` class — also a
+  legacy HAL-compat reimplementation used only for validating old HAL
+  checkpoints. Leave alone.
+- Research notes in `docs/` reference `--hal-mode`, `hal_norm.json`, the
+  "HAL preset", etc. They're frozen snapshots of when those names existed.
+  Don't sweep them.
+- Legacy on-disk data directories (`data/fox_hal_full`, `data/fox_hal_local`,
+  `data/fox_hal_800m`) keep their names. Nothing in the active code path
+  references them anymore, they're frozen.
 
-- **"hal-*" prefixed checkpoints and run names are MIMIC models**, not HAL.
-  They use MIMIC's codebase (`train.py`, `mimic/model.py`) with HAL's
-  architecture config (`--model hal`). The only actual HAL checkpoint is
-  `/home/erick/projects/hal/checkpoints/000005242880.pt`.
+## Architecture
 
-- **`tools/run_hal_model.py` is NOT HAL's code.** It's our reimplementation
-  of HAL's inference pipeline. HAL's actual inference is `hal/eval/play.py`
-  in the HAL repo. These two scripts produce different results (ours had
-  bugs that were fixed on 2026-04-07).
+MIMIC's canonical config (preset name `mimic`, bootstrapped from HAL's
+GPTv5Controller and later diverged):
 
-- **`data/fox_hal_norm`, `data/fox_hal_local`, etc. are MIMIC-format shards**
-  built with HAL's normalization. They are NOT HAL's MDS data.
-
-- **Two `stats.json` files exist in the HAL repo** with completely different
-  values. See "Stats Files" section below. Using the wrong one silently
-  breaks inference.
-
-## Architecture (HAL-Matching Config)
-
-When using `--model hal`, MIMIC matches HAL's GPTv5Controller:
-
-- **Params:** ~19.95M (not 26.3M — earlier research notes were wrong about this)
+- **Params:** ~19.95M
 - **Transformer:** d_model=512, 6 layers, 8 heads, block_size=1024
-- **Position encoding:** Relative position (Shaw et al.) with skew matrix
-- **Input:** Linear(164, 512) from concatenated [stage_emb(4) + 2*char_emb(12) + 2*action_emb(32) + gamestate(18) + controller(54)]
-- **Output heads (autoregressive with detach):** shoulder(3) -> c_stick(9) -> main_stick(37) -> buttons(5)
+- **Position encoding:** Shaw relative-position attention (`mimic`) or RoPE (`mimic-rope`)
+- **Input:** Linear(166 → 512) from concatenated [stage_emb(4) + 2*char_emb(12) + 2*action_emb(32) + gamestate(18) + controller(56)]
+- **Output heads (autoregressive with detach):** shoulder(3) → c_stick(9) → main_stick(37) → buttons(7)
 - **Head hidden dim:** `input_dim // 2` (NOT a fixed 256 — each head has different hidden size)
 - **Sequence length:** 256 frames (~4.3 seconds)
-- **Dropout:** 0.2
+- **Dropout:** 0.1 (mimic-rope) or 0.2 (mimic/relpos)
 
 The gamestate is 9 features per player (ego + opponent = 18):
 `percent, stock, facing, invulnerable, jumps_left, on_ground, shield_strength, position_x, position_y`
 
-The controller is a 54-dim one-hot: main_stick(37) + c_stick(9) + buttons(5) + shoulder(3).
+The controller is a 56-dim one-hot: main_stick(37) + c_stick(9) + buttons(7) + shoulder(3).
 
 ## Stats Files (Critical)
 
@@ -79,7 +77,7 @@ controller inputs (the buttons themselves). This means the game state at
 frame `i` already reflects button[i] — e.g., action=KNEE_BEND appears on the
 same frame as button=JUMP.
 
-**v2 shards** (`data/fox_hal_v2`) fix this by shifting targets forward by 1
+**v2 shards** (`data/fox_v2`) fix this by shifting targets forward by 1
 frame: `target[i] = buttons[i+1]`. The model sees the current game state and
 predicts what to press NEXT. This matches inference exactly.
 
@@ -96,17 +94,21 @@ at dataloader time (this is what HAL does).
 
 ```bash
 python3 train.py \
-  --model hal --encoder hal_flat \
-  --hal-mode --hal-minimal-features --hal-controller-encoding \
+  --model mimic-rope --encoder mimic_flat \
+  --mimic-mode --mimic-minimal-features --mimic-controller-encoding \
   --stick-clusters hal37 --plain-ce \
   --lr 3e-4 --batch-size 64 --grad-accum-steps 8 \
   --max-samples 16777216 \
-  --data-dir data/fox_v2_32k \
+  --data-dir data/fox_v2 \
   --self-inputs \
   --reaction-delay 0 \
   --run-name <name> \
   --no-warmup --cosine-min-lr 1e-6
 ```
+
+The legacy `--hal-*` flags and `--model hal` / `--encoder hal_flat` names
+still work as aliases — saved checkpoints from before the 2026-04-13
+rename load unchanged.
 
 **`--self-inputs` is required even on v2 shards.** Earlier v2 runs that
 dropped `--self-inputs` had val loss 2.3 and main stick F1 of 15%. With
@@ -116,12 +118,12 @@ model has no controller history input at all. `--controller-offset` is
 still not needed (v2 alignment is baked into the shard), but `--self-inputs`
 is critical.
 
-### Command (old shards, HAL-compatible)
+### Command (old leaked shards — legacy reproduction only)
 
 ```bash
 torchrun --nproc_per_node=8 train.py \
-  --model hal --encoder hal_flat \
-  --hal-mode --hal-minimal-features --hal-controller-encoding \
+  --model mimic --encoder mimic_flat \
+  --mimic-mode --mimic-minimal-features --mimic-controller-encoding \
   --stick-clusters hal37 --plain-ce \
   --lr 3e-4 --batch-size 64 \
   --max-samples 16777216 \
@@ -138,7 +140,7 @@ batch size of 512. Remove `torchrun --nproc_per_node=8`.
 **Throughput notes (RTX 4090):** BF16 AMP and torch.compile are enabled by
 default. BF16 AMP is enabled by default with FP32 attention upcast in the
 relpos path (prevents BF16 overflow in manual attention score computation).
-For strict HAL reproduction, use `--model hal --no-amp --no-compile` instead.
+For bit-exact reproduction of pre-AMP runs, use `--no-amp --no-compile`.
 
 **BF16 + relpos stability:** The Shaw relpos attention computes Q@K^T + Srel
 manually. In BF16 this overflows due to limited mantissa precision (7 bits).
@@ -199,7 +201,7 @@ python3 tools/run_hal_model.py \
 
 ### Running MIMIC Checkpoints
 
-Use `tools/run_mimic_via_hal_loop.py` (not `run_hal_model.py`) for MIMIC
+Use `tools/play_vs_cpu.py` (not `run_hal_model.py`) for MIMIC
 checkpoints, since they use MIMIC's model class (`mimic/model.py`) not the
 minimal HAL reimplementation.
 
@@ -226,9 +228,9 @@ HAL's actual `play.py`:
 
 ### Verification
 
-`tools/verify_hal_pipeline.py` compares our preprocessing output against HAL's
-actual Preprocessor on the same input. All values match to <1e-5. Run this
-after any changes to `run_hal_model.py` to catch regressions.
+(Removed: `tools/verify_hal_pipeline.py` was a one-time preprocessing-vs-HAL
+comparison tool. Deleted during the 2026-04-13 MIMIC rename since MIMIC has
+diverged far enough from HAL that the equivalence check is no longer useful.)
 
 ### HAL's Own Inference (Ground Truth)
 
@@ -246,16 +248,23 @@ ISO. The `MAC_*` path aliases were added for this purpose.
 
 | Directory | Contents | Target alignment | Status |
 |-----------|----------|-----------------|--------|
-| `data/fox_hal_v2` | ~17K Fox games, HAL-normalized, 800MB shards, quality-filtered, **next-frame targets** | target[i] = buttons[i+1] (clean) | **Active — use with rd=0, no offset** |
-| `data/fox_hal_full` | ~10K Fox games, HAL-normalized, 800MB shards, quality-filtered | target[i] = buttons[i] (leaked) | Legacy — use with rd=1 |
-| `data/fox_hal_800m` | 7,600 Fox games, HAL-normalized, 800MB shards | target[i] = buttons[i] (leaked) | Legacy |
-| `data/fox_hal_local` | 7,600 Fox games, HAL-normalized, 3.8GB shards | target[i] = buttons[i] (leaked) | Legacy |
+| `data/fox_v2` | ~17K Fox games, 800MB shards, quality-filtered, **next-frame targets** | target[i] = buttons[i+1] (clean) | **Active — use with rd=0, no offset** |
+| `data/falco_v2` | ~9K Falco games, same format | clean | Active |
+| `data/cptfalcon_v2` | ~9K CptFalcon games, same format | clean | Active |
+| `data/luigi_v2` | ~2K Luigi games, same format | clean | Active |
+| `data/fox_hal_full` | ~10K Fox games, 800MB shards, quality-filtered | target[i] = buttons[i] (leaked) | Legacy — use with rd=1 |
+| `data/fox_hal_800m` | 7,600 Fox games, 800MB shards | leaked | Legacy |
+| `data/fox_hal_local` | 7,600 Fox games, 3.8GB shards | leaked | Legacy |
+
+Legacy dirs keep `hal_*` in their names because nothing references them
+from the active code path anymore — they're frozen. New data dirs always
+drop the `hal_` prefix.
 
 Use 800MB shards with `mmap=True` in DataLoader for optimal throughput. The
 `tools/reshard.py` script can split large shards: `python tools/reshard.py --src <dir> --dst <dir> --target-mb 800`.
 
 To build new shards, use `tools/slp_to_shards.py`
-with `--hal-norm` and a metadata dir containing 5-combo `controller_combos.json`.
+with `--mimic-norm` and a metadata dir containing 7-combo `controller_combos.json`.
 
 **Game quality filters (added 2026-04-08, matching HAL):** `slp_to_shards.py`
 now filters replays the same way HAL's `process_replays.py` does:
@@ -277,27 +286,25 @@ the existing shard data (524K frames affected, 0.71%).
 `erickfm/slippi-public-dataset-v3.7` — 95K unique replays organized by
 character. Fox folder has 45,854 .slp files. This is the raw replay source.
 Shards must be built from these using `tools/slp_to_shards.py` with
-appropriate metadata and `--hal-norm`.
+appropriate metadata and `--mimic-norm`.
 
-### Building HAL-Normalized Shards
+### Building MIMIC-normalized Shards
 
 Requires a metadata directory with: `norm_stats.json`, `cat_maps.json`,
-`stick_clusters.json`, `controller_combos.json` (5-combo version), and
-`hal_norm.json`. The `controller_combos.json` MUST have 5 combos
-(A, B, Jump, Z, None) for HAL mode. Using the 32-combo version produces
-shards with 81-dim controller vectors instead of 54-dim, which crashes
-the HAL model.
+`stick_clusters.json`, `controller_combos.json`, and `mimic_norm.json`.
+The `controller_combos.json` MUST have 7 combos (A, B, Z, Jump, TRIG,
+A_TRIG, None) for the 7-class button head. The old 5-combo version
+(A, B, Jump, Z, None — HAL's scheme) still works via backcompat but
+cannot represent airdodge / wavedash / L-cancel.
 
 ## Checkpoints
 
-### The Only HAL Checkpoint
+### The Only Actual HAL Checkpoint
 
-`/home/erick/projects/hal/checkpoints/000005242880.pt` — HAL's best at 5.2M
-samples. This is the one that plays well. State dict with `module.` prefix
-(from DDP). 101MB.
-
-`checkpoints/hal_original.pt` is a DIFFERENT checkpoint (different md5sum,
-different weights). Do not confuse them.
+`/home/erick/projects/hal/checkpoints/000005242880.pt` — HAL's (Eric Gu's)
+best at 5.2M samples. State dict with `module.` prefix (from DDP). 101MB.
+Loaded via `tools/run_hal_model.py` for comparison runs only. Not used
+by any MIMIC production code path.
 
 ### MIMIC Checkpoints (all in `checkpoints/`)
 
@@ -332,17 +339,17 @@ run (the step suffix gets appended when renaming the finished `_best.pt`).
 ## File Map
 
 ### Core
-- `train.py` — Training loop (DDP, gradient accumulation, HAL mode, cosine LR)
-- `mimic/model.py` — Model architecture (FramePredictor, HAL presets, attention variants)
+- `train.py` — Training loop (DDP, gradient accumulation, mimic_mode, cosine LR)
+- `mimic/model.py` — Model architecture (FramePredictor, mimic presets, attention variants)
 - `mimic/dataset.py` — StreamingMeleeDataset (per-game and pre-windowed shards)
-- `mimic/frame_encoder.py` — Input encoders (HALFlatEncoder for HAL mode)
+- `mimic/frame_encoder.py` — Input encoders (MimicFlatEncoder for mimic_mode)
 - `mimic/features.py` — Feature encoding (cluster centers, controller one-hot, normalization)
 - `eval.py` — Offline evaluation (validation metrics)
-- `inference.py` — Legacy inference script (use tools/run_hal_model.py instead for HAL mode)
+- `inference.py` — Legacy inference script (use `tools/play_vs_cpu.py` or `tools/play_netplay.py` in modern code paths)
 
 ### Tools
 **Inference (local):**
-- `tools/run_mimic_via_hal_loop.py` — Runs MIMIC checkpoints vs CPU in Dolphin. Uses shared `inference_utils.decode_and_press`.
+- `tools/play_vs_cpu.py` — Runs MIMIC checkpoints vs CPU in Dolphin. Uses shared `inference_utils.decode_and_press`.
 - `tools/head_to_head.py` — Runs two checkpoints against each other in the same Dolphin instance (watchable ditto).
 - `tools/run_hal_model.py` — Our reimplementation of HAL's 5-class inference. Loads HAL checkpoints. Structurally can't wavedash (no TRIG class).
 
@@ -357,7 +364,6 @@ run (the step suffix gets appended when renaming the finished `_best.pt`).
 - `tools/inspect_frame.py` — Shows exactly what goes into and out of the model for a single frame. Takes `--shard 0 --frame 534 --context 2` style args.
 - `tools/extract_wavedashes.py` — Extracts wavedash-only training windows for overfit sanity checks. Used to prove the architecture can represent wavedashes (2026-04-13).
 - `tools/validate_checkpoint.py` — Evaluates checkpoint(s) on val data, reports per-head CE loss.
-- `tools/verify_hal_pipeline.py` — Compares our preprocessing against HAL's. Run after inference changes.
 - `tools/diagnose.py` — Pipeline debugging (tensor-level train vs inference comparison).
 
 **Data:**
@@ -413,37 +419,37 @@ This is Eric Gu's original HAL codebase. Key files:
 
 ## Common Pitfalls for Agents
 
-1. **Don't trust file/variable names.** `hal_original.pt` is not HAL's best
-   checkpoint. `run_hal_model.py` is not HAL's code. `hal-exact-8gpu_best.pt`
-   is a MIMIC model.
+1. **`tools/run_hal_model.py` loads actual HAL weights — MIMIC checkpoints
+   use `tools/play_vs_cpu.py` / `play_netplay.py` / `head_to_head.py`.**
+   `run_hal_model.py` is the reference-implementation path for Eric Gu's
+   original HAL checkpoints; it's not used by any MIMIC production code.
 
 2. **Don't trust research notes as current truth.** Always verify against code.
 
-3. **Don't use `hal/data/stats.json` for inference.** Use `checkpoints/stats.json`.
-
-4. **Don't run inference while training on the same GPU.** Frame drops make
+3. **Don't run inference while training on the same GPU.** Frame drops make
    gameplay look broken when the model is actually fine.
 
-5. **Don't assume `max_samples` means total samples.** With DDP, it's divided
+4. **Don't assume `max_samples` means total samples.** With DDP, it's divided
    by effective batch size (local_batch * n_gpus * grad_accum).
 
-6. **Don't mix normalization schemes.** HAL-mode training needs HAL-normalized
-   shards with 5-combo controller encoding. The `ranked_fox` data uses old
+5. **Don't mix normalization schemes.** `mimic_mode` training needs
+   `mimic_norm.json` + MIMIC controller combos (7-combo for current models,
+   5-combo for legacy HAL-compat). The `ranked_fox` data uses old
    normalization with 32 combos — incompatible.
 
-7. **Don't hardcode head hidden dims as 256.** HAL's heads use `input_dim // 2`
-   which varies per head (256, 257, 262, 280).
+6. **Don't hardcode head hidden dims as 256.** The autoregressive heads use
+   `input_dim // 2` which varies per head (256, 257, 262, 280).
 
-8. **Check `sorted()` on player dicts.** melee-py's `gamestate.players` dict
+7. **Check `sorted()` on player dicts.** melee-py's `gamestate.players` dict
    order is not guaranteed to match port order. Always `sorted()`.
 
-9. **Use `blocking_input=True` for inference.** This makes Dolphin wait for
+8. **Use `blocking_input=True` for inference.** This makes Dolphin wait for
    controller input before advancing each frame. Without it, slow model
    inference causes frame drops (the game advances without receiving input).
    In head-to-head, non-blocking mode systematically disadvantages whichever
    model's inputs are flushed second. Fixed 2026-04-08.
 
-11. **Analog shoulder is enough for shielding, NOT for airdodge/wavedash/L-cancel/tech.**
+9. **Analog shoulder is enough for shielding, NOT for airdodge/wavedash/L-cancel/tech.**
    `press_shoulder(BUTTON_L, value)` sets only the analog component — sufficient
    for shielding (which reads the analog threshold) but not for any rising-edge
    event that requires a "button click." Airdodge, L-cancel, tech, and wavedash
@@ -455,39 +461,39 @@ This is Eric Gu's original HAL codebase. Key files:
    HAL-lineage bots have never demonstrated wavedashes). See research notes
    2026-04-13 for the full debug story.
 
-12. **Button encoding is single-label.** The 5-class button head (A, B, Jump,
+10. **Button encoding is single-label.** The 5-class button head (A, B, Jump,
     Z, None) cannot represent two simultaneous action buttons. Multi-button
     overlaps (2.65% of frames) are collapsed via early-release encoding: the
     newest button (0→1 transition) gets the label. Shoulder+button combos ARE
     representable since shoulder is a separate head.
 
-13. **Post-frame game state leak (fixed 2026-04-11).** melee-py returns
+11. **Post-frame game state leak (fixed 2026-04-11).** melee-py returns
     post-frame game state (action already reflects button press) with
     pre-frame controller inputs. Old shards (`fox_hal_full`) have target[i]
     = buttons[i], so the model can read the answer from self_action. v2
-    shards (`fox_hal_v2`) shift targets to buttons[i+1], fixing the leak.
+    shards (`fox_v2`) shift targets to buttons[i+1], fixing the leak.
     **Do NOT use `--controller-offset` or `--reaction-delay 1` with v2 shards.**
 
-14. **Don't compare val loss across shard versions.** v2 shards produce
+12. **Don't compare val loss across shard versions.** v2 shards produce
     higher val loss because the model can no longer cheat via action→button
     memorization. A val loss of ~1.0 on v2 shards may correspond to better
     gameplay than 0.74 on old shards.
 
-15. **Discord bot portability: keep paths relative in `.env`.** The Discord
+13. **Discord bot portability: keep paths relative in `.env`.** The Discord
     bot's `.env` uses relative paths (`./emulator/...`, `./melee.iso`,
     `./slippi_home`) that `_resolve_path` in `tools/discord_bot.py` converts
     to absolute paths against the repo root at runtime. This makes the repo
     `scp`-able to any machine that has run `setup.sh`. Don't hardcode
     absolute paths in `.env` — it defeats portability.
 
-16. **Slippi credentials live at `./slippi_home/Slippi/user.json`** (gitignored).
+14. **Slippi credentials live at `./slippi_home/Slippi/user.json`** (gitignored).
     Not at `~/.config/SlippiOnline/Slippi/user.json` — libmelee IS pointed
     at the bundled dir explicitly via `dolphin_home_path=SLIPPI_HOME` in
     `tools/play_netplay.py`. Place user.json in the repo so that uploading
     the repo to a new machine carries the bot's Slippi login with it.
     Never commit `slippi_home/` — it contains the bot's `playKey`.
 
-17. **Setup Xvfb for headless machines.** Dolphin crashes at startup with
+15. **Setup Xvfb for headless machines.** Dolphin crashes at startup with
     "Unable to initialize GTK+, is DISPLAY set properly?" if no display
     server is available. `setup.sh` installs and starts Xvfb on `:99` and
     adds `export DISPLAY=:99` to `~/.bashrc`. On existing machines, check

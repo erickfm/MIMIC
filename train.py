@@ -1285,7 +1285,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
     parser.add_argument("--encoder",   type=str, default="hybrid16",
-                        choices=["default", "flat", "composite8", "hybrid16", "hal_flat"],
+                        choices=["default", "flat", "composite8", "hybrid16", "mimic_flat", "hal_flat"],
                         help="Frame encoder variant (default: hybrid16)")
     parser.add_argument("--d-intra",   type=int, default=None,
                         help="Intra-frame encoder width (default: 256)")
@@ -1348,20 +1348,22 @@ if __name__ == "__main__":
                         help="Override number of attention heads")
     parser.add_argument("--lean-features", action="store_true",
                         help="Drop nana/projectile features to match HAL's lean input set")
-    parser.add_argument("--hal-mode", action="store_true",
-                        help="HAL-exact mode: single-label buttons, combined shoulder, LN heads, plain CE")
+    parser.add_argument("--mimic-mode", "--hal-mode", dest="mimic_mode", action="store_true",
+                        help="MIMIC-exact mode: single-label buttons, combined shoulder, LN heads, plain CE")
     parser.add_argument("--no-amp", action="store_true",
                         help="Disable AMP (train in FP32)")
     parser.add_argument("--cosine-min-lr", type=float, default=None,
-                        help="Minimum LR for cosine schedule (default: 0, HAL uses 1e-6)")
+                        help="Minimum LR for cosine schedule (default: 0; 1e-6 matches standard MIMIC recipe)")
     parser.add_argument("--no-warmup", action="store_true",
                         help="Disable LR warmup (start at full LR)")
     parser.add_argument("--stick-clusters", type=str, default=None,
-                        help="Stick cluster set: 'hal37' for HAL's 37 hand-designed clusters")
-    parser.add_argument("--hal-minimal-features", action="store_true",
-                        help="Use HAL's minimal input set (drop ECB, speeds, hitlag/hitstun from numeric)")
-    parser.add_argument("--hal-controller-encoding", action="store_true",
-                        help="Use HAL-style one-hot controller feedback encoding (requires controller_combos.json)")
+                        help="Stick cluster set: 'hal37' for the 37 hand-designed clusters")
+    parser.add_argument("--mimic-minimal-features", "--hal-minimal-features",
+                        dest="mimic_minimal_features", action="store_true",
+                        help="Minimal input set (drop ECB, speeds, hitlag/hitstun from numeric)")
+    parser.add_argument("--mimic-controller-encoding", "--hal-controller-encoding",
+                        dest="mimic_controller_encoding", action="store_true",
+                        help="One-hot controller feedback encoding (requires controller_combos.json)")
     parser.add_argument("--character-filter", type=int, default=None,
                         help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
     parser.add_argument("--random-perspective", action="store_true",
@@ -1431,16 +1433,16 @@ if __name__ == "__main__":
         si_drop_max=args.si_drop_max,
         plain_ce=args.plain_ce,
         n_heads_override=args.n_heads,
-        hal_mode=args.hal_mode,
+        hal_mode=args.mimic_mode,
         no_amp=args.no_amp,
         cosine_min_lr=args.cosine_min_lr,
         lean_features=args.lean_features,
         no_warmup=args.no_warmup,
         stick_clusters=args.stick_clusters,
-        hal_minimal_features=args.hal_minimal_features,
+        hal_minimal_features=args.mimic_minimal_features,
         reaction_delay_override=args.reaction_delay,
         controller_offset=args.controller_offset,
-        hal_controller_encoding=args.hal_controller_encoding,
+        hal_controller_encoding=args.mimic_controller_encoding,
         character_filter=args.character_filter,
         random_perspective=args.random_perspective,
     )

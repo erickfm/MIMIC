@@ -227,18 +227,17 @@ if args.hal_stats:
     else:
         log.error("--hal-stats path not found: %s", _hal_stats_path)
         sys.exit(1)
-elif getattr(cfg, 'encoder_type', '') == 'hal_flat':
+elif getattr(cfg, 'encoder_type', '') in ('mimic_flat', 'hal_flat'):
     _search = [Path(args.data_dir)] if args.data_dir else []
     _search += [Path("./data"), Path("./data/full"), Path("./data/fox_public_shards")]
     for _sd in _search:
-        _hn_path = _sd / "hal_norm.json"
-        if _hn_path.exists():
-            _hal_norm = F.load_hal_norm(_sd)
-            log.info("Loaded HAL normalization for %d features from %s (legacy mode)",
-                     len(_hal_norm), _hn_path)
+        if (_sd / "mimic_norm.json").exists() or (_sd / "hal_norm.json").exists():
+            _hal_norm = F.load_mimic_norm(_sd)
+            log.info("Loaded MIMIC normalization for %d features from %s",
+                     len(_hal_norm), _sd)
             break
     if _hal_norm is None:
-        log.warning("hal_flat encoder but no hal_norm.json found — using z-score normalization")
+        log.warning("mimic_flat encoder but no mimic_norm.json found — using z-score normalization")
 
 # ── Normalization stats + categorical maps ───────────────────────────────
 

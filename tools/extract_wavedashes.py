@@ -129,8 +129,8 @@ def main():
     print(f"Saved {out_val}: {n_val} val windows")
 
     # Copy metadata from source
-    for f in ["hal_norm.json", "controller_combos.json", "cat_maps.json",
-              "stick_clusters.json", "norm_stats.json"]:
+    for f in ["mimic_norm.json", "hal_norm.json", "controller_combos.json",
+              "cat_maps.json", "stick_clusters.json", "norm_stats.json"]:
         src_f = src / f
         if src_f.exists():
             shutil.copy(src_f, dst / f)
