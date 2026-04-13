@@ -418,6 +418,10 @@ def decode_and_press(ctrl, preds, prev_sent, temperature=1.0):
             ctrl.press_button(melee.enums.Button.BUTTON_Z); pressed.append("Z")
         elif btn_idx == 3:
             ctrl.press_button(melee.enums.Button.BUTTON_X); pressed.append("JUMP")
+        # TRIG / A+TRIG: must be press_button (digital), not press_shoulder
+        # (analog). Shield and L-cancel read the analog threshold, but tech,
+        # airdodge, and wavedash all require the digital L/R press.
+        # press_button(L) sets both the digital bit and implies full analog.
         elif btn_idx == 4:
             ctrl.press_button(melee.enums.Button.BUTTON_L); pressed.append("TRIG")
         elif btn_idx == 5:
