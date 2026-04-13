@@ -10,8 +10,8 @@ a human opponent over **Slippi Online Direct Connect** — optionally mediated
 by a Discord bot that queues matches.
 
 Four character models are released: **Fox, Falco, Captain Falcon, Luigi**.
-They execute wavedashes, shield grabs, dash dances, rapid jabs, and aerials.
-In bot-vs-bot Luigi dittos, 70–83% of jumps convert into wavedashes.
+The models wavedash — bot-vs-bot Luigi dittos convert 70–83% of jumps
+into wavedashes, which matches high-level human Luigi play.
 
 Weights on HuggingFace: **[erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC)**
 

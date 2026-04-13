@@ -94,7 +94,7 @@ work without re-tuning paths, as long as `setup.sh` has been run there.
 
 Before running the Discord bot, sanity-check the per-match script against your
 own Slippi Dolphin on a second machine (or a second Slippi account on the
-same machine). Pick a connect code (your personal one, e.g. `ERIK#456`):
+same machine). Pick a connect code (your personal one, e.g. `WAVE#666`):
 
 ```bash
 python3 tools/play_netplay.py \
@@ -103,7 +103,7 @@ python3 tools/play_netplay.py \
   --iso-path /path/to/melee.iso \
   --data-dir data/falco_v2 \
   --character FALCO \
-  --connect-code ERIK#456
+  --connect-code WAVE#666
 ```
 
 On your Slippi machine, open Slippi Online → Direct Connect and enter the
@@ -121,7 +121,7 @@ python3 tools/discord_bot.py
 The bot logs to stderr. In your Discord server:
 
 - `!info` — show the bot's connect code and character list
-- `!play falco ERIK#456` — queue a Falco match against your lobby
+- `!play falco WAVE#666` — queue a Falco match against your lobby
 - `!queue` — show queue state
 - `!cancel` — remove your queued match
 

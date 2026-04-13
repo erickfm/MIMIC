@@ -13,7 +13,7 @@ the replay as a Discord attachment, and exits cleanly.
 ## Architecture
 
 ```
-Discord user: !play falco ERIK#456
+Discord user: !play falco WAVE#666
       │
       ▼
  discord_bot.py  (long-running, in-memory FIFO queue)
