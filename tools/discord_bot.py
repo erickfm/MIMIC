@@ -102,12 +102,75 @@ if not os.path.exists(ISO_PATH):
         f"       Run `bash setup.sh` or set ISO_PATH in .env.\n"
     )
     sys.exit(1)
-if not os.path.exists(os.path.join(SLIPPI_HOME, "Slippi", "user.json")):
+def _ensure_user_json(slippi_home: str) -> bool:
+    """Ensure <slippi_home>/Slippi/user.json exists.
+
+    Priority:
+      1. Existing file — leave it alone.
+      2. SLIPPI_USER_JSON env var containing the JSON blob verbatim.
+      3. Individual fields: SLIPPI_UID, SLIPPI_CONNECT_CODE, SLIPPI_PLAY_KEY,
+         SLIPPI_DISPLAY_NAME, SLIPPI_LATEST_VERSION.
+
+    Returns True if user.json is now present, False otherwise.
+    """
+    import json
+    user_json_path = os.path.join(slippi_home, "Slippi", "user.json")
+    if os.path.exists(user_json_path):
+        return True
+
+    data = None
+
+    # Option 2: full JSON blob
+    blob = os.environ.get("SLIPPI_USER_JSON", "").strip()
+    if blob:
+        try:
+            data = json.loads(blob)
+        except Exception as e:
+            print(f"WARNING: SLIPPI_USER_JSON set but failed to parse: {e}",
+                  file=sys.stderr)
+
+    # Option 3: individual fields
+    if data is None:
+        uid = os.environ.get("SLIPPI_UID", "").strip()
+        code = os.environ.get("SLIPPI_CONNECT_CODE", "").strip() or BOT_SLIPPI_CODE
+        play_key = os.environ.get("SLIPPI_PLAY_KEY", "").strip()
+        display = os.environ.get("SLIPPI_DISPLAY_NAME", "").strip() or "MIMIC"
+        latest = os.environ.get("SLIPPI_LATEST_VERSION", "").strip() or "3.5.2"
+        if uid and play_key:
+            data = {
+                "uid": uid,
+                "connectCode": code,
+                "playKey": play_key,
+                "displayName": display,
+                "latestVersion": latest,
+            }
+
+    if data is None:
+        return False
+
+    os.makedirs(os.path.dirname(user_json_path), exist_ok=True)
+    with open(user_json_path, "w") as f:
+        json.dump(data, f, indent=2)
+    # Make it readable only to the owner — it contains the playKey
+    try:
+        os.chmod(user_json_path, 0o600)
+    except Exception:
+        pass
+    print(f"[discord_bot] wrote {user_json_path} from env vars "
+          f"(code={data.get('connectCode', '?')})", file=sys.stderr)
+    return True
+
+
+if not _ensure_user_json(SLIPPI_HOME):
     sys.stderr.write(
         f"ERROR: Slippi user.json not found at {SLIPPI_HOME}/Slippi/user.json\n"
-        f"       Create a Slippi account via Slippi Launcher, then copy the\n"
-        f"       user.json to {SLIPPI_HOME}/Slippi/user.json\n"
-        f"       (or set SLIPPI_HOME in .env to a different path).\n"
+        f"       Three options:\n"
+        f"         A) Copy user.json to {SLIPPI_HOME}/Slippi/user.json\n"
+        f"         B) Set SLIPPI_USER_JSON in .env to the full JSON blob\n"
+        f"         C) Set SLIPPI_UID, SLIPPI_CONNECT_CODE, SLIPPI_PLAY_KEY,\n"
+        f"            SLIPPI_DISPLAY_NAME in .env (bot will synthesize user.json)\n"
+        f"       Create the Slippi account once via Slippi Launcher to get these\n"
+        f"       values (uid + playKey live in the account's user.json).\n"
     )
     sys.exit(1)
 
