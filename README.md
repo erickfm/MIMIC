@@ -22,9 +22,7 @@ Weights on HuggingFace: **[erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC)*
 | Captain Falcon |  9,404 | 89.9% | 52.2% | 0.71 |
 | Luigi          |  1,951 | ~91%  | ~60% | ~1.0 |
 
-Wavedash conversion rates in bot-vs-bot dittos on Final Destination:
-Luigi 70–83%, Falco 13–33%, CptFalcon 16%. See `replays/` for sample `.slp`
-files playable in Slippi Playback.
+Sample replays in `replays/` are playable in Slippi Playback.
 
 ---
 
