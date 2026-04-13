@@ -64,6 +64,9 @@ parser.add_argument("--temperature", type=float, default=1.0)
 parser.add_argument("--costume", type=int, default=0)
 parser.add_argument("--no-opponent-timeout", type=float, default=120.0,
                     help="Seconds to wait for the opponent to connect before giving up")
+parser.add_argument("--opponent-lost-timeout", type=float, default=10.0,
+                    help="Seconds to wait after the opponent disappears (disconnect / "
+                         "crash) before giving up and exiting the direct-connect lobby")
 parser.add_argument("--match-timeout", type=float, default=900.0,
                     help="Maximum seconds for a single match (15 min default)")
 parser.add_argument("--bot-slippi-code", default=None,
@@ -213,6 +216,12 @@ match_start_time = None
 last_known_state = "UNKNOWN"
 start_time = time.time()
 last_in_game_time = None
+# Track when we last saw an opponent (>=2 players in gs.players). Used to
+# detect mid-match DCs: if the opponent's Dolphin crashes, the bot gets
+# dumped back to the menu but the lobby stays open, and without this check
+# it would sit there forever waiting for someone to press Start.
+opponent_last_seen = None
+opponent_ever_seen = False
 
 # Track stocks to detect game end robustly. We remember the last-seen
 # stock counts because by the time the script exits the in-game loop the
@@ -240,11 +249,31 @@ try:
 
         now = time.time()
 
+        # Track opponent presence for DC detection. At least 2 players in
+        # gs.players means we're either in a lobby/CSS with the opponent,
+        # or in-match.
+        if gs.players and len(gs.players) >= 2:
+            opponent_last_seen = now
+            opponent_ever_seen = True
+
         # Menu / lobby navigation — let MenuHelper drive until we reach IN_GAME
         if gs.menu_state not in (melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH):
             if match_started:
                 # We were in a game and now we're not — match ended
                 log.info("Game ended (menu=%s)", gs.menu_state)
+                break
+
+            # Opponent-DC detection: if we saw the opponent at some point
+            # (in CSS / in-match) but they've been missing from gs.players
+            # for longer than the DC timeout, bail out. This covers the
+            # "user's Dolphin crashed mid-match and the bot is now stuck
+            # on the post-game menu with an empty lobby" case.
+            if (opponent_ever_seen
+                    and opponent_last_seen is not None
+                    and (now - opponent_last_seen) > args.opponent_lost_timeout):
+                log.warning("Opponent missing for %.1fs, treating as disconnect",
+                            now - opponent_last_seen)
+                final_result = "disconnect"
                 break
 
             # Connect-code timeout: if we've been in menus for too long without
@@ -312,6 +341,15 @@ try:
         if (now - match_start_time) > args.match_timeout:
             log.warning("Match exceeded %ds timeout", args.match_timeout)
             final_result = "timeout"
+            break
+
+        # Mid-match DC: opponent vanished from gs.players while IN_GAME.
+        # (opponent_last_seen is refreshed above whenever len(players) >= 2.)
+        if (opponent_last_seen is not None
+                and (now - opponent_last_seen) > args.opponent_lost_timeout):
+            log.warning("Opponent missing mid-match for %.1fs, treating as disconnect",
+                        now - opponent_last_seen)
+            final_result = "disconnect"
             break
 
         # Build frame from bot's perspective
