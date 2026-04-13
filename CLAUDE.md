@@ -301,10 +301,32 @@ different weights). Do not confuse them.
 
 ### MIMIC Checkpoints (all in `checkpoints/`)
 
-All `hal-*` prefixed checkpoints are MIMIC models trained with `--model hal`.
-The naming is confusing but intentional (they use HAL's architecture config).
+**Naming convention (new runs from 2026-04-13 onward):**
 
-Currently training: `hal-local_*` — local training run on fox_hal_local data.
+    {char}-{YYYYMMDD}-{encoder}-{steps}k.pt
+
+Examples:
+- `fox-20260413-rope-32k.pt` — Fox, trained 2026-04-13, RoPE position encoding, 32K steps
+- `falco-20260415-relpos-32k.pt` — Falco, relpos attention
+- `luigi-20260420-rope-5k.pt` — Luigi, early-stopped at 5K
+
+Rationale: the old names (`hal-7class-v2-long`, `falco-7class-v2-full`,
+`cptfalcon-7class-v2`, `luigi-7class-v2-long`) carry no date and no encoder
+info — the "7class-v2" prefix is universal now, so it's noise. The new
+scheme makes the newest / best / longest-trained checkpoint obvious at a
+glance, and reveals architecture without needing to load the config.
+
+**Set `--run-name` to `{char}-{YYYYMMDD}-{encoder}`** when starting a new
+run (the step suffix gets appended when renaming the finished `_best.pt`).
+
+**Legacy checkpoints keep their old names** — don't retroactively rename.
+Most are still referenced from `tools/discord_bot.py` character map and
+`tools/upload_models_to_hf.py`, and breaking those silently isn't worth
+the cleanup.
+
+All `hal-*` prefixed checkpoints are MIMIC models trained with `--model hal`
+(the old naming — "hal" is the architecture preset, not the repo). The
+new convention drops the `hal-` prefix entirely.
 
 ## File Map
 

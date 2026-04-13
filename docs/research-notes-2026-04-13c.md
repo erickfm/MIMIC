@@ -51,7 +51,8 @@ python3 train.py \
 
 Val loss was flat in the 0.77–0.82 band from ~step 20K onward — fully
 converged, no more headroom at this recipe. New best checkpoint saved
-at step ~32.1K (`checkpoints/fox-rope-v2_best.pt`).
+at step ~32.1K (`checkpoints/fox-20260413-rope-32k.pt`, renamed from the default
+`fox-rope-v2_best.pt` per the new naming convention — see CLAUDE.md).
 
 ## Observations
 
