@@ -9,10 +9,6 @@ trained bot can play a CPU opponent locally, run bot-vs-bot dittos, or join
 a human opponent over **Slippi Online Direct Connect** — optionally mediated
 by a Discord bot that queues matches.
 
-Four character models are released: **Fox, Falco, Captain Falcon, Luigi**.
-The models wavedash — bot-vs-bot Luigi dittos convert 70–83% of jumps
-into wavedashes, which matches high-level human Luigi play.
-
 Weights on HuggingFace: **[erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC)**
 
 ---
