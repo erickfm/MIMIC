@@ -210,11 +210,19 @@ else
     fi
 fi
 
-# Ensure slippi_home dir exists
+# Ensure slippi_home dir exists. user.json itself is either:
+#   (a) already present (you placed it there yourself), or
+#   (b) synthesized at runtime by discord_bot.py / play_netplay.py from the
+#       SLIPPI_UID / SLIPPI_PLAY_KEY / SLIPPI_CONNECT_CODE / ... env vars in .env.
+# So we only warn if BOTH the file is missing AND .env has no creds.
 mkdir -p slippi_home/Slippi
 if [[ ! -f slippi_home/Slippi/user.json ]]; then
-    echo "  ⚠ slippi_home/Slippi/user.json is missing — Slippi Online login will fail"
-    echo "     until you place it there."
+    if [[ -f .env ]] && grep -qE '^SLIPPI_UID=.+' .env && grep -qE '^SLIPPI_PLAY_KEY=.+' .env; then
+        echo "  slippi_home/Slippi/user.json will be synthesized from .env creds on first run."
+    else
+        echo "  ⚠ slippi_home/Slippi/user.json is missing AND .env has no SLIPPI_UID/SLIPPI_PLAY_KEY."
+        echo "     Fill those in .env, or drop an existing user.json at slippi_home/Slippi/user.json."
+    fi
 fi
 
 # ── 11. Released MIMIC models from HuggingFace (optional) ──────────────────
