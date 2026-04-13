@@ -61,20 +61,25 @@ bash setup.sh
 
 `setup.sh` installs Python deps, pulls the Dolphin AppImage via Git LFS,
 downloads the Melee 1.02 NTSC ISO, starts Xvfb (for headless Dolphin), and
-copies `.env.example` to `.env`. Verify the GPU afterward:
+copies `.env.example` to `.env`. Add `--models` to also pull the released
+checkpoints from HuggingFace and wire them into `checkpoints/` + `data/*_v2/`
+so `tools/discord_bot.py` and `tools/play_netplay.py` can find them
+without manual renaming:
+
+```bash
+bash setup.sh --models
+```
+
+Verify the GPU afterward:
 
 ```bash
 python3 -c "import torch; print(torch.cuda.get_device_name(0))"
 ```
 
-To pull pretrained checkpoints from HuggingFace:
-
-```bash
-huggingface-cli download erickfm/MIMIC --local-dir ./hf_checkpoints
-```
-
 Each character directory under `hf_checkpoints/` contains `model.pt` plus
 all metadata JSONs needed for inference — no extra data downloads required.
+`setup.sh --models` symlinks these into the paths the inference tools
+expect.
 
 ### Tokens (optional, for training and model uploads)
 

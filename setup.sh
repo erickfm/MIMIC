@@ -7,6 +7,7 @@ set -euo pipefail
 #   bash setup.sh                       # install deps, emulator, ISO, download data
 #   bash setup.sh --run                 # also starts training after setup
 #   bash setup.sh --rsync               # pull pre-built shards from Machine A
+#   bash setup.sh --models              # also pull released checkpoints from HuggingFace
 #   bash setup.sh --run --model small   # extra args forwarded to train.py
 
 DATA_DIR="${DATA_DIR:-data/fox_hal_full}"
@@ -14,12 +15,14 @@ EMULATOR_DIR="emulator"
 ISO_PATH="melee.iso"
 RUN_AFTER=false
 RSYNC_DATA=false
+PULL_MODELS=false
 EXTRA_TRAIN_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --run)       RUN_AFTER=true; shift ;;
         --rsync)     RSYNC_DATA=true; shift ;;
+        --models)    PULL_MODELS=true; shift ;;
         --data-dir)  DATA_DIR="$2"; shift 2 ;;
         *)           EXTRA_TRAIN_ARGS+=("$1"); shift ;;
     esac
@@ -210,6 +213,54 @@ if [[ ! -f slippi_home/Slippi/user.json ]]; then
     echo "     until you place it there."
 fi
 
+# ── 11. Released MIMIC models from HuggingFace (optional) ──────────────────
+if $PULL_MODELS; then
+    echo ""
+    echo "── Pulling released models from huggingface.co/erickfm/MIMIC ──"
+    # Make HF_TOKEN from .env visible to huggingface-cli for this shell.
+    if [[ -f .env ]]; then
+        # shellcheck disable=SC2046
+        export $(grep -E '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' .env | xargs -d '\n' -r)
+    fi
+    python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download('erickfm/MIMIC', local_dir='hf_checkpoints', local_dir_use_symlinks=False)
+" || { echo "  ❌ HF download failed — check HF_TOKEN in .env"; exit 1; }
+
+    mkdir -p checkpoints
+    # character → (checkpoint filename, data dir)
+    declare -A CP_NAMES=(
+      [fox]="fox-20260413-rope-32k.pt"
+      [falco]="falco-20260412-relpos-28k.pt"
+      [cptfalcon]="cptfalcon-20260412-relpos-27k.pt"
+      [luigi]="luigi-20260412-relpos-5k.pt"
+    )
+    declare -A DATA_DIRS=(
+      [fox]="data/fox_hal_v2"
+      [falco]="data/falco_v2"
+      [cptfalcon]="data/cptfalcon_v2"
+      [luigi]="data/luigi_v2"
+    )
+    for char in fox falco cptfalcon luigi; do
+        src="hf_checkpoints/$char"
+        cp_name="${CP_NAMES[$char]}"
+        data_dir="${DATA_DIRS[$char]}"
+        if [[ -f "$src/model.pt" ]]; then
+            ln -sf "../$src/model.pt" "checkpoints/$cp_name"
+            mkdir -p "$data_dir"
+            for f in hal_norm.json controller_combos.json cat_maps.json stick_clusters.json norm_stats.json; do
+                if [[ -f "$src/$f" ]]; then
+                    ln -sf "../../$src/$f" "$data_dir/$f"
+                fi
+            done
+            echo "  $char → checkpoints/$cp_name + $data_dir/"
+        else
+            echo "  ⚠ $src/model.pt missing, skipping $char"
+        fi
+    done
+    echo "  Models ready — Discord bot and play_netplay.py can find them via the symlinks."
+fi
+
 echo ""
 echo "=== Setup complete ==="
 echo "  Dolphin:  $EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu"
@@ -218,8 +269,9 @@ echo "  Data:     $DATA_DIR"
 echo "  Display:  \$DISPLAY=$DISPLAY"
 echo ""
 echo "To run the Discord bot:"
-echo "  1. Edit .env and set DISCORD_BOT_TOKEN + BOT_SLIPPI_CODE"
-echo "  2. Place Slippi user.json at ~/.config/SlippiOnline/Slippi/user.json"
+echo "  1. Make sure .env has DISCORD_BOT_TOKEN, BOT_SLIPPI_CODE, SLIPPI_*, HF_TOKEN"
+echo "     (scp an existing .env from another machine to skip this)"
+echo "  2. If you haven't yet, re-run: bash setup.sh --models"
 echo "  3. python3 tools/discord_bot.py"
 
 # ── 9. Optionally start training ────────────────────────────────────────────
