@@ -408,10 +408,17 @@ This is Eric Gu's original HAL codebase. Key files:
    In head-to-head, non-blocking mode systematically disadvantages whichever
    model's inputs are flushed second. Fixed 2026-04-08.
 
-11. **Shoulder is analog-only.** Neither HAL nor MIMIC triggers the digital L/R
-   click (`press_button(BUTTON_L)`). Only analog values are sent via
-   `press_shoulder(BUTTON_L, value)`. The game's tech input appears to use the
-   analog threshold, not the digital click. See research notes 2026-04-08.
+11. **Analog shoulder is enough for shielding, NOT for airdodge/wavedash/L-cancel/tech.**
+   `press_shoulder(BUTTON_L, value)` sets only the analog component — sufficient
+   for shielding (which reads the analog threshold) but not for any rising-edge
+   event that requires a "button click." Airdodge, L-cancel, tech, and wavedash
+   all require `press_button(BUTTON_L)` to send the digital press.
+   The 7-class button head's TRIG (class 4) and A_TRIG (class 5) classes MUST
+   call `ctrl.press_button(BUTTON_L)` — see `tools/inference_utils.py:decode_and_press`.
+   This was silently broken until 2026-04-13. HAL's 5-class button head has no
+   TRIG class at all, so HAL simply can't airdodge by design (explains why
+   HAL-lineage bots have never demonstrated wavedashes). See research notes
+   2026-04-13 for the full debug story.
 
 12. **Button encoding is single-label.** The 5-class button head (A, B, Jump,
     Z, None) cannot represent two simultaneous action buttons. Multi-button

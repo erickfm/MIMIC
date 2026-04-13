@@ -419,9 +419,10 @@ def decode_and_press(ctrl, preds, prev_sent, temperature=1.0):
         elif btn_idx == 3:
             ctrl.press_button(melee.enums.Button.BUTTON_X); pressed.append("JUMP")
         elif btn_idx == 4:
-            pressed.append("TRIG")
+            ctrl.press_button(melee.enums.Button.BUTTON_L); pressed.append("TRIG")
         elif btn_idx == 5:
-            ctrl.press_button(melee.enums.Button.BUTTON_A); pressed.append("A+TRIG")
+            ctrl.press_button(melee.enums.Button.BUTTON_A)
+            ctrl.press_button(melee.enums.Button.BUTTON_L); pressed.append("A+TRIG")
         btn_names = BTN_NAMES_7
     else:
         if btn_idx < 4:
