@@ -10,7 +10,7 @@ set -euo pipefail
 #   bash setup.sh --models              # also pull released checkpoints from HuggingFace
 #   bash setup.sh --run --model small   # extra args forwarded to train.py
 
-DATA_DIR="${DATA_DIR:-data/fox_hal_full}"
+DATA_DIR="${DATA_DIR:-data/fox_hal_v2}"
 EMULATOR_DIR="emulator"
 ISO_PATH="melee.iso"
 RUN_AFTER=false
@@ -74,6 +74,7 @@ else
     echo "  Downloading ISO ..."
     if ! command -v unzip &>/dev/null; then
         echo "  Installing unzip ..."
+        apt-get update -qq 2>&1 | tail -1
         apt-get install -y -qq unzip 2>&1 | tail -1
     fi
     curl -L -o melee.zip "https://melee.today/download/melee.zip"
@@ -100,7 +101,7 @@ elif $RSYNC_DATA; then
     echo "  Pulling pre-built shards from Machine A ..."
     mkdir -p "$DATA_DIR"
     rsync -avz --progress -e "ssh -p 22877" \
-        root@194.14.47.19:/root/MIMIC/data/fox_hal_full/ "$DATA_DIR/"
+        root@194.14.47.19:/root/MIMIC/data/fox_hal_v2/ "$DATA_DIR/"
     echo "  Data synced to $DATA_DIR"
 else
     echo "  No shards found in $DATA_DIR."
@@ -169,6 +170,7 @@ if command -v Xvfb &>/dev/null; then
     echo "  Xvfb already installed."
 else
     echo "  Installing xvfb (needed for Dolphin on headless machines) ..."
+    apt-get update -qq 2>&1 | tail -1
     apt-get install -y -qq xvfb 2>&1 | tail -1
 fi
 if pgrep -x Xvfb >/dev/null; then
@@ -196,15 +198,17 @@ if [[ -f .env ]]; then
 else
     if [[ -f .env.example ]]; then
         cp .env.example .env
-        echo "  Created .env from .env.example."
+        echo "  Created .env from .env.example (all fields empty)."
         echo ""
-        echo "  ⚠ You still need to fill in:"
-        echo "      DISCORD_BOT_TOKEN  (from https://discord.com/developers/applications)"
-        echo "      BOT_SLIPPI_CODE    (your bot's Slippi direct-connect code, e.g. MIMIC#01)"
-        echo ""
-        echo "  Then place the bot's Slippi user.json at:"
-        echo "      ./slippi_home/Slippi/user.json"
-        echo "  (create the account once via Slippi Launcher → log in → copy user.json here)"
+        echo "  Fastest path: scp an existing .env from another machine."
+        echo "  Otherwise, fill in these fields in .env:"
+        echo "      DISCORD_BOT_TOKEN              (discord.com/developers/applications)"
+        echo "      BOT_SLIPPI_CODE                (e.g. MIMIC#01)"
+        echo "      SLIPPI_UID, SLIPPI_PLAY_KEY,   (from a Slippi user.json)"
+        echo "      SLIPPI_CONNECT_CODE,"
+        echo "      SLIPPI_DISPLAY_NAME,"
+        echo "      SLIPPI_LATEST_VERSION"
+        echo "      HF_TOKEN, WANDB_API_KEY        (optional; for training + uploads)"
     else
         echo "  .env.example missing — skipping."
     fi
@@ -229,15 +233,16 @@ fi
 if $PULL_MODELS; then
     echo ""
     echo "── Pulling released models from huggingface.co/erickfm/MIMIC ──"
-    # Make HF_TOKEN from .env visible to huggingface-cli for this shell.
+    # The repo is public — no HF_TOKEN required to read. We still export
+    # it if it's set in .env so rate limits are lifted for the download.
     if [[ -f .env ]]; then
         # shellcheck disable=SC2046
-        export $(grep -E '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' .env | xargs -d '\n' -r)
+        export $(grep -E '^(HF_TOKEN|HUGGING_FACE_HUB_TOKEN)=' .env | xargs -d '\n' -r) 2>/dev/null || true
     fi
     python3 -c "
 from huggingface_hub import snapshot_download
-snapshot_download('erickfm/MIMIC', local_dir='hf_checkpoints', local_dir_use_symlinks=False)
-" || { echo "  ❌ HF download failed — check HF_TOKEN in .env"; exit 1; }
+snapshot_download('erickfm/MIMIC', local_dir='hf_checkpoints')
+" || { echo "  ❌ HF download failed — check your network connection"; exit 1; }
 
     mkdir -p checkpoints
     # character → (checkpoint filename, data dir)
@@ -279,14 +284,19 @@ echo "  Dolphin:  $EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu"
 echo "  ISO:      $ISO_PATH"
 echo "  Data:     $DATA_DIR"
 echo "  Display:  \$DISPLAY=$DISPLAY"
+if $PULL_MODELS; then
+    echo "  Models:  hf_checkpoints/ (symlinked into checkpoints/ + data/*_v2/)"
+fi
 echo ""
-echo "To run the Discord bot:"
-echo "  1. Make sure .env has DISCORD_BOT_TOKEN, BOT_SLIPPI_CODE, SLIPPI_*, HF_TOKEN"
-echo "     (scp an existing .env from another machine to skip this)"
-echo "  2. If you haven't yet, re-run: bash setup.sh --models"
-echo "  3. python3 tools/discord_bot.py"
+echo "Next steps:"
+if ! $PULL_MODELS; then
+    echo "  • Pull trained checkpoints:    bash setup.sh --models"
+fi
+echo "  • Make sure .env is filled in  (scp from another machine is fastest)"
+echo "  • Run the Discord bot:         python3 tools/discord_bot.py"
+echo "  • Or play vs a CPU locally:    python3 tools/run_mimic_via_hal_loop.py --help"
 
-# ── 9. Optionally start training ────────────────────────────────────────────
+# ── 12. Optionally start training ───────────────────────────────────────────
 if $RUN_AFTER; then
     echo ""
     echo "── Starting training ──"
