@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import argparse
+import json
 import logging
 import os
 import signal
@@ -65,12 +66,73 @@ parser.add_argument("--no-opponent-timeout", type=float, default=120.0,
                     help="Seconds to wait for the opponent to connect before giving up")
 parser.add_argument("--match-timeout", type=float, default=900.0,
                     help="Maximum seconds for a single match (15 min default)")
+parser.add_argument("--bot-slippi-code", default=None,
+                    help="Bot's own Slippi connect code (e.g. MIMIC#01). "
+                         "Used to identify the bot's player in gs.players during "
+                         "netplay matches. If omitted, read from user.json.")
+parser.add_argument("--slippi-home", default=None,
+                    help="Path to a directory containing Slippi/user.json "
+                         "(libmelee's dolphin_home_path). Defaults to the "
+                         "slippi_home/ dir at the repo root, then falls back "
+                         "to ~/.config/SlippiOnline.")
 args = parser.parse_args()
 
 
-def emit_result(result: str, replay_path: str = ""):
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _resolve_slippi_home() -> str:
+    """Find the Slippi home dir (one that contains Slippi/user.json)."""
+    candidates = []
+    if args.slippi_home:
+        candidates.append(Path(args.slippi_home).expanduser())
+    # Bundled in the repo (gitignored) — preferred for portability
+    candidates.append(_REPO_ROOT / "slippi_home")
+    # User-level default (libmelee's Linux default)
+    candidates.append(Path.home() / ".config" / "SlippiOnline")
+    for c in candidates:
+        if (c / "Slippi" / "user.json").exists():
+            return str(c.resolve())
+    return ""
+
+
+def _load_bot_code_from_user_json(slippi_home: str) -> str:
+    """Read the bot's connect code from <slippi_home>/Slippi/user.json."""
+    if not slippi_home:
+        return ""
+    path = Path(slippi_home) / "Slippi" / "user.json"
+    try:
+        return json.loads(path.read_text()).get("connectCode", "")
+    except Exception:
+        return ""
+
+
+SLIPPI_HOME = _resolve_slippi_home()
+BOT_CODE = (args.bot_slippi_code
+            or _load_bot_code_from_user_json(SLIPPI_HOME)
+            or "").strip()
+
+if not SLIPPI_HOME:
+    log.warning("No slippi_home found with Slippi/user.json — Dolphin will not "
+                "be able to log in to Slippi Online. Place user.json at "
+                "%s/slippi_home/Slippi/user.json or ~/.config/SlippiOnline/Slippi/user.json",
+                _REPO_ROOT)
+else:
+    log.info("Slippi home: %s", SLIPPI_HOME)
+
+if not BOT_CODE:
+    print("WARNING: bot's own Slippi code not found; falling back to character-only "
+          "port detection", file=sys.stderr)
+
+
+def emit_result(result: str, replay_path: str = "",
+                bot_stocks: int = -1, opp_stocks: int = -1,
+                bot_percent: float = 0.0, opp_percent: float = 0.0):
     """Print machine-readable final status for the Discord bot parser."""
     print(f"RESULT: {result}", flush=True)
+    if bot_stocks >= 0 and opp_stocks >= 0:
+        print(f"SCORE: bot={bot_stocks}stk/{bot_percent:.0f}% "
+              f"opp={opp_stocks}stk/{opp_percent:.0f}%", flush=True)
     if replay_path:
         print(f"REPLAY: {replay_path}", flush=True)
 
@@ -96,11 +158,11 @@ STAGE = melee.Stage[args.stage]
 replay_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "replays")
 os.makedirs(replay_dir, exist_ok=True)
 
-console = melee.Console(
+console_kwargs = dict(
     path=args.dolphin_path,
     is_dolphin=True,
     tmp_home_directory=True,
-    copy_home_directory=True,  # copy user's Slippi home so user.json is available
+    copy_home_directory=True,  # copy the slippi home dir (for user.json)
     blocking_input=True,
     online_delay=2,  # matches standard Slippi direct connect default
     setup_gecko_codes=True,
@@ -112,6 +174,12 @@ console = melee.Console(
     save_replays=True,
     replay_dir=replay_dir,
 )
+# If we found a slippi_home with user.json, point libmelee at it explicitly.
+# Otherwise libmelee uses its Linux default (~/.config/SlippiOnline).
+if SLIPPI_HOME:
+    console_kwargs["dolphin_home_path"] = SLIPPI_HOME
+
+console = melee.Console(**console_kwargs)
 
 # Single bot controller — opponent will be assigned to the other port via netplay
 bot_ctrl = melee.Controller(
@@ -146,8 +214,14 @@ last_known_state = "UNKNOWN"
 start_time = time.time()
 last_in_game_time = None
 
-# Track stocks to detect game end robustly
+# Track stocks to detect game end robustly. We remember the last-seen
+# stock counts because by the time the script exits the in-game loop the
+# gamestate may have already reset for post-game.
 initial_stocks = None
+last_seen_me_stock = None
+last_seen_opp_stock = None
+last_seen_me_percent = 0.0
+last_seen_opp_percent = 0.0
 final_result = "timeout"
 replay_path_out = ""
 
@@ -194,16 +268,41 @@ try:
 
         # --- IN_GAME ---
         if not match_started:
+            # Detect which port the bot ended up on. Prefer the bot's own
+            # Slippi connect code (unambiguous, handles dittos and palette
+            # swaps), then fall back to character+costume, then character only.
+            detected_port = 0
+            if BOT_CODE:
+                for pid, p in gs.players.items():
+                    if getattr(p, "connectCode", "") == BOT_CODE:
+                        detected_port = pid
+                        break
+            if detected_port == 0:
+                detected_port = melee.gamestate.port_detector(gs, BOT_CHAR, args.costume)
+            if detected_port == 0:
+                matches = [pid for pid, p in gs.players.items()
+                           if p.character == BOT_CHAR]
+                if len(matches) == 1:
+                    detected_port = matches[0]
+                    log.info("port_detector fallback: char-only match on port %d", detected_port)
+                elif len(matches) > 1:
+                    detected_port = matches[0]
+                    log.warning("port_detector fallback: ditto detected and no "
+                                "connectCode match, defaulting to port %d",
+                                detected_port)
+            if detected_port == 0:
+                if gs.players:
+                    log.debug("port_detector failed, players=%s",
+                              {pid: (p.character.name, getattr(p, "connectCode", ""))
+                               for pid, p in gs.players.items()})
+                continue
             match_started = True
             match_start_time = now
             last_known_state = "IN_GAME"
-            # Detect which port the bot ended up on
-            detected_port = melee.gamestate.port_detector(gs, BOT_CHAR, args.costume)
-            if detected_port == 0:
-                # Couldn't find our character yet; try again next frame
-                match_started = False
-                continue
-            log.info("Match started. Bot is on port %d", detected_port)
+            me = gs.players[detected_port]
+            log.info("Match started. Bot is on port %d (char=%s costume=%d code=%s)",
+                     detected_port, BOT_CHAR.name, me.costume,
+                     getattr(me, "connectCode", "?"))
             player_state = PlayerState(model, cfg.max_seq_len, DEVICE, ctx=ctx)
             initial_stocks = None
 
@@ -228,7 +327,10 @@ try:
         )
         player_state.prev_sent = new_sent
 
-        # Snapshot current stocks for win/loss detection
+        # Snapshot current stocks for win/loss detection. Record the
+        # last-seen non-zero stocks for each side so we can report scores
+        # even after the game state resets.
+        game_over = False
         try:
             players = sorted(gs.players.items())
             if len(players) >= 2:
@@ -237,6 +339,14 @@ try:
                 opp = gs.players[opp_ports[0]] if opp_ports else None
                 if initial_stocks is None:
                     initial_stocks = (me.stock, opp.stock if opp else 0)
+                last_seen_me_stock = me.stock
+                last_seen_me_percent = me.percent
+                if opp is not None:
+                    last_seen_opp_stock = opp.stock
+                    last_seen_opp_percent = opp.percent
+                # Game over: either side reached 0 stocks
+                if me.stock == 0 or (opp is not None and opp.stock == 0):
+                    game_over = True
                 # Emit a periodic log
                 if int(now) % 2 == 0 and int(now * 10) % 20 < 2:
                     log.info("BOT(p%d) %dstk %d%% | OPP %dstk %d%%",
@@ -245,24 +355,39 @@ try:
         except Exception:
             pass
 
+        if game_over:
+            # Wait ~1 second for the dying animation to complete, then bail
+            # out of the match. console.stop() in the finally block will kill
+            # Dolphin, ending the netplay session cleanly so the opponent
+            # doesn't linger in a rematch lobby.
+            log.info("Stock-out detected. Ending match.")
+            time.sleep(1.0)
+            break
+
     # ---- Determine result ----
+    # Use the last-seen stock counts during the in-game loop — by the time we
+    # exit, gs.players may have already been reset for the post-game menu.
     try:
-        me_final = gs.players.get(detected_port) if detected_port else None
-        opp_ports = [p for p in gs.players if p != detected_port] if detected_port else []
-        opp_final = gs.players.get(opp_ports[0]) if opp_ports else None
-        if match_started and me_final is not None and opp_final is not None:
-            if me_final.stock > 0 and opp_final.stock == 0:
+        if not match_started:
+            final_result = "no-opponent"
+        elif last_seen_me_stock is not None and last_seen_opp_stock is not None:
+            if last_seen_me_stock > 0 and last_seen_opp_stock == 0:
                 final_result = "win"
-            elif me_final.stock == 0 and opp_final.stock > 0:
+            elif last_seen_me_stock == 0 and last_seen_opp_stock > 0:
+                final_result = "loss"
+            elif last_seen_me_stock > last_seen_opp_stock:
+                final_result = "win"  # time-out with stock lead
+            elif last_seen_me_stock < last_seen_opp_stock:
                 final_result = "loss"
             else:
-                # Match ended without a clear stock-out — likely timeout or disconnect
-                if final_result == "timeout":
-                    pass  # keep
+                # Equal stocks — fall back to percent (lower wins)
+                if last_seen_me_percent < last_seen_opp_percent:
+                    final_result = "win"
+                elif last_seen_me_percent > last_seen_opp_percent:
+                    final_result = "loss"
                 else:
-                    final_result = "disconnect"
-        elif not match_started:
-            final_result = "no-opponent"
+                    final_result = "draw"
+        # else: leave as "timeout" (set at top)
     except Exception:
         pass
 
@@ -283,4 +408,10 @@ finally:
     except Exception:
         pass
 
-emit_result(final_result, replay_path_out)
+emit_result(
+    final_result, replay_path_out,
+    bot_stocks=last_seen_me_stock if last_seen_me_stock is not None else -1,
+    opp_stocks=last_seen_opp_stock if last_seen_opp_stock is not None else -1,
+    bot_percent=last_seen_me_percent,
+    opp_percent=last_seen_opp_percent,
+)

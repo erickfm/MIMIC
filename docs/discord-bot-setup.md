@@ -16,8 +16,21 @@ uploaded back to the channel as attachments.
 - A **Slippi account** for the bot. Create one via the Slippi Launcher
   normally — log in with an email and copy the connect code (`TAG#NUMBER`)
   from the Launcher's profile page. The bot's Dolphin will use this
-  account's `user.json` automatically (libmelee copies your Slippi home dir
-  into a tmp user directory when `copy_home_directory=True`).
+  account's `user.json` automatically.
+
+  **Place `user.json` at `./slippi_home/Slippi/user.json` in the MIMIC repo.**
+  This path is gitignored, so you can upload the whole `slippi_home/` dir
+  alongside the repo without leaking credentials. To find the file:
+
+  - Linux: `~/.config/SlippiOnline/Slippi/user.json`
+  - macOS: `~/Library/Application Support/com.project-slippi.dolphin/netplay/User/Slippi/user.json`
+  - Windows: `%APPDATA%\Slippi Launcher\netplay\User\Slippi\user.json`
+
+  Copy it into the repo with:
+  ```bash
+  mkdir -p slippi_home/Slippi
+  cp ~/.config/SlippiOnline/Slippi/user.json slippi_home/Slippi/
+  ```
 - A **Discord bot application** and token. Create one at
   https://discord.com/developers/applications → New Application →
   Bot → Copy Token. Invite the bot to your server with at least these
@@ -37,33 +50,45 @@ uploaded back to the channel as attachments.
 
 ## Install
 
+The easiest path is to run the repo's `setup.sh` — it installs all Python
+deps (including `discord.py` and `python-dotenv`), extracts Dolphin, downloads
+the Melee ISO, installs Xvfb for headless display, and copies `.env.example`
+to `.env` for you:
+
 ```bash
-# from the MIMIC repo root
-pip install -r requirements.txt           # existing MIMIC deps (torch, melee, etc.)
-pip install -r requirements-discord.txt   # discord.py, python-dotenv
+bash setup.sh
+```
+
+If you prefer to install manually:
+
+```bash
+pip install -r requirements.txt
+pip install -r requirements-discord.txt
 ```
 
 ## Configure
 
-Create a `.env` file in the repo root (gitignored via `.env` pattern — if
-not, add it manually):
+After `setup.sh` runs, there's already a `.env` file in the repo root (copied
+from `.env.example`). Edit it and fill in:
 
 ```env
 DISCORD_BOT_TOKEN=your_discord_bot_token_here
-BOT_SLIPPI_CODE=MIMIC#001
-DOLPHIN_PATH=/path/to/dolphin-emu
-ISO_PATH=/path/to/Melee.iso
-# Optional:
-MIMIC_REPO=/path/to/MIMIC
-MATCH_TIMEOUT_SEC=900
+BOT_SLIPPI_CODE=MIMIC#01
 ```
 
-- `BOT_SLIPPI_CODE` is displayed in `!info` so users know what to enter on
-  their side. It does NOT have to match the actual account the bot's Dolphin
-  logs into — libmelee figures that out from `user.json`.
-- `DOLPHIN_PATH` must be the `dolphin-emu` executable (not the Slippi
-  Launcher wrapper). On Linux this is typically inside the extracted
-  `squashfs-root/usr/bin/dolphin-emu`.
+The defaults for `DOLPHIN_PATH`, `ISO_PATH`, and `SLIPPI_HOME` are **relative
+paths** (`./emulator/...`, `./melee.iso`, `./slippi_home`) that the bot
+resolves against the repo root at runtime. This makes the `.env` file
+portable — you can `scp` the entire repo to a different machine and it'll
+work without re-tuning paths, as long as `setup.sh` has been run there.
+
+- `DISCORD_BOT_TOKEN`: create a Discord app at
+  https://discord.com/developers/applications → Bot → Reset Token. Also
+  enable **Message Content Intent** under Privileged Gateway Intents on the
+  same page.
+- `BOT_SLIPPI_CODE`: the connect code shown in `!info` so users know what
+  to type on their side. Must match the `connectCode` field inside
+  `slippi_home/Slippi/user.json`.
 
 ## Verify `play_netplay.py` standalone first
 

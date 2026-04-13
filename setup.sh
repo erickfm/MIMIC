@@ -42,10 +42,9 @@ echo "  LFS files ready."
 # ── 1. Python deps ──────────────────────────────────────────────────────────
 echo ""
 echo "── Installing Python dependencies ──"
-pip install torch numpy pandas pyarrow wandb tensordict \
-    huggingface_hub melee==0.45.1 --quiet 2>/dev/null \
-  || pip install torch numpy pandas pyarrow wandb tensordict \
-    huggingface_hub melee==0.45.1 --quiet --break-system-packages
+PYDEPS="torch numpy pandas pyarrow wandb tensordict huggingface_hub melee==0.45.1 discord.py python-dotenv py-slippi"
+pip install $PYDEPS --quiet 2>/dev/null \
+  || pip install $PYDEPS --quiet --break-system-packages
 
 # ── 2. Dolphin emulator ────────────────────────────────────────────────────
 echo ""
@@ -156,11 +155,72 @@ else:
     print('  WARNING: No CUDA GPU detected. Training will be very slow.')
 "
 
+# ── 9. Headless display (Xvfb) ──────────────────────────────────────────────
+echo ""
+echo "── Headless display (Xvfb) ──"
+if command -v Xvfb &>/dev/null; then
+    echo "  Xvfb already installed."
+else
+    echo "  Installing xvfb (needed for Dolphin on headless machines) ..."
+    apt-get install -y -qq xvfb 2>&1 | tail -1
+fi
+if pgrep -x Xvfb >/dev/null; then
+    echo "  Xvfb already running on display :99"
+else
+    Xvfb :99 -screen 0 1024x768x24 -ac >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+    sleep 1
+    echo "  Started Xvfb on :99"
+fi
+# Add DISPLAY=:99 to bashrc so new shells automatically see it
+if grep -qF 'export DISPLAY=:99' ~/.bashrc 2>/dev/null; then
+    echo "  DISPLAY=:99 already exported in ~/.bashrc"
+else
+    echo 'export DISPLAY=:99' >> ~/.bashrc
+    echo "  Added 'export DISPLAY=:99' to ~/.bashrc"
+fi
+export DISPLAY=:99
+
+# ── 10. Discord bot config (.env) ───────────────────────────────────────────
+echo ""
+echo "── Discord bot config (.env) ──"
+if [[ -f .env ]]; then
+    echo "  .env already exists — leaving it alone."
+else
+    if [[ -f .env.example ]]; then
+        cp .env.example .env
+        echo "  Created .env from .env.example."
+        echo ""
+        echo "  ⚠ You still need to fill in:"
+        echo "      DISCORD_BOT_TOKEN  (from https://discord.com/developers/applications)"
+        echo "      BOT_SLIPPI_CODE    (your bot's Slippi direct-connect code, e.g. MIMIC#01)"
+        echo ""
+        echo "  Then place the bot's Slippi user.json at:"
+        echo "      ./slippi_home/Slippi/user.json"
+        echo "  (create the account once via Slippi Launcher → log in → copy user.json here)"
+    else
+        echo "  .env.example missing — skipping."
+    fi
+fi
+
+# Ensure slippi_home dir exists
+mkdir -p slippi_home/Slippi
+if [[ ! -f slippi_home/Slippi/user.json ]]; then
+    echo "  ⚠ slippi_home/Slippi/user.json is missing — Slippi Online login will fail"
+    echo "     until you place it there."
+fi
+
 echo ""
 echo "=== Setup complete ==="
 echo "  Dolphin:  $EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu"
 echo "  ISO:      $ISO_PATH"
 echo "  Data:     $DATA_DIR"
+echo "  Display:  \$DISPLAY=$DISPLAY"
+echo ""
+echo "To run the Discord bot:"
+echo "  1. Edit .env and set DISCORD_BOT_TOKEN + BOT_SLIPPI_CODE"
+echo "  2. Place Slippi user.json at ~/.config/SlippiOnline/Slippi/user.json"
+echo "  3. python3 tools/discord_bot.py"
 
 # ── 9. Optionally start training ────────────────────────────────────────────
 if $RUN_AFTER; then

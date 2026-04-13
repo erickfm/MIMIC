@@ -41,27 +41,74 @@ except ImportError:
     )
     sys.exit(1)
 
+# Resolve repo root as the parent dir of tools/
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
 try:
     from dotenv import load_dotenv
-    load_dotenv()
+    # Load .env from the repo root explicitly so it works from any cwd
+    load_dotenv(_REPO_ROOT / ".env")
 except ImportError:
     pass  # python-dotenv optional; env vars can be set directly
 
+
+def _resolve_path(env_value: str, default: str = "") -> str:
+    """Resolve a path from .env — handles relative paths against repo root."""
+    val = env_value or default
+    if not val:
+        return ""
+    p = Path(val).expanduser()
+    if not p.is_absolute():
+        p = _REPO_ROOT / p
+    return str(p.resolve())
+
+
 # ---- Config ----
 
-DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
-BOT_SLIPPI_CODE = os.environ.get("BOT_SLIPPI_CODE", "MIMIC#000")
-DOLPHIN_PATH = os.environ.get("DOLPHIN_PATH")
-ISO_PATH = os.environ.get("ISO_PATH")
-MIMIC_REPO = os.environ.get("MIMIC_REPO",
-                            str(Path(__file__).resolve().parent.parent))
+DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+BOT_SLIPPI_CODE = os.environ.get("BOT_SLIPPI_CODE", "MIMIC#000").strip()
+DOLPHIN_PATH = _resolve_path(
+    os.environ.get("DOLPHIN_PATH", ""),
+    "emulator/squashfs-root/usr/bin/dolphin-emu",
+)
+ISO_PATH = _resolve_path(
+    os.environ.get("ISO_PATH", ""),
+    "melee.iso",
+)
+# Slippi home dir containing Slippi/user.json. Required for Slippi Online login.
+# Defaults to ./slippi_home in the repo root (gitignored).
+SLIPPI_HOME = _resolve_path(
+    os.environ.get("SLIPPI_HOME", ""),
+    "slippi_home",
+)
+MIMIC_REPO = os.environ.get("MIMIC_REPO", str(_REPO_ROOT))
 MATCH_TIMEOUT_SEC = float(os.environ.get("MATCH_TIMEOUT_SEC", "900"))
 
 if not DISCORD_BOT_TOKEN:
-    sys.stderr.write("ERROR: DISCORD_BOT_TOKEN env var not set.\n")
+    sys.stderr.write(
+        "ERROR: DISCORD_BOT_TOKEN not set.\n"
+        "       Copy .env.example to .env and fill in the token.\n"
+    )
     sys.exit(1)
-if not DOLPHIN_PATH or not ISO_PATH:
-    sys.stderr.write("ERROR: DOLPHIN_PATH and ISO_PATH env vars must be set.\n")
+if not os.path.exists(DOLPHIN_PATH):
+    sys.stderr.write(
+        f"ERROR: Dolphin not found at {DOLPHIN_PATH}\n"
+        f"       Run `bash setup.sh` or set DOLPHIN_PATH in .env.\n"
+    )
+    sys.exit(1)
+if not os.path.exists(ISO_PATH):
+    sys.stderr.write(
+        f"ERROR: Melee ISO not found at {ISO_PATH}\n"
+        f"       Run `bash setup.sh` or set ISO_PATH in .env.\n"
+    )
+    sys.exit(1)
+if not os.path.exists(os.path.join(SLIPPI_HOME, "Slippi", "user.json")):
+    sys.stderr.write(
+        f"ERROR: Slippi user.json not found at {SLIPPI_HOME}/Slippi/user.json\n"
+        f"       Create a Slippi account via Slippi Launcher, then copy the\n"
+        f"       user.json to {SLIPPI_HOME}/Slippi/user.json\n"
+        f"       (or set SLIPPI_HOME in .env to a different path).\n"
+    )
     sys.exit(1)
 
 # Character -> (best checkpoint, data dir, melee name)
@@ -268,12 +315,12 @@ async def match_worker():
             except Exception:
                 log.exception("Failed to send match-starting message")
 
-        result, replay_path, err_tail = await run_match(req)
-        log.info("Match finished: result=%s replay=%s", result, replay_path)
+        result, replay_path, err_tail, score = await run_match(req)
+        log.info("Match finished: result=%s score=%s replay=%s", result, score, replay_path)
 
         if channel is not None:
             try:
-                await announce_result(channel, req, result, replay_path, err_tail)
+                await announce_result(channel, req, result, replay_path, err_tail, score)
             except Exception:
                 log.exception("Failed to send result message")
 
@@ -296,6 +343,7 @@ async def run_match(req: MatchRequest) -> tuple[str, str, str]:
         "--character", melee_char,
         "--connect-code", req.connect_code,
         "--match-timeout", str(MATCH_TIMEOUT_SEC),
+        "--slippi-home", SLIPPI_HOME,
     ]
     log.info("Spawn: %s", " ".join(cmd))
 
@@ -329,38 +377,61 @@ async def run_match(req: MatchRequest) -> tuple[str, str, str]:
 
     result = "failed"
     replay_path = ""
+    score = ""
     for line in stdout.splitlines():
         if line.startswith("RESULT:"):
             result = line.split(":", 1)[1].strip()
         elif line.startswith("REPLAY:"):
             replay_path = line.split(":", 1)[1].strip()
+        elif line.startswith("SCORE:"):
+            score = line.split(":", 1)[1].strip()
 
     err_tail = stderr[-500:] if stderr else ""
     if proc.returncode != 0 and result == "failed":
         log.warning("play_netplay.py exit=%d, stderr tail:\n%s", proc.returncode, err_tail)
-    return (result, replay_path, err_tail)
+    return (result, replay_path, err_tail, score)
 
 
-async def announce_result(channel, req: MatchRequest, result: str, replay_path: str, err_tail: str):
+async def announce_result(channel, req: MatchRequest, result: str, replay_path: str,
+                           err_tail: str, score: str = ""):
     emoji_map = {
-        "win": "🏆",
-        "loss": "💀",
-        "disconnect": "🔌",
+        "win":         "🏆",
+        "loss":        "💀",
+        "draw":        "🤝",
+        "disconnect":  "🔌",
         "no-opponent": "⌛",
-        "timeout": "⏱️",
-        "failed": "❌",
+        "timeout":     "⏱️",
+        "failed":      "❌",
+    }
+    winner_map = {
+        "win":         "**MIMIC won**",
+        "loss":        f"**{req.user_name} won**",
+        "draw":        "**Draw**",
+        "disconnect":  "Opponent disconnected",
+        "no-opponent": "Opponent never joined",
+        "timeout":     "Match timed out (inference hung)",
+        "failed":      "Match failed to run",
     }
     emoji = emoji_map.get(result, "❓")
-    verb = {
-        "win": "The bot won",
-        "loss": "The bot lost",
-        "disconnect": "Opponent disconnected",
-        "no-opponent": "Opponent never joined",
-        "timeout": "Match timed out",
-        "failed": "Match failed to run",
-    }.get(result, f"Result: {result}")
+    verb = winner_map.get(result, f"Result: {result}")
 
-    msg = f"{emoji} **{verb}** — {req.user_name} vs MIMIC ({req.character})"
+    # score looks like "bot=2stk/45% opp=0stk/120%" — rewrite using user's name
+    score_line = ""
+    if score:
+        score_fmt = (
+            score
+            .replace("bot=", f"MIMIC: ")
+            .replace("opp=", f"{req.user_name}: ")
+            .replace("stk/", " stk, ")
+            .replace("%", "%")
+        )
+        score_line = f"\nFinal: {score_fmt}"
+
+    msg = (
+        f"{emoji} {verb} — {req.character} ditto\n"
+        f"Opponent code: `{req.connect_code}`"
+        f"{score_line}"
+    )
 
     files = []
     if replay_path and os.path.exists(replay_path):

@@ -318,29 +318,41 @@ Currently training: `hal-local_*` — local training run on fox_hal_local data.
 - `inference.py` — Legacy inference script (use tools/run_hal_model.py instead for HAL mode)
 
 ### Tools
-- `tools/run_hal_model.py` — **Our reimplementation** of HAL's inference. Loads HAL checkpoints and plays via Dolphin. Fixed 2026-04-07.
-- `tools/run_mimic_via_hal_loop.py` — Runs MIMIC checkpoints through HAL-style inference loop. Fixed stats path and player ordering 2026-04-08.
-- `tools/head_to_head.py` — Runs two checkpoints (HAL/MIMIC) against each other in Dolphin. Added 2026-04-08.
-- `tools/validate_checkpoint.py` — Evaluates checkpoint(s) on val data, reports per-head CE loss
+**Inference (local):**
+- `tools/run_mimic_via_hal_loop.py` — Runs MIMIC checkpoints vs CPU in Dolphin. Uses shared `inference_utils.decode_and_press`.
+- `tools/head_to_head.py` — Runs two checkpoints against each other in the same Dolphin instance (watchable ditto).
+- `tools/run_hal_model.py` — Our reimplementation of HAL's 5-class inference. Loads HAL checkpoints. Structurally can't wavedash (no TRIG class).
+
+**Inference (online, Slippi netplay):**
+- `tools/play_netplay.py` — Joins a Slippi Online Direct Connect lobby. Uses `MenuHelper.menu_helper_simple(connect_code=...)`, detects bot's port via the `connectCode` field on `PlayerState` (handles dittos and palette swaps). Prints machine-readable `RESULT:` / `SCORE:` / `REPLAY:` lines for the Discord bot.
+- `tools/discord_bot.py` — Discord front-end (prefix commands: `!play`, `!queue`, `!cancel`, `!info`). Single-match FIFO queue via `asyncio.Queue`. Spawns `play_netplay.py` as a subprocess per match, uploads the saved replay back to the channel. Config via `.env` (see `.env.example`).
+
+**Inference (shared):**
+- `tools/inference_utils.py` — Shared inference pipeline: `load_mimic_model`, `load_inference_context`, `build_frame`, `build_frame_p2`, `PlayerState`, `decode_and_press`. **This is where the L-button fix (2026-04-13) lives.** Any new inference entry point should import from here, not reimplement.
+
+**Diagnostics:**
+- `tools/inspect_frame.py` — Shows exactly what goes into and out of the model for a single frame. Takes `--shard 0 --frame 534 --context 2` style args.
+- `tools/extract_wavedashes.py` — Extracts wavedash-only training windows for overfit sanity checks. Used to prove the architecture can represent wavedashes (2026-04-13).
+- `tools/validate_checkpoint.py` — Evaluates checkpoint(s) on val data, reports per-head CE loss.
 - `tools/verify_hal_pipeline.py` — Compares our preprocessing against HAL's. Run after inference changes.
-- `tools/slp_to_shards.py` — Raw .slp replays -> .pt tensor shards (core pipeline)
-- `tools/slp_to_ranked_shards.py` — Ranked replay sharding by character
-- `tools/gameplay_health.py` — Analyze inference log for gameplay quality metrics
-- `tools/diagnose.py` — Pipeline debugging (tensor-level train vs inference comparison)
-- `tools/inference_diag.py` — Offline inference diagnostics (output distribution stats)
-- `tools/validate_pipeline.py` — Verify slp_to_shards output matches old pipeline
-- `tools/split_by_character.py` — Split dataset by character
+- `tools/diagnose.py` — Pipeline debugging (tensor-level train vs inference comparison).
+
+**Data:**
+- `tools/slp_to_shards.py` — Raw .slp replays → .pt tensor shards. Produces **v2 shards** (target[i] = buttons[i+1]) by default since 2026-04-11c.
+- `tools/split_by_character.py` — Split dataset by character.
 
 ### Docs
-- `docs/research-notes-2026-04-08.md` — HAL vs MIMIC pipeline audit, button encoding, shoulder analog/digital
-- `docs/research-notes-2026-04-07.md` — max_steps bug fix, inference bug fixes, training results
-- `docs/archive/research-notes-*.md` — Historical research journal (2026-03-14 through 2026-04-06).
-  **Warning:** these contain claims that were believed true at the time but later
-  proven wrong (e.g., "HAL doesn't overfit", "26.3M params", specific stats file
-  claims). Treat as historical context, not ground truth.
-- `docs/results-2026-03-17.md` — Early training result summaries
-- `docs/hal-mimic-diff-audit.md` — HAL vs MIMIC architecture comparison (historical, 2026-04-02)
-- `GPUS.md` — Remote GPU machine addresses and status
+- `docs/discord-bot-setup.md` — Full setup guide for the Discord bot (Slippi account, Dolphin, ISO, env vars, troubleshooting).
+- `docs/research-notes-2026-04-13.md` — **The TRIG L-button bug debug story.** The most important note for anyone touching `decode_and_press` or questioning why BC bots can't wavedash.
+- `docs/research-notes-2026-04-12.md` — Multi-character v2 training results (Falco/CptFalcon/Luigi) + bot-vs-bot ditto analysis.
+- `docs/research-notes-2026-04-11c.md` — v2 shard target shift. Post-frame gamestate leaks answers to the button head; fixed by shifting targets forward by 1 frame in the shard itself.
+- `docs/research-notes-2026-04-11b.md` — Bistable inference analysis (found earlier, partially superseded by the TRIG fix).
+- `docs/research-notes-2026-04-11.md` — 7-class button encoding, first round of v2 training, relpos retrain.
+- `docs/research-notes-2026-04-09.md` — GPU throughput optimization, RoPE vs relpos experiments.
+- `docs/research-notes-2026-04-08.md` — HAL vs MIMIC pipeline audit.
+- `docs/research-notes-2026-04-07.md` — max_steps bug, inference bug fixes, training results.
+- `docs/archive/research-notes-*.md` — Historical journal (2026-03-14 through 2026-04-06). **Warning:** contains claims that were later proven wrong. Treat as historical context only.
+- `GPUS.md` — Remote GPU machine addresses and status.
 
 ## Research Notes Warning
 
@@ -437,3 +449,24 @@ This is Eric Gu's original HAL codebase. Key files:
     higher val loss because the model can no longer cheat via action→button
     memorization. A val loss of ~1.0 on v2 shards may correspond to better
     gameplay than 0.74 on old shards.
+
+15. **Discord bot portability: keep paths relative in `.env`.** The Discord
+    bot's `.env` uses relative paths (`./emulator/...`, `./melee.iso`,
+    `./slippi_home`) that `_resolve_path` in `tools/discord_bot.py` converts
+    to absolute paths against the repo root at runtime. This makes the repo
+    `scp`-able to any machine that has run `setup.sh`. Don't hardcode
+    absolute paths in `.env` — it defeats portability.
+
+16. **Slippi credentials live at `./slippi_home/Slippi/user.json`** (gitignored).
+    Not at `~/.config/SlippiOnline/Slippi/user.json` — libmelee IS pointed
+    at the bundled dir explicitly via `dolphin_home_path=SLIPPI_HOME` in
+    `tools/play_netplay.py`. Place user.json in the repo so that uploading
+    the repo to a new machine carries the bot's Slippi login with it.
+    Never commit `slippi_home/` — it contains the bot's `playKey`.
+
+17. **Setup Xvfb for headless machines.** Dolphin crashes at startup with
+    "Unable to initialize GTK+, is DISPLAY set properly?" if no display
+    server is available. `setup.sh` installs and starts Xvfb on `:99` and
+    adds `export DISPLAY=:99` to `~/.bashrc`. On existing machines, check
+    `DISPLAY` is set in the environment the Discord bot / play_netplay.py
+    inherits.

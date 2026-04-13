@@ -209,3 +209,7 @@ melee.zip
 mimic_best_checkpoints.zip
 replays/
 .claude/
+# Slippi account credentials — contains playKey, never commit
+user.json
+**/SlippiOnline/**
+slippi_home/
