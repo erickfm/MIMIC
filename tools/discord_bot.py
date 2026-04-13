@@ -210,7 +210,7 @@ class MatchRequest:
     user_name: str
     channel_id: int
     character: str       # canonical (FOX/FALCO/...)
-    connect_code: str    # opponent's code (e.g. ERIK#456)
+    connect_code: str    # opponent's code (e.g. WAVE#666)
 
 # In-memory queue and current-match state
 queue: asyncio.Queue = None  # created in on_ready
@@ -263,7 +263,7 @@ async def cmd_info(ctx: commands.Context):
         f"Bot's Slippi connect code: `{BOT_SLIPPI_CODE}` — enter this on YOUR side.\n\n"
         f"**Characters + checkpoints:**\n{char_block}\n\n"
         f"Usage: `!play <character> <your_connect_code>`\n"
-        f"Example: `!play falco ERIK#456`\n\n"
+        f"Example: `!play falco WAVE#666`\n\n"
         f"The bot joins your Slippi Direct Connect lobby. Launch Slippi Online → "
         f"Direct Connect, enter `{BOT_SLIPPI_CODE}`, and wait — the bot will join you.\n\n"
         f"`!queue` shows current queue. `!cancel` removes your pending match."
@@ -307,7 +307,7 @@ async def cmd_play(ctx: commands.Context, character: str = None, connect_code: s
     if character is None or connect_code is None:
         await ctx.reply(
             "Usage: `!play <character> <your_connect_code>`\n"
-            f"Example: `!play falco ERIK#456`\n"
+            f"Example: `!play falco WAVE#666`\n"
             f"Characters: {', '.join(sorted(CHARACTERS.keys()))}"
         )
         return
@@ -324,7 +324,7 @@ async def cmd_play(ctx: commands.Context, character: str = None, connect_code: s
     if code is None:
         await ctx.reply(
             f"❌ Invalid connect code `{connect_code}`. Format is `TAG#NUMBER` "
-            f"(1-8 letters, then `#`, then digits). Example: `ERIK#456`."
+            f"(1-8 letters, then `#`, then digits). Example: `WAVE#666`."
         )
         return
 

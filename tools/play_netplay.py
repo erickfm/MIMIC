@@ -8,7 +8,7 @@ Usage:
       --iso-path /path/to/melee.iso \
       --data-dir data/falco_v2 \
       --character FALCO \
-      --connect-code ERIK#456
+      --connect-code WAVE#666
 
 The script launches Dolphin, auto-navigates to Slippi Online → Direct Connect,
 enters the opponent's connect code, joins the match, and plays the bot.
@@ -59,7 +59,7 @@ parser.add_argument("--character", default="FALCO",
                     help="Character the bot plays (FOX, FALCO, CPTFALCON, LUIGI)")
 parser.add_argument("--stage", default="FINAL_DESTINATION")
 parser.add_argument("--connect-code", required=True,
-                    help="Opponent's Slippi direct connect code (e.g. ERIK#456)")
+                    help="Opponent's Slippi direct connect code (e.g. WAVE#666)")
 parser.add_argument("--temperature", type=float, default=1.0)
 parser.add_argument("--costume", type=int, default=0)
 parser.add_argument("--no-opponent-timeout", type=float, default=120.0,
