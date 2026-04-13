@@ -1,0 +1,4 @@
+# Additional dependencies for tools/discord_bot.py
+# Install with: pip install -r requirements-discord.txt
+discord.py>=2.3
+python-dotenv>=1.0
