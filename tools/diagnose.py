@@ -503,7 +503,9 @@ def main():
 
         if args.run_model and args.checkpoint:
             ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
-            cfg = ModelConfig(**ckpt["config"])
+            cfg_dict = {k: v for k, v in ckpt["config"].items()
+                        if k in ModelConfig.__dataclass_fields__}
+            cfg = ModelConfig(**cfg_dict)
             model = FramePredictor(cfg).to(device)
             sd = {k.removeprefix("_orig_mod."): v for k, v in ckpt["model_state_dict"].items()}
             model.load_state_dict(sd)

@@ -175,7 +175,9 @@ def load_hal_model(checkpoint_path, device):
 def load_mimic_model(checkpoint_path, device):
     """Load MIMIC checkpoint."""
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
-    cfg = ModelConfig(**ckpt["config"])
+    cfg_dict = {k: v for k, v in ckpt["config"].items()
+                if k in ModelConfig.__dataclass_fields__}
+    cfg = ModelConfig(**cfg_dict)
     model = FramePredictor(cfg).to(device)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()

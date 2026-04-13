@@ -39,7 +39,9 @@ print(f"Device: {DEVICE}")
 
 # ── Load checkpoint ──────────────────────────────────────────────────────
 ckpt = torch.load(args.checkpoint, map_location=DEVICE)
-cfg = ModelConfig(**ckpt["config"])
+cfg_dict = {k: v for k, v in ckpt["config"].items()
+            if k in ModelConfig.__dataclass_fields__}
+cfg = ModelConfig(**cfg_dict)
 print(f"Config: d_model={cfg.d_model}, layers={cfg.num_layers}, "
       f"seq_len={cfg.max_seq_len}, no_opp_inputs={cfg.no_opp_inputs}, "
       f"stick_loss={cfg.stick_loss}")

@@ -94,7 +94,11 @@ else:
     ckpt_path = max(ckpts, key=lambda p: p.stat().st_mtime)
     log.info("Auto-discovered %d checkpoints, using newest: %s", len(ckpts), ckpt_path.name)
 ckpt      = torch.load(ckpt_path, map_location=DEVICE)
-cfg       = ModelConfig(**ckpt["config"])
+# Filter to dataclass fields — saved configs carry extra metadata like
+# model_preset / run_name that aren't ModelConfig fields.
+_cfg_dict = {k: v for k, v in ckpt["config"].items()
+             if k in ModelConfig.__dataclass_fields__}
+cfg       = ModelConfig(**_cfg_dict)
 
 model = FramePredictor(cfg).to(DEVICE)
 state_dict = ckpt["model_state_dict"]
