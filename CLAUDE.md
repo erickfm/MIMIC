@@ -99,13 +99,22 @@ python3 train.py \
   --model hal --encoder hal_flat \
   --hal-mode --hal-minimal-features --hal-controller-encoding \
   --stick-clusters hal37 --plain-ce \
-  --lr 3e-4 --batch-size 512 \
+  --lr 3e-4 --batch-size 64 --grad-accum-steps 8 \
   --max-samples 16777216 \
-  --data-dir data/fox_hal_v2 \
+  --data-dir data/fox_v2_32k \
+  --self-inputs \
   --reaction-delay 0 \
   --run-name <name> \
   --no-warmup --cosine-min-lr 1e-6
 ```
+
+**`--self-inputs` is required even on v2 shards.** Earlier v2 runs that
+dropped `--self-inputs` had val loss 2.3 and main stick F1 of 15%. With
+`--self-inputs` on, val loss drops to 0.67 and main F1 to 57%. The flag
+tells the encoder to use `self_controller` as a feature — without it, the
+model has no controller history input at all. `--controller-offset` is
+still not needed (v2 alignment is baked into the shard), but `--self-inputs`
+is critical.
 
 ### Command (old shards, HAL-compatible)
 

@@ -10,8 +10,8 @@ from pathlib import Path
 from huggingface_hub import HfApi, hf_hub_download
 
 REPO = "erickfm/slippi-public-dataset-v3.7"
-OUT_DIR = Path("/root/MIMIC/data/fox_slp/FOX")
-BATCH_DIRS = ["FOX/batch_00", "FOX/batch_01", "FOX/batch_02", "FOX/batch_03", "FOX/batch_04"]
+OUT_DIR = Path(__file__).resolve().parent.parent / "data" / "fox_slp" / "FOX"
+BATCH_DIRS = ["FOX/batch_00", "FOX/batch_01", "FOX/batch_02", "FOX/batch_03", "FOX/batch_04", "FOX/batch_05"]
 
 api = HfApi()
 OUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,7 +42,7 @@ for batch_dir in BATCH_DIRS:
         try:
             local = hf_hub_download(
                 REPO, f.path, repo_type="dataset",
-                local_dir="/root/MIMIC/data/fox_slp",
+                local_dir=str(OUT_DIR.parent),
             )
             total_downloaded += 1
         except Exception as e:
@@ -52,7 +52,7 @@ for batch_dir in BATCH_DIRS:
                 try:
                     local = hf_hub_download(
                         REPO, f.path, repo_type="dataset",
-                        local_dir="/root/MIMIC/data/fox_slp",
+                        local_dir=str(OUT_DIR.parent),
                     )
                     total_downloaded += 1
                 except Exception as e2:
@@ -82,7 +82,7 @@ try:
         try:
             local = hf_hub_download(
                 REPO, f.path, repo_type="dataset",
-                local_dir="/root/MIMIC/data/fox_slp",
+                local_dir=str(OUT_DIR.parent),
             )
             total_downloaded += 1
         except Exception as e:

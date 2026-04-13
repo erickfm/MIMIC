@@ -54,9 +54,30 @@ model_p2, cfg_p2 = load_mimic_model(args.p2_checkpoint, DEVICE)
 desc_p2 = f"MIMIC({cfg_p2.encoder_type})"
 log.info("  P2 = %s (%d params)", desc_p2, sum(p.numel() for p in model_p2.parameters()))
 
-ctx = load_inference_context(args.data_dir)
-player1 = PlayerState(model_p1, cfg_p1.max_seq_len, DEVICE, ctx=ctx)
-player2 = PlayerState(model_p2, cfg_p2.max_seq_len, DEVICE, ctx=ctx)
+# Each player gets its own context with matching n_combos
+ctx_base = load_inference_context(args.data_dir)
+
+def make_ctx(cfg):
+    """Build per-player context, overriding n_combos to match model."""
+    from mimic.features import BTN7_N_CLASSES
+    ctx = dict(ctx_base)
+    n = cfg.n_controller_combos
+    if n == BTN7_N_CLASSES:
+        ctx["combo_map"] = {}
+        ctx["n_combos"] = n
+    elif n == 5:
+        ctx["combo_map"] = {
+            (1,0,0,0,0):0, (0,1,0,0,0):1, (0,0,1,0,0):2, (0,0,0,1,0):3,
+            (0,0,0,0,0):4, (0,0,0,0,1):4,
+            (1,0,0,0,1):0, (0,1,0,0,1):1, (0,0,1,0,1):2, (0,0,0,1,1):3,
+        }
+        ctx["n_combos"] = 5
+    return ctx
+
+ctx_p1 = make_ctx(cfg_p1)
+ctx_p2 = make_ctx(cfg_p2)
+player1 = PlayerState(model_p1, cfg_p1.max_seq_len, DEVICE, ctx=ctx_p1)
+player2 = PlayerState(model_p2, cfg_p2.max_seq_len, DEVICE, ctx=ctx_p2)
 
 # Dolphin
 replay_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "replays")
@@ -129,9 +150,9 @@ while True:
     _, ps1 = players[0]
     _, ps2 = players[1]
 
-    # Build frames from each player's perspective using shared build_frame
-    frame_p1 = build_frame(gs, player1.prev_sent, ctx)       # ego=ps1, opp=ps2
-    frame_p2 = build_frame_p2(gs, player2.prev_sent, ctx)    # ego=ps2, opp=ps1
+    # Build frames from each player's perspective with per-player context
+    frame_p1 = build_frame(gs, player1.prev_sent, ctx_p1)       # ego=ps1, opp=ps2
+    frame_p2 = build_frame_p2(gs, player2.prev_sent, ctx_p2)    # ego=ps2, opp=ps1
 
     if frame_p1 is None or frame_p2 is None:
         continue

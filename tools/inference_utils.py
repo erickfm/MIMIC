@@ -56,11 +56,47 @@ XFORM = {
 
 
 def load_mimic_model(checkpoint_path, device):
-    """Load a MIMIC FramePredictor from checkpoint.
+    """Load a MIMIC FramePredictor (or HAL bare state dict) from checkpoint.
 
     Returns (model, cfg) with model in eval mode on device.
     """
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+    # HAL bare state dict — no "config" key, just raw weights with module. prefix
+    if not isinstance(ckpt, dict) or "config" not in ckpt:
+        sd = {k.removeprefix("module."): v for k, v in ckpt.items()}
+        # Remap HAL key names → MIMIC FramePredictor key names
+        remap = {}
+        for k, v in sd.items():
+            nk = k
+            nk = nk.replace("stage_emb.", "encoder.stage_emb.")
+            nk = nk.replace("character_emb.", "encoder.char_emb.")
+            nk = nk.replace("action_emb.", "encoder.action_emb.")
+            nk = nk.replace("transformer.proj_down.", "encoder.proj.")
+            nk = nk.replace("transformer.drop.", "encoder.drop.")
+            nk = nk.replace("transformer.ln_f.", "final_norm.")
+            nk = nk.replace("transformer.h.", "blocks.")
+            nk = nk.replace(".attn.", ".self_attn.")
+            nk = nk.replace("shoulder_head.", "heads.shoulder_head.")
+            nk = nk.replace("c_stick_head.", "heads.cdir_head.")
+            nk = nk.replace("main_stick_head.", "heads.main_head.")
+            nk = nk.replace("button_head.", "heads.btn_head.")
+            remap[nk] = v
+        sd = remap
+        cfg = ModelConfig(
+            d_model=512, nhead=8, num_layers=6, dim_feedforward=2048,
+            dropout=0.2, max_seq_len=256, pos_enc="relpos",
+            num_stages=6, num_characters=27, num_actions=396, num_c_dirs=9,
+            hal_mode=True, hal_minimal_features=True, hal_controller_encoding=True,
+            encoder_type="hal_flat", n_controller_combos=5, n_stick_clusters=37,
+            no_self_inputs=False, no_opp_inputs=True,
+        )
+        model = FramePredictor(cfg)
+        model.load_state_dict(sd)
+        model.eval()
+        model.to(device)
+        return model, cfg
+
     cfg_dict = {k: v for k, v in ckpt["config"].items()
                 if k in ModelConfig.__dataclass_fields__}
     cfg = ModelConfig(**cfg_dict)
