@@ -170,7 +170,7 @@ python3 tools/slp_to_shards.py \
 
 ```bash
 python3 tools/run_mimic_via_hal_loop.py \
-  --checkpoint checkpoints/falco-7class-v2-full_best.pt \
+  --checkpoint checkpoints/falco-20260412-relpos-28k.pt \
   --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \
   --iso-path ./melee.iso \
   --data-dir data/falco_v2 \
@@ -182,8 +182,8 @@ python3 tools/run_mimic_via_hal_loop.py \
 
 ```bash
 python3 tools/head_to_head.py \
-  --p1-checkpoint checkpoints/falco-7class-v2-full_best.pt \
-  --p2-checkpoint checkpoints/falco-7class-v2-full_best.pt \
+  --p1-checkpoint checkpoints/falco-20260412-relpos-28k.pt \
+  --p2-checkpoint checkpoints/falco-20260412-relpos-28k.pt \
   --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \
   --iso-path ./melee.iso \
   --data-dir data/falco_v2 \
@@ -195,7 +195,7 @@ python3 tools/head_to_head.py \
 
 ```bash
 python3 tools/play_netplay.py \
-  --checkpoint checkpoints/falco-7class-v2-full_best.pt \
+  --checkpoint checkpoints/falco-20260412-relpos-28k.pt \
   --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \
   --iso-path ./melee.iso \
   --data-dir data/falco_v2 \

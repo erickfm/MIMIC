@@ -98,7 +98,7 @@ same machine). Pick a connect code (your personal one, e.g. `ERIK#456`):
 
 ```bash
 python3 tools/play_netplay.py \
-  --checkpoint checkpoints/falco-7class-v2-full_best.pt \
+  --checkpoint checkpoints/falco-20260412-relpos-28k.pt \
   --dolphin-path /path/to/dolphin-emu \
   --iso-path /path/to/melee.iso \
   --data-dir data/falco_v2 \

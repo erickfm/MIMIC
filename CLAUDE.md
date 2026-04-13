@@ -311,30 +311,23 @@ can also flag a non-standard recipe: `overfit`, `wavedash`, `small`,
 `longrun`, `lowdropout`, etc. Pick whatever makes this checkpoint
 recognizable next to others for the same character on the same day.
 
-Examples:
-- `fox-20260413-rope-32k.pt` — encoder-as-descriptor
-- `falco-20260415-relpos-32k.pt` — encoder-as-descriptor
-- `falco-20260413-wavedash-3k.pt` — overfit sanity-check run
-- `luigi-20260420-longrun-50k.pt` — extra-long training schedule
+Current best checkpoints (all in `checkpoints/`):
+- `fox-20260413-rope-32k.pt` — current best Fox (RoPE, self-inputs, val 0.77)
+- `falco-20260412-relpos-28k.pt` — current best Falco (relpos, val 0.68)
+- `cptfalcon-20260412-relpos-27k.pt` — current best CptFalcon (relpos, val 0.71)
+- `luigi-20260412-relpos-5k.pt` — current best Luigi (relpos, early-stopped, val ~1.0)
+- `fox-20260411-relpos-noself-28k.pt` — superseded Fox (no --self-inputs, kept for reference)
 
 Rationale: the old names (`hal-7class-v2-long`, `falco-7class-v2-full`,
-`cptfalcon-7class-v2`, `luigi-7class-v2-long`) carry no date and no
-distinguishing info — the "7class-v2" prefix is universal now, so it's
-noise. The new scheme makes the newest / best / longest-trained
-checkpoint obvious at a glance, and the descriptor slot reveals what's
-special about the run without needing to load the config.
+etc.) carried no date, no encoder info, and the "7class-v2" prefix was
+universal noise. All four legacy production checkpoints were retroactively
+renamed 2026-04-13 and all live references (`tools/discord_bot.py`,
+`tools/upload_models_to_hf.py`, `tools/play_netplay.py`, `README.md`,
+`docs/discord-bot-setup.md`) updated in the same commit. Research notes
+were left alone — they're historical records.
 
 **Set `--run-name` to `{char}-{YYYYMMDD}-{descriptor}`** when starting a new
 run (the step suffix gets appended when renaming the finished `_best.pt`).
-
-**Legacy checkpoints keep their old names** — don't retroactively rename.
-Most are still referenced from `tools/discord_bot.py` character map and
-`tools/upload_models_to_hf.py`, and breaking those silently isn't worth
-the cleanup.
-
-All `hal-*` prefixed checkpoints are MIMIC models trained with `--model hal`
-(the old naming — "hal" is the architecture preset, not the repo). The
-new convention drops the `hal-` prefix entirely.
 
 ## File Map
 
