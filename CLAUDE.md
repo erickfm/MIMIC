@@ -303,20 +303,28 @@ different weights). Do not confuse them.
 
 **Naming convention (new runs from 2026-04-13 onward):**
 
-    {char}-{YYYYMMDD}-{encoder}-{steps}k.pt
+    {char}-{YYYYMMDD}-{descriptor}-{steps}k.pt
+
+The `{descriptor}` slot is a free-form tag for whatever is most distinctive
+about the run — usually the position encoding (`rope`, `relpos`), but it
+can also flag a non-standard recipe: `overfit`, `wavedash`, `small`,
+`longrun`, `lowdropout`, etc. Pick whatever makes this checkpoint
+recognizable next to others for the same character on the same day.
 
 Examples:
-- `fox-20260413-rope-32k.pt` — Fox, trained 2026-04-13, RoPE position encoding, 32K steps
-- `falco-20260415-relpos-32k.pt` — Falco, relpos attention
-- `luigi-20260420-rope-5k.pt` — Luigi, early-stopped at 5K
+- `fox-20260413-rope-32k.pt` — encoder-as-descriptor
+- `falco-20260415-relpos-32k.pt` — encoder-as-descriptor
+- `falco-20260413-wavedash-3k.pt` — overfit sanity-check run
+- `luigi-20260420-longrun-50k.pt` — extra-long training schedule
 
 Rationale: the old names (`hal-7class-v2-long`, `falco-7class-v2-full`,
-`cptfalcon-7class-v2`, `luigi-7class-v2-long`) carry no date and no encoder
-info — the "7class-v2" prefix is universal now, so it's noise. The new
-scheme makes the newest / best / longest-trained checkpoint obvious at a
-glance, and reveals architecture without needing to load the config.
+`cptfalcon-7class-v2`, `luigi-7class-v2-long`) carry no date and no
+distinguishing info — the "7class-v2" prefix is universal now, so it's
+noise. The new scheme makes the newest / best / longest-trained
+checkpoint obvious at a glance, and the descriptor slot reveals what's
+special about the run without needing to load the config.
 
-**Set `--run-name` to `{char}-{YYYYMMDD}-{encoder}`** when starting a new
+**Set `--run-name` to `{char}-{YYYYMMDD}-{descriptor}`** when starting a new
 run (the step suffix gets appended when renaming the finished `_best.pt`).
 
 **Legacy checkpoints keep their old names** — don't retroactively rename.
