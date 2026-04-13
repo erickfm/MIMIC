@@ -506,8 +506,13 @@ async def announce_result(channel, req: MatchRequest, result: str, replay_path: 
         msg_lines.append(score_line.lstrip("\n"))
     msg = "\n".join(msg_lines)
 
+    # Don't publish a replay for results where no actual match took place —
+    # "no-opponent" and "failed" would otherwise upload a stale .slp left
+    # over from a previous run in the replays/ dir.
+    skip_replay = result in ("no-opponent", "failed")
+
     files = []
-    if replay_path and os.path.exists(replay_path):
+    if not skip_replay and replay_path and os.path.exists(replay_path):
         size = os.path.getsize(replay_path)
         if size < 25 * 1024 * 1024:  # Discord free-tier attachment limit
             files.append(discord.File(replay_path, filename=os.path.basename(replay_path)))
