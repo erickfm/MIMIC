@@ -463,24 +463,68 @@ def push_to_hf(staging: Path, repo_id: str) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Upload MIMIC models to HuggingFace Hub")
+    parser = argparse.ArgumentParser(
+        description="Upload MIMIC models to HuggingFace Hub",
+        epilog="By default this script is a dry run and never overwrites HF. "
+               "Use --only <char>[,<char>...] to push specific characters. "
+               "Use --all to rebuild and push every character (destructive — "
+               "overwrites existing model.pt + metadata for untouched chars).")
     parser.add_argument("--push", action="store_true",
                         help="Actually push to HF (default: build staging dir only)")
+    parser.add_argument("--only", type=str, default=None,
+                        help="Comma-separated character names to stage/push "
+                             "(e.g. 'fox' or 'fox,falco'). Other characters "
+                             "are untouched on HF.")
+    parser.add_argument("--all", action="store_true",
+                        help="Stage and push ALL characters. Required to "
+                             "overwrite characters that already exist on HF.")
     parser.add_argument("--repo", default="erickfm/MIMIC",
                         help="HuggingFace repo id (default: erickfm/MIMIC)")
     parser.add_argument("--keep-staging", action="store_true",
                         help="Don't delete _hf_staging/ after push")
     args = parser.parse_args()
 
-    staging = build_staging(CHARACTERS)
+    # Resolve which characters to stage
+    if args.only:
+        wanted = {c.strip().lower() for c in args.only.split(",")}
+        entries = [c for c in CHARACTERS if c.name in wanted]
+        missing = wanted - {c.name for c in entries}
+        if missing:
+            print(f"ERROR: unknown character name(s) in --only: {sorted(missing)}")
+            print(f"  available: {[c.name for c in CHARACTERS]}")
+            sys.exit(1)
+    elif args.all:
+        entries = CHARACTERS
+    else:
+        print("ERROR: must pass --only <char>[,...] or --all")
+        print(f"  available characters: {[c.name for c in CHARACTERS]}")
+        print("  --only falco             # stage/push just Falco")
+        print("  --only fox,falco         # stage/push Fox + Falco")
+        print("  --all                    # stage/push every character (destructive)")
+        sys.exit(2)
+
+    print(f"Staging characters: {[c.name for c in entries]}")
+    staging = build_staging(entries)
 
     if args.push:
+        # Safety net: refuse to --all without a second confirmation flag if
+        # anyone forgets just how destructive that is.
+        if args.all and not args.only:
+            print("\n⚠ --all will OVERWRITE every character on "
+                  f"https://huggingface.co/{args.repo}")
+            print("   Press Ctrl-C in the next 3 seconds to abort ...")
+            import time
+            try:
+                time.sleep(3)
+            except KeyboardInterrupt:
+                print("Aborted.")
+                sys.exit(0)
         push_to_hf(staging, args.repo)
         if not args.keep_staging:
             shutil.rmtree(staging)
             print(f"Removed staging dir {staging}")
     else:
-        print(f"\nDry run complete. Inspect {staging} then run with --push to upload.")
+        print(f"\nDry run complete. Inspect {staging} then re-run with --push to upload.")
 
 
 if __name__ == "__main__":
