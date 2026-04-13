@@ -38,6 +38,13 @@ import torch
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STAGING_DIR = REPO_ROOT / "_hf_staging"
 
+# Load .env for HF_TOKEN / HUGGING_FACE_HUB_TOKEN so `--push` just works.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(REPO_ROOT / ".env")
+except ImportError:
+    pass
+
 
 @dataclass
 class CharacterEntry:

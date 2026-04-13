@@ -1,108 +1,40 @@
-# MIMIC: Melee Imitation Model for Input Cloning
+# MIMIC
 
-> **For agent/developer orientation, see [CLAUDE.md](CLAUDE.md).** It covers
-> naming gotchas, shard alignment pitfalls, data directories, and common
-> mistakes. This README is for humans.
+**Behavior-cloned Super Smash Bros. Melee bots, trained from human Slippi replays.**
 
-MIMIC is a behavior-cloning bot for Super Smash Bros. Melee. It watches human
-Slippi replays and learns to predict controller inputs from game state. At
-inference it drives a virtual GameCube controller through Dolphin via libmelee
-at 60 fps. The same model can play a CPU opponent locally or join a human
-opponent over **Slippi Online Direct Connect**, mediated by an included
-[Discord bot](#play-against-the-bot-on-discord).
+MIMIC learns to map game state to controller inputs by watching thousands of
+human matches. At inference it drives a virtual GameCube controller through
+Dolphin via [libmelee](https://github.com/altf4/libmelee) at 60 fps. Each
+trained bot can play a CPU opponent locally, run bot-vs-bot dittos, or join
+a human opponent over **Slippi Online Direct Connect** — optionally mediated
+by a Discord bot that queues matches.
 
-The reference implementation is [HAL](https://github.com/ericyuegu/hal) by
-Eric Gu, which MIMIC reproduces and extends with a 7-class button head, v2
-shard alignment, and fixes for several silent inference bugs that plagued
-earlier BC bots (including the missing digital L press that prevented
-wavedashes — see research notes 2026-04-13).
+Four character models are released: **Fox, Falco, Captain Falcon, Luigi**.
+They execute wavedashes, shield grabs, dash dances, rapid jabs, and aerials.
+In bot-vs-bot Luigi dittos, 70–83% of jumps convert into wavedashes.
+
+Weights on HuggingFace: **[erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC)**
 
 ---
 
-## Current state (2026-04-13)
+## Results
 
-Trained character-specific models for Fox, Falco, Captain Falcon, and Luigi.
-All play actively in Dolphin (no stuck modes, diverse actions) and execute
-advanced techniques including **wavedashes**, shield grabs, dash dances, and
-rapid jabs. In bot-vs-bot Luigi dittos the models convert 70–83% of jumps
-into wavedashes, matching real high-level Luigi play.
+| Character | Training games | Val btn F1 | Val main-stick F1 | Val loss |
+|---|---|---|---|---|
+| Fox            | 17,319 | 87.7% | ~55% | 0.77 |
+| Falco          |  9,110 | 88.2% | 58.5% | 0.68 |
+| Captain Falcon |  9,404 | 89.9% | 52.2% | 0.71 |
+| Luigi          |  1,951 | ~91%  | ~60% | ~1.0 |
 
-| Character | Games trained | Val btn F1 | Sample replay |
-|---|---|---|---|
-| Fox | 17,319 | — (10K steps only, legacy) | — |
-| Falco | 9,110 | 88.2% | `replays/Game_20260413T035445.slp` |
-| Captain Falcon | 9,404 | 89.9% | `replays/Game_20260413T040411.slp` |
-| Luigi | 1,951 (early-stop) | ~91% | `replays/Game_20260413T041156.slp` |
-
-Best-val checkpoint per character is bundled as `mimic_best_checkpoints.zip`
-(828 MB, gitignored).
+Wavedash conversion rates in bot-vs-bot dittos on Final Destination:
+Luigi 70–83%, Falco 13–33%, CptFalcon 16%. See `replays/` for sample `.slp`
+files playable in Slippi Playback.
 
 ---
 
-## Architecture
+## Install
 
-Using `--model hal`, MIMIC matches HAL's GPTv5Controller (~19.95M params):
-
-```
-Slippi Frame ──► HALFlatEncoder (Linear 166→512) ──► 512-d per-frame vector
-                                                          │
-256-frame window ──► + Relative Position Encoding ────────┘
-                         │
-                    6× Pre-Norm Causal Transformer Blocks (512-d, 8 heads)
-                         │
-                    Autoregressive Output Heads (with detach)
-                         │
-              ┌──────────┼──────────┬───────────┐
-           shoulder(3) c_stick(9) main_stick(37) buttons(7)
-```
-
-### Button head (7-class)
-
-MIMIC uses a 7-class button vocabulary derived from Melee's input resolution
-rules, distinct from HAL's 5-class (`A, B, Jump, Z, None`):
-
-| Class | Meaning |
-|---|---|
-| 0 | A |
-| 1 | B |
-| 2 | Z |
-| 3 | JUMP (X or Y) |
-| 4 | TRIG (digital L or R) |
-| 5 | A_TRIG (shield grab) |
-| 6 | NONE |
-
-**The TRIG class must actually press the digital L button** (`ctrl.press_button(BUTTON_L)`),
-not just send the analog shoulder value. Analog shoulder triggers shielding
-but NOT airdodge, L-cancel, tech, or wavedash — those need the digital press.
-HAL's 5-class head has no TRIG class and cannot airdodge by design, which is
-why HAL-lineage bots never demonstrated wavedashes. This was silently broken
-in MIMIC until 2026-04-13 — see `docs/research-notes-2026-04-13.md`.
-
-### v2 shard alignment
-
-The 2026-04-11c shift fixed a training-time bug where the game state at frame
-`i` already reflected the button press at frame `i` (because melee-py returns
-post-frame state alongside pre-frame controller inputs). v2 shards in
-`data/*_v2/` have targets shifted forward by 1 frame — `target[i] = buttons[i+1]`
-— so the model predicts what to press *next* given the current state, which
-matches inference semantics. **Train with `--reaction-delay 0` and NO
-`--controller-offset` on v2 shards.** See `docs/research-notes-2026-04-11c.md`.
-
-### Input features
-
-9 numeric features per player (ego + opponent = 18 total):
-`percent, stock, facing, invulnerable, jumps_left, on_ground, shield_strength, position_x, position_y`
-
-Plus categorical embeddings: stage(4d), 2× character(12d), 2× action(32d).
-Plus controller state from previous frame as a 56-dim one-hot
-(37 stick + 9 c-stick + 7 button + 3 shoulder). Total input per frame: 166 →
-projected to 512.
-
----
-
-## Setup
-
-Fresh machine with an NVIDIA GPU:
+Fresh Linux box with an NVIDIA GPU:
 
 ```bash
 git clone https://github.com/erickfm/MIMIC.git
@@ -110,63 +42,42 @@ cd MIMIC
 bash setup.sh
 ```
 
-`setup.sh` handles:
-- Git LFS pull (Dolphin AppImage, sample shards)
-- Python dependencies (torch, melee, `discord.py`, `python-dotenv`, py-slippi)
-- Slippi-capable Dolphin extracted into `./emulator/`
-- Melee 1.02 NTSC ISO downloaded to `./melee.iso`
-- Training data into `./data/fox_hal_full/` (or `--rsync` from another machine)
-- GitHub CLI + Claude Code
-- Headless display (Xvfb on `:99`, auto-started and added to `.bashrc`)
-- `.env` copied from `.env.example` for the Discord bot
-- `./slippi_home/Slippi/` skeleton created (you drop `user.json` there)
-
-After `setup.sh`, verify your GPU:
+`setup.sh` installs Python deps, pulls the Dolphin AppImage via Git LFS,
+downloads the Melee 1.02 NTSC ISO, starts Xvfb (for headless Dolphin), and
+copies `.env.example` to `.env`. Verify the GPU afterward:
 
 ```bash
 python3 -c "import torch; print(torch.cuda.get_device_name(0))"
 ```
 
----
-
-## Training
-
-v2 shards, relpos, `--self-inputs`, 7-class button head:
+To pull pretrained checkpoints from HuggingFace:
 
 ```bash
-# Single GPU, effective batch 512 via grad accum
-python3 train.py \
-  --model hal --encoder hal_flat \
-  --hal-mode --hal-minimal-features --hal-controller-encoding \
-  --stick-clusters hal37 --plain-ce \
-  --lr 3e-4 --batch-size 512 \
-  --max-samples 16777216 \
-  --data-dir data/fox_hal_v2 \
-  --reaction-delay 0 --self-inputs \
-  --run-name my-run \
-  --no-warmup --cosine-min-lr 1e-6
+huggingface-cli download erickfm/MIMIC --local-dir ./hf_checkpoints
 ```
 
-Key settings: AdamW, no warmup, CosineAnnealingLR (eta_min=1e-6), dropout
-0.2, weight decay 0.01, gradient clip 1.0, sequence length 256, BF16 AMP
-with FP32 upcast for relpos attention. 32K steps is typical (~2h on an
-RTX 5090).
+Each character directory under `hf_checkpoints/` contains `model.pt` plus
+all metadata JSONs needed for inference — no extra data downloads required.
 
-Build v2 shards from .slp replays:
+### Tokens (optional, for training and model uploads)
 
-```bash
-python3 tools/slp_to_shards.py \
-  --slp-dir data/falco_all_slp --meta-dir data/fox_hal_full \
-  --repo dummy --no-upload --staging-dir data/falco_v2 --keep-staging \
-  --hal-norm data/fox_hal_full/hal_norm.json \
-  --character 22 --shard-gb 0.8 --val-frac 0.1 --workers 8
+`train.py` and `tools/upload_models_to_hf.py` both load `.env` at startup,
+so any of the following placed in `.env` are picked up automatically:
+
+```env
+WANDB_API_KEY=...             # from https://wandb.ai/authorize
+HF_TOKEN=...                  # from https://huggingface.co/settings/tokens
 ```
+
+This means on a fresh machine you can just `scp .env` over and training
+runs log to wandb and model uploads push to HuggingFace without any
+separate `wandb login` / `huggingface-cli login` step.
 
 ---
 
-## Inference
+## Play
 
-### Local: bot vs CPU level 9
+### Against a CPU locally
 
 ```bash
 python3 tools/run_mimic_via_hal_loop.py \
@@ -178,7 +89,7 @@ python3 tools/run_mimic_via_hal_loop.py \
   --stage FINAL_DESTINATION
 ```
 
-### Local: bot vs bot (watchable ditto)
+### Bot vs bot (watchable ditto)
 
 ```bash
 python3 tools/head_to_head.py \
@@ -191,7 +102,7 @@ python3 tools/head_to_head.py \
   --stage FINAL_DESTINATION
 ```
 
-### Online: bot joins a Slippi Direct Connect lobby
+### Against a human over Slippi netplay
 
 ```bash
 python3 tools/play_netplay.py \
@@ -203,156 +114,146 @@ python3 tools/play_netplay.py \
   --connect-code YOUR_CODE#123
 ```
 
-You enter the bot's code (from `slippi_home/Slippi/user.json`) on your side,
-the bot enters yours on its side, and Slippi rollback netplay pairs you up.
-
-**Don't run inference while training on the same GPU.** Frame drops from GPU
-contention will make gameplay look broken when the model is actually fine.
+You enter the bot's connect code on your side; the bot enters yours.
+Slippi rollback netplay pairs you up.
 
 ---
 
-## Play against the bot on Discord
+## Discord bot
 
-MIMIC ships with a Discord bot (`tools/discord_bot.py`) that lets anyone
-request a match via prefix command. The bot queues requests, spawns a
-Dolphin instance per match, joins the user's Slippi Direct Connect lobby,
-plays the game, and uploads the replay file back to the channel.
+`tools/discord_bot.py` is a Discord front-end that lets anyone queue a match
+against the bot with a prefix command. It spawns a Dolphin instance per
+match, joins the user's Slippi Direct Connect lobby, plays the game, and
+uploads the saved `.slp` replay back to the channel.
 
-**One-time setup:**
+```
+!play <character> <your_code>   # queue a match (e.g. !play falco WAVE#666)
+!queue                          # show what's playing + queued
+!cancel                         # remove your pending match
+!info                           # bot's connect code, character list, usage
+```
 
-1. Run `bash setup.sh` on a machine with a GPU, Slippi Dolphin, the ISO,
-   and the character checkpoints.
-2. Create a Slippi account for the bot via Slippi Launcher. Log in once
-   to generate `user.json`. Copy it to `./slippi_home/Slippi/user.json`
-   in the repo.
-3. Create a Discord application at https://discord.com/developers/applications
-   → Bot → Reset Token. Enable **Message Content Intent**. Invite the bot
-   to your server with this OAuth URL (replacing the client id):
-   ```
-   https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot&permissions=51200
-   ```
-4. Edit `.env` (auto-copied from `.env.example` by setup.sh):
+Supported characters: `FOX`, `FALCO`, `CPTFALCON` (aliases `falcon`, `cf`),
+`LUIGI`.
+
+Setup (one-time per machine):
+
+1. Create a Discord application at <https://discord.com/developers/applications>,
+   reset the bot token, enable **Message Content Intent**, and invite the bot
+   to your server with `permissions=51200`.
+2. Create a Slippi account via Slippi Launcher, log in once to generate
+   `user.json`.
+3. Fill in `.env` — see `.env.example` for the full list. Minimally:
    ```env
-   DISCORD_BOT_TOKEN=your_bot_token
+   DISCORD_BOT_TOKEN=...
    BOT_SLIPPI_CODE=MIMIC#01
-   SLIPPI_HOME=./slippi_home
-   DOLPHIN_PATH=./emulator/squashfs-root/usr/bin/dolphin-emu
-   ISO_PATH=./melee.iso
+   SLIPPI_UID=...
+   SLIPPI_PLAY_KEY=...
+   SLIPPI_CONNECT_CODE=MIMIC#01
    ```
-5. Run the bot: `python3 tools/discord_bot.py`
+   The bot synthesizes `slippi_home/Slippi/user.json` from these on startup.
+4. Run: `python3 tools/discord_bot.py`
 
-**Commands (prefix `!`):**
-
-- `!play <character> <your_code>` — queue a match. E.g. `!play falco ERIK#456`.
-  Characters: `FOX`, `FALCO`, `CPTFALCON` (aliases: `falcon`, `cf`), `LUIGI`.
-- `!queue` — show what's playing and what's queued.
-- `!cancel` — remove your pending match.
-- `!info` — show the bot's own connect code, character list, and usage.
-
-Full setup guide with troubleshooting: [`docs/discord-bot-setup.md`](docs/discord-bot-setup.md).
+Full troubleshooting guide: [`docs/discord-bot-setup.md`](docs/discord-bot-setup.md).
 
 ---
 
-## Portability
+## Train your own
 
-The repo is designed to be `rsync`/`scp`-able to any Linux box with an
-NVIDIA GPU:
+```bash
+python3 train.py \
+  --model hal-rope --encoder hal_flat \
+  --hal-mode --hal-minimal-features --hal-controller-encoding \
+  --stick-clusters hal37 --plain-ce \
+  --lr 3e-4 --batch-size 512 \
+  --max-samples 16777216 \
+  --data-dir data/fox_hal_v2 \
+  --reaction-delay 0 --self-inputs \
+  --run-name fox-$(date +%Y%m%d)-rope \
+  --no-warmup --cosine-min-lr 1e-6
+```
 
-- `.env` uses **relative paths** (`./emulator/...`, `./melee.iso`,
-  `./slippi_home`). The Discord bot resolves them against the repo root
-  at runtime.
-- `slippi_home/` is gitignored and bundled with the repo, so uploading the
-  directory to a new machine carries the Slippi credentials with it.
-- `setup.sh` is idempotent — re-running it on a new machine installs the
-  same dependencies, extracts Dolphin, and downloads the ISO without
-  touching your `.env` or `slippi_home/`.
-- All paths referenced in CLI scripts default to the repo-relative versions
-  described in `.env.example`.
+A 32K-step run at batch 512 is typical — about 30 minutes on an RTX 5090
+with RoPE, or ~60 minutes with relpos attention. Training logs to
+[Weights & Biases](https://wandb.ai/) (set `WANDB_API_KEY` in `.env`).
+
+To build fresh v2 shards from `.slp` replays:
+
+```bash
+python3 tools/slp_to_shards.py \
+  --slp-dir data/falco_all_slp --meta-dir data/fox_hal_full \
+  --staging-dir data/falco_v2 --hal-norm data/fox_hal_full/hal_norm.json \
+  --character 22 --shard-gb 0.8 --val-frac 0.1 --workers 8
+```
 
 ---
 
-## Project structure
+## Architecture
+
+~20M-parameter causal transformer, matching HAL's GPTv5Controller config:
+
+- **Encoder**: `Linear(166 → 512)` over a 166-dim frame vector:
+  stage (4) + 2× character (12) + 2× action (32) + gamestate (18) +
+  controller (56 one-hot: 37 stick + 9 c-stick + 7 button + 3 shoulder)
+- **Transformer**: 6 layers, 8 heads, d=512, dropout 0.1 or 0.2,
+  256-frame context (~4.3s), RoPE *or* Shaw relative position attention
+- **Heads (autoregressive with detach)**: shoulder(3) → c_stick(9) →
+  main_stick(37 k-means clusters) → buttons(7)
+
+The 7-class button vocabulary extends HAL's 5-class `{A, B, Jump, Z, None}`
+with `TRIG` (digital L/R) and `A_TRIG` (shield grab). The digital press on
+TRIG is what enables airdodge, L-cancel, tech, and **wavedash** — HAL's
+5-class head has no TRIG class at all.
+
+v2 shards shift button targets forward by one frame
+(`target[i] = buttons[i+1]`) so the model learns to predict the *next*
+input given the current state, rather than cheat via post-frame action
+state encoding the answer. Train with `--reaction-delay 0` on v2 shards.
+
+---
+
+## Project layout
 
 ```
 .
-├── CLAUDE.md               # Agent/developer orientation (read first!)
-├── README.md               # This file
-├── .env.example            # Template for Discord bot config
-├── setup.sh                # One-shot machine setup
-├── train.py                # Training loop (v2 shards, relpos, BF16 AMP)
-│
-├── mimic/                  # Core library
-│   ├── model.py            # FramePredictor, HALPredictionHeads, relpos attention
-│   ├── frame_encoder.py    # HALFlatEncoder
-│   ├── features.py         # 7-class button collapse, cluster centers, norm
-│   └── dataset.py          # StreamingMeleeDataset
-│
-├── tools/                  # Inference, data pipeline, diagnostics
-│   ├── play_netplay.py     # Bot vs human over Slippi Direct Connect
-│   ├── discord_bot.py      # Discord frontend (prefix commands + queue)
-│   ├── run_mimic_via_hal_loop.py  # Bot vs CPU locally
-│   ├── head_to_head.py     # Bot vs bot (watchable ditto)
-│   ├── inference_utils.py  # Shared inference (build_frame, decode_and_press)
-│   ├── slp_to_shards.py    # .slp replays → v2 shards
-│   ├── extract_wavedashes.py  # Build wavedash-only diagnostic dataset
-│   ├── inspect_frame.py    # Per-frame model input/output inspector
-│   ├── validate_checkpoint.py
-│   └── verify_hal_pipeline.py
-│
-├── docs/                   # Research notes (2026-04-07+)
-│   ├── discord-bot-setup.md
-│   ├── research-notes-2026-04-13.md   # TRIG button L-press fix
-│   ├── research-notes-2026-04-12.md   # Multi-character v2 training
-│   ├── research-notes-2026-04-11c.md  # v2 shard target shift
-│   └── archive/                        # 2026-03-14 through 2026-04-06
-│
-├── checkpoints/            # Best-val per character (v2 run)
-├── data/                   # Shards (fox/falco/cptfalcon/luigi _v2)
-├── emulator/               # Extracted Slippi Dolphin (from setup.sh)
-├── slippi_home/            # Bot's Slippi user.json (gitignored!)
-└── replays/                # Saved .slp replays from inference runs
+├── train.py                          # Training entry point
+├── mimic/                            # Core library
+│   ├── model.py                      # FramePredictor, attention variants, heads
+│   ├── frame_encoder.py              # Frame → 512-d encoder
+│   ├── features.py                   # Feature encoding, 7-class collapse
+│   └── dataset.py                    # Shard streaming
+├── tools/
+│   ├── run_mimic_via_hal_loop.py     # Bot vs CPU (local)
+│   ├── head_to_head.py               # Bot vs bot (local)
+│   ├── play_netplay.py               # Bot vs human (Slippi netplay)
+│   ├── discord_bot.py                # Discord queue/frontend
+│   ├── inference_utils.py            # Shared decode + frame building
+│   ├── slp_to_shards.py              # .slp → v2 shards
+│   └── upload_models_to_hf.py        # Package + push to HuggingFace
+├── docs/
+│   ├── discord-bot-setup.md          # Full Discord bot setup guide
+│   └── research-notes-*.md           # Dev journal (chronological)
+├── checkpoints/                      # Best-val per character
+├── data/                             # Training shards (fox/falco/... _v2)
+├── emulator/                         # Dolphin AppImage (via Git LFS)
+├── slippi_home/                      # Bot's Slippi credentials (gitignored)
+└── replays/                          # Saved .slp from inference runs
 ```
 
 ---
 
-## Research notes & known pitfalls
+## Contributing
 
-The `docs/` directory is a chronological journal. Notable recent entries:
-
-- **2026-04-13** — The TRIG button L-press fix. Every 7-class model trained
-  before this date was incapable of airdodge/wavedash/L-cancel/tech because
-  `decode_and_press` never called `press_button(BUTTON_L)`. Post-fix Luigi
-  dittos produce wavedashes on 70-83% of jumps.
-- **2026-04-12** — Multi-character v2 training (Falco, CptFalcon, Luigi)
-  and bot-vs-bot ditto validation.
-- **2026-04-11c** — The v2 shard target shift. Post-frame game state leaks
-  button presses in old shards, making the model memorize action→button
-  rather than learn to initiate actions. Fixed by shifting targets forward
-  by 1 frame in `tools/slp_to_shards.py`.
-
-Historical notes in `docs/archive/` (2026-03-14 through 2026-04-06) contain
-claims that were later disproven (e.g. "HAL doesn't overfit", "26.3M params",
-"shoulder is analog-only"). Don't treat specific numbers in the archive as
-ground truth — verify against code.
-
----
-
-## Dependencies
-
-Core:
-```bash
-pip install torch numpy pandas pyarrow wandb tensordict huggingface_hub melee==0.45.1 py-slippi
-```
-
-Discord bot (optional):
-```bash
-pip install -r requirements-discord.txt   # discord.py, python-dotenv
-```
-
-Or just run `bash setup.sh` which installs everything.
-
----
+See [`CLAUDE.md`](CLAUDE.md) for a contributor's orientation — naming
+conventions, shard alignment pitfalls, training gotchas, and the reasoning
+behind architectural choices. Research notes in `docs/` document how we
+got here.
 
 ## License
 
-See [LICENSE](LICENSE).
+See [`LICENSE`](LICENSE).
+
+## Credits
+
+Architecture and training recipe reproduced from [HAL](https://github.com/ericyuegu/hal)
+by Eric Gu. Slippi / libmelee by the [Project Slippi](https://slippi.gg/) team.

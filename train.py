@@ -8,6 +8,13 @@
 
 import sys
 import os
+# Load .env so WANDB_API_KEY / HF_TOKEN / HUGGING_FACE_HUB_TOKEN flow through
+# to wandb.init() and huggingface_hub without a separate login step.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass
 import math
 import time
 import argparse
