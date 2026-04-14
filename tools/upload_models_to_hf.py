@@ -73,20 +73,20 @@ CHARACTERS: list[CharacterEntry] = [
         name="fox",
         display="Fox",
         melee_enum="FOX",
-        checkpoint=REPO_ROOT / "checkpoints/fox-20260413-rope-32k.pt",
+        checkpoint=REPO_ROOT / "checkpoints/fox-20260414-relpos-56k.pt",
         data_dir=REPO_ROOT / "data/fox_v2",
         games_trained=17319,
-        val_btn_f1="87.7%",
+        val_btn_f1="87.1%",
         val_main_f1="~55%",
         val_loss="0.77",
         training_notes=(
-            "Trained 2026-04-13, fox-rope-v2 run. v2 shards, RoPE position "
-            "encoding (hal-rope preset), --self-inputs, dropout 0.1, 32K "
-            "steps at batch 512. Replaces the legacy hal-7class-v2-long "
-            "checkpoint which was trained without --self-inputs and stuck "
-            "at val loss 2.27. The self-inputs flag was the real fix — "
-            "RoPE vs relpos is secondary. Metrics land alongside "
-            "Falco/CptFalcon/Luigi."
+            "Trained 2026-04-14, fox-20260414-relpos run. v2 shards, Shaw "
+            "relative-position attention (mimic preset), --self-inputs, "
+            "dropout 0.2, 65K steps at batch 512 (2x the standard schedule). "
+            "Replaces the yesterday's RoPE Fox, which matched this on val "
+            "metrics but relpos won the 2026-04-14 sweep on Falco so we "
+            "standardized on it for all new runs. Best checkpoint is the "
+            "step 55692 snapshot, closest to the lowest measured val loss."
         ),
     ),
     CharacterEntry(
@@ -96,15 +96,18 @@ CHARACTERS: list[CharacterEntry] = [
         checkpoint=REPO_ROOT / "checkpoints/falco-20260412-relpos-28k.pt",
         data_dir=REPO_ROOT / "data/falco_v2",
         games_trained=9110,
-        val_btn_f1="88.2%",
-        val_main_f1="58.5%",
-        val_loss="0.68",
+        val_btn_f1="87.4%",
+        val_main_f1="56.3%",
+        val_loss="0.7374",
         training_notes=(
             "Trained 2026-04-12 on the full Falco HuggingFace set (10K files "
             "→ 9110 games after quality filters). v2 shards, relpos, "
-            "--self-inputs, 32K steps at batch 512. In bot-vs-bot dittos, "
-            "wavedashes on ~25-50% of jumps, rapid-jabs, dash-dances, "
-            "and forward-aerials actively."
+            "--self-inputs, 32K steps at batch 512. Kept over the "
+            "2026-04-14 long-run re-train because doubling training to 65K "
+            "overtrained — new run landed at val 0.766 vs this one's 0.737. "
+            "9K games × 65K steps = ~3600 reps/game, past the sweet spot. "
+            "In bot-vs-bot dittos, wavedashes on ~25-50% of jumps, "
+            "rapid-jabs, dash-dances, and forward-aerials actively."
         ),
     ),
     CharacterEntry(

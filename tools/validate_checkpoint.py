@@ -179,7 +179,8 @@ def load_mimic_model(checkpoint_path, device):
                 if k in ModelConfig.__dataclass_fields__}
     cfg = ModelConfig(**cfg_dict)
     model = FramePredictor(cfg).to(device)
-    model.load_state_dict(ckpt["model_state_dict"])
+    sd = {k.removeprefix("_orig_mod."): v for k, v in ckpt["model_state_dict"].items()}
+    model.load_state_dict(sd)
     model.eval()
     return model, cfg
 

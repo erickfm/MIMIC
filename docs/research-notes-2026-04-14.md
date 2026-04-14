@@ -80,3 +80,47 @@ apparently can't match them at this scale on this data.
 
 - All `falco-20260414-*` intermediate + best checkpoints from the four
   sweep variants. None were worth keeping.
+
+---
+
+## Training results (Fox + Falco long runs)
+
+**Fox long run (`fox-20260414-relpos`, 65k steps, relpos):**
+- Best measured val loss: 0.7634 at step 56290 (single-point outlier; stable minima ~0.77)
+- Best-loss proxy checkpoint: step 55692 (delta 598 from best val)
+- Renamed to `fox-20260414-relpos-56k.pt`
+- Marginal improvement over yesterday's Fox RoPE baseline (~0.77 there). Relpos + long
+  training is modestly better but not dramatically so, consistent with the Fox-specific
+  finding that relpos and RoPE tied on this data (unlike Falco where relpos won).
+
+**Falco long run (`falco-20260414-relpos`, 65k steps, relpos):**
+- Best measured val loss: **0.7660** at step 52390
+- **Worse** than the existing production `falco-20260412-relpos-28k.pt` (measured val
+  0.7374 at step 28096 from its own training log).
+- 9,110 games × 65k steps = ~3600 reps/game, past the sweet spot (HAL's ~1800 reps/game
+  is the canonical target; doubling it overtrained).
+- Decision: **discard the new Falco run, keep the existing -28k checkpoint on HF.**
+
+Also: the old `val_loss="0.68"` for Falco in `upload_models_to_hf.py` was just wrong —
+real value from the training log was 0.7374. Fixed the metadata.
+
+## Upload action
+
+- **Fox**: pushed `fox-20260414-relpos-56k.pt` → `erickfm/MIMIC/fox/` via
+  `upload_models_to_hf.py --only fox --push`.
+- **Falco**: left `erickfm/MIMIC/falco/` alone (the `falco-20260412-relpos-28k.pt` is
+  already near-optimal). Metadata strings in `upload_models_to_hf.py` updated to reflect
+  the correct val_loss=0.7374 and the negative long-run result.
+- CptFalcon + Luigi: untouched.
+
+## Code changes
+
+- `train.py` now tracks `best_val_loss` alongside `best_val_f1` and writes
+  `{run_name}_bestloss.pt` whenever val total loss hits a new minimum. Earlier runs
+  (including today's Fox) only had `_best.pt` (by btn F1), so for Fox I had to reconstruct
+  the best-loss checkpoint from the nearest step snapshot. Falco's future re-runs and
+  any other character training will auto-save `_bestloss.pt` going forward.
+- `tools/validate_checkpoint.py:load_mimic_model` now strips the `_orig_mod.` prefix
+  from state-dict keys, so it actually loads torch.compile-produced checkpoints. (Was
+  a one-line bug that had nothing to do with the rename; surfaced when I tried to use
+  it to A/B the Falco candidates.)
