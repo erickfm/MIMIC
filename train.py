@@ -950,6 +950,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     _oom_retries = 0
     best_val_f1 = -1.0
+    best_val_loss = float("inf")
     _log(f"\n=== Training {max_steps} steps ===")
     _target_hit = False
     for step in range(start_step + 1, max_steps + 1):
@@ -1137,29 +1138,40 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                      f"cf1={val_avg['val/cdir_f1']:.1%}  "
                      f"(batches={val_ct})")
                 cur_val_f1 = val_avg.get('val/btn_f1', 0.0)
+                cur_val_loss = val_avg.get('val/total', float("inf"))
+                # Helper so we save the same ckpt dict for both criteria
+                def _build_best_ckpt():
+                    _cfg_save = {**cfg.__dict__, "model_preset": model_preset, "run_name": run_name}
+                    c = {
+                        "global_step":          step,
+                        "model_state_dict":     _raw_model.state_dict(),
+                        "optimizer_state_dict": optimiser.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
+                        "loss_weights":         loss_weights.cpu(),
+                        "norm_stats":           ds.norm_stats,
+                        "config":               _cfg_save,
+                    }
+                    if stick_centers_np is not None:
+                        c["stick_centers"] = stick_centers_np.tolist()
+                    if shoulder_centers_np is not None:
+                        c["shoulder_centers"] = shoulder_centers_np.tolist()
+                    if hal_controller_encoding and _combo_map:
+                        c["controller_combos"] = [list(c_) for c_ in sorted(_combo_map.keys(), key=_combo_map.get)]
+                    return c
                 if cur_val_f1 > best_val_f1:
                     best_val_f1 = cur_val_f1
                     if _is_main:
                         os.makedirs("checkpoints", exist_ok=True)
                         best_path = f"checkpoints/{run_name}_best.pt"
-                        _cfg_save = {**cfg.__dict__, "model_preset": model_preset, "run_name": run_name}
-                        best_ckpt = {
-                            "global_step":          step,
-                            "model_state_dict":     _raw_model.state_dict(),
-                            "optimizer_state_dict": optimiser.state_dict(),
-                            "scheduler_state_dict": scheduler.state_dict(),
-                            "loss_weights":         loss_weights.cpu(),
-                            "norm_stats":           ds.norm_stats,
-                            "config":               _cfg_save,
-                        }
-                        if stick_centers_np is not None:
-                            best_ckpt["stick_centers"] = stick_centers_np.tolist()
-                        if shoulder_centers_np is not None:
-                            best_ckpt["shoulder_centers"] = shoulder_centers_np.tolist()
-                        if hal_controller_encoding and _combo_map:
-                            best_ckpt["controller_combos"] = [list(c) for c in sorted(_combo_map.keys(), key=_combo_map.get)]
-                        torch.save(best_ckpt, best_path)
+                        torch.save(_build_best_ckpt(), best_path)
                         _log(f"  -- new best val f1={cur_val_f1:.1%} → {best_path}")
+                if cur_val_loss < best_val_loss:
+                    best_val_loss = cur_val_loss
+                    if _is_main:
+                        os.makedirs("checkpoints", exist_ok=True)
+                        best_loss_path = f"checkpoints/{run_name}_bestloss.pt"
+                        torch.save(_build_best_ckpt(), best_loss_path)
+                        _log(f"  -- new best val loss={cur_val_loss:.4f} → {best_loss_path}")
                 if target_val_f1 and cur_val_f1 >= target_val_f1:
                     _elapsed = time.time() - t0
                     _log(f"TARGET REACHED: val_f1={cur_val_f1:.4f} at step {step} in {_elapsed:.1f}s")
