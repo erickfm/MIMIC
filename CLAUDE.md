@@ -520,15 +520,17 @@ This is Eric Gu's original HAL codebase. Key files:
     `DISPLAY` is set in the environment the Discord bot / play_netplay.py
     inherits.
 
-17. **Headless Dolphin FPS is CPU-bound under Xvfb.** Xvfb has no GPU
-    passthrough, so Dolphin's OpenGL backend falls back to llvmpipe software
-    rasterization and burns ~6 CPU cores rendering a framebuffer nobody is
-    watching. Symptom: match connects fine, ping is normal, but in-game FPS
-    tanks. The obvious fix — `gfx_backend="Null"` — does NOT work on the
-    Slippi Ishiiruka netplay build: libmelee's `Console.__init__` raises
-    `ValueError('Null video requires mainline or ExiAI Ishiiruka.')`
-    (`melee/console.py:471`). Tried and reverted 2026-04-14. Real fixes
-    would be (a) hardware-GL via `xserver-xorg-video-dummy` + nvidia EGL,
-    (b) patching the Dolphin ini directly after libmelee writes it and
-    bypassing the libmelee check, or (c) running netplay on a host with a
-    real display. Until then, slow in-container FPS is expected.
+17. **Use `gfx_backend="Vulkan"` on headless/containerized hosts.** Xvfb has
+    no GPU passthrough, so Dolphin's default OpenGL backend falls back to
+    llvmpipe software rasterization and burns ~6 CPU cores (Dolphin pegs
+    ~590% CPU) rendering a framebuffer nobody is watching. Vulkan bypasses
+    the GLX/X11 path entirely — the NVIDIA Vulkan ICD talks directly to the
+    GPU device node and only uses Xvfb as a trivial presentation surface.
+    On this container Vulkan dropped Dolphin CPU from ~590% → ~68% with
+    GPU memory allocated and non-zero GPU utilization. Slippi Ishiiruka
+    has Vulkan compiled in on Linux even though most community guides
+    don't mention it (Windows users use D3D, macOS uses Metal). Do NOT
+    use `gfx_backend="Null"` on Ishiiruka — libmelee rejects it with
+    `ValueError('Null video requires mainline or ExiAI Ishiiruka.')` and
+    the `ENABLE_HEADLESS` cmake flag is broken on this fork anyway
+    (project-slippi/Ishiiruka#209).
