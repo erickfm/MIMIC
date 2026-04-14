@@ -68,14 +68,25 @@ fi
 # Dolphin runtime libs — missing any of these makes the binary fail with
 # exit code 127, which libmelee surfaces as "Unexpected return code 127
 # from dolphin" during Console.__init__.
-DOLPHIN_LIBS="libasound2 libusb-1.0-0 libevdev2 libgl1 libglu1-mesa libegl1 libgles2 libpulse0 libsm6 libxkbcommon0 libfontconfig1 libxi6 libxrender1 libgtk-3-0 libbluetooth3 libhidapi-hidraw0"
+#
+# Ubuntu 24.04 renamed several of these with a "t64" suffix (time_t
+# transition), so try the t64 name first and fall back to the legacy name.
+install_pkg() {
+    apt-get install -y -qq "$1" 2>/dev/null \
+        || apt-get install -y -qq "$2" 2>&1 | tail -1
+}
 if "$EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu" --version >/dev/null 2>&1 \
    || "$EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu" --version 2>&1 | grep -q '^[0-9]'; then
     echo "  Dolphin runtime libs OK."
 else
     echo "  Installing Dolphin runtime libs ..."
     apt-get update -qq 2>&1 | tail -1
-    apt-get install -y -qq $DOLPHIN_LIBS 2>&1 | tail -1
+    install_pkg libasound2t64 libasound2
+    install_pkg libgtk-3-0t64  libgtk-3-0
+    apt-get install -y -qq \
+        libusb-1.0-0 libevdev2 libgl1 libglu1-mesa libegl1 libgles2 \
+        libpulse0 libsm6 libxkbcommon0 libfontconfig1 libxi6 libxrender1 \
+        libbluetooth3 libhidapi-hidraw0 2>&1 | tail -1
 fi
 
 # ── 3. Melee ISO ───────────────────────────────────────────────────────────
