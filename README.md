@@ -139,7 +139,9 @@ Setup (one-time per machine):
 
 1. Create a Discord application at <https://discord.com/developers/applications>,
    reset the bot token, enable **Message Content Intent**, and invite the bot
-   to your server with `permissions=51200`.
+   to your server with `permissions=51200`. The invite URL is:
+   `https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&permissions=51200&scope=bot`
+   (substitute your application ID from the Developer Portal).
 2. Create a Slippi account via Slippi Launcher, log in once to generate
    `user.json`.
 3. Fill in `.env` — see `.env.example` for the full list. Minimally:

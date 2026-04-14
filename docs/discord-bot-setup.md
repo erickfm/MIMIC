@@ -33,9 +33,10 @@ uploaded back to the channel as attachments.
   ```
 - A **Discord bot application** and token. Create one at
   https://discord.com/developers/applications → New Application →
-  Bot → Copy Token. Invite the bot to your server with at least these
-  permissions: Send Messages, Attach Files, Read Message History,
-  Read Messages/View Channels. **Enable the "Message Content Intent"** under
+  Bot → Copy Token. Invite the bot to your server with permissions
+  integer `51200` (Send Messages + Embed Links + Attach Files):
+  `https://discord.com/api/oauth2/authorize?client_id=<APP_ID>&permissions=51200&scope=bot`.
+  **Enable the "Message Content Intent"** under
   Bot → Privileged Gateway Intents — the bot uses prefix commands which
   require reading message content.
 - **Checkpoints + per-character data dirs.** The easiest way to get both is
