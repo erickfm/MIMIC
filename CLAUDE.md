@@ -520,12 +520,15 @@ This is Eric Gu's original HAL codebase. Key files:
     `DISPLAY` is set in the environment the Discord bot / play_netplay.py
     inherits.
 
-17. **Use `gfx_backend="Null"` on headless/containerized hosts.** Xvfb has
-    no GPU passthrough, so Dolphin's default OpenGL backend falls back to
-    software rasterization (llvmpipe) and burns ~6 CPU cores rendering a
-    frame buffer nobody is watching. Symptom: match connects fine, ping is
-    normal, but in-game FPS tanks and the bot looks laggy. `play_netplay.py`
-    hardcodes `gfx_backend="Null"` for this reason — the game simulates at
-    full speed, replays still save, you just can't screenshot the render
-    window (which doesn't exist on a headless pod anyway). Do NOT revert
-    this to `""` unless you're running on a desktop with a real GPU+display.
+17. **Headless Dolphin FPS is CPU-bound under Xvfb.** Xvfb has no GPU
+    passthrough, so Dolphin's OpenGL backend falls back to llvmpipe software
+    rasterization and burns ~6 CPU cores rendering a framebuffer nobody is
+    watching. Symptom: match connects fine, ping is normal, but in-game FPS
+    tanks. The obvious fix — `gfx_backend="Null"` — does NOT work on the
+    Slippi Ishiiruka netplay build: libmelee's `Console.__init__` raises
+    `ValueError('Null video requires mainline or ExiAI Ishiiruka.')`
+    (`melee/console.py:471`). Tried and reverted 2026-04-14. Real fixes
+    would be (a) hardware-GL via `xserver-xorg-video-dummy` + nvidia EGL,
+    (b) patching the Dolphin ini directly after libmelee writes it and
+    bypassing the libmelee check, or (c) running netplay on a host with a
+    real display. Until then, slow in-container FPS is expected.
