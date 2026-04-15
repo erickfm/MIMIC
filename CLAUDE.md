@@ -334,10 +334,11 @@ can also flag a non-standard recipe: `overfit`, `wavedash`, `small`,
 recognizable next to others for the same character on the same day.
 
 Current best checkpoints (all in `checkpoints/`):
-- `fox-20260413-rope-32k.pt` — current best Fox (RoPE, self-inputs, val 0.77)
-- `falco-20260412-relpos-28k.pt` — current best Falco (relpos, val 0.68)
+- `fox-20260415-rope-25k.pt` — current best Fox (RoPE, val 0.7358, retrained post seq_len fix)
+- `falco-20260412-relpos-28k.pt` — current best Falco (relpos, val 0.7374)
 - `cptfalcon-20260412-relpos-27k.pt` — current best CptFalcon (relpos, val 0.71)
 - `luigi-20260412-relpos-5k.pt` — current best Luigi (relpos, early-stopped, val ~1.0)
+- `fox-20260413-rope-32k.pt` — superseded Fox, tainted by the seq_len=60 bug (kept for audit only)
 - `fox-20260411-relpos-noself-28k.pt` — superseded Fox (no --self-inputs, kept for reference)
 
 Rationale: the old names (`hal-7class-v2-long`, `falco-7class-v2-full`,

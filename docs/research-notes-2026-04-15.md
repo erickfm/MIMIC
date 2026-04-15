@@ -303,3 +303,37 @@ at seq 60, not "compile BF16 poisoning").
 
 Torch 2.8 / CUDA 12.8 / Blackwell SM_120 compile is probably fine for
 this model. Needs a real seq-256 benchmark to know. Deferred.
+
+## Post-fix Fox retrain — 2026-04-15
+
+Retrained Fox on the corrected seq_len=256 path with default compile,
+identical to the 2026-04-13 recipe otherwise:
+
+```
+--model mimic-rope --encoder mimic_flat
+--mimic-mode --mimic-minimal-features --mimic-controller-encoding
+--stick-clusters hal37 --plain-ce
+--lr 3e-4 --batch-size 512 --max-samples 16777216
+--data-dir data/fox_v2 --reaction-delay 0 --self-inputs
+--no-warmup --cosine-min-lr 1e-6
+```
+
+Result at step 25,179 (best val): **val_loss=0.7358**. Saved as
+`checkpoints/fox-20260415-rope-25k.pt` (from `_bestloss.pt`).
+
+Comparison to the historical Fox checkpoints:
+- `fox-20260415-rope-25k.pt`:       val 0.7358 (seq 256, post-fix)
+- `fox-20260413-rope-32k.pt`:       val ~0.77 (seq 60, tainted — superseded)
+- `fox-20260411-relpos-noself-28k`: val ~0.77 (no self-inputs, pre-rename)
+
+~0.04 nat improvement over the tainted seq-60 run and the older
+no-self-inputs baseline. Consistent with the Falco seed=42 probe
+(0.8229 → 0.8230 post-fix) — the fix recovers the full training
+context and the models land where they should.
+
+Steady-state throughput was ~5.5 step/s for the full Fox run at seq
+256 on the RTX 5090, not the ~2 step/s I'd benchmarked earlier in the
+investigation. Earlier benchmark was contaminated by stale GPU state;
+Fox running clean on an otherwise-idle GPU is quite fast.
+
+Fox retrain total wall clock: ~100 min for 32k steps.
