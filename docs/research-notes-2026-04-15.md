@@ -648,3 +648,30 @@ in the 0.69–0.71 range based on the upstream Fox seq-256 retrain
 diversity, plausibly slightly higher floor). Deferred — the recipe
 itself is now boring enough that I don't need a clean probe to know
 how to use it.
+
+### Discarded artifacts
+
+All 71 checkpoint files from today's six runs were deleted (~17.7 GB
+reclaimed):
+
+- `checkpoints/smoke-patience_*.pt` (3 files) — 16-step crash test
+- `checkpoints/smoke-wsd_*.pt` (3 files) — 16-step WSD code-path test
+- `checkpoints/fox-master-knee-probe-1_*.pt` (23 files, 5.8 GB)
+- `checkpoints/fox-master-knee-probe-2_*.pt` (23 files, 5.8 GB)
+- `checkpoints/fox-master-knee-probe-3_*.pt` (18 files, 4.6 GB)
+
+Every probe ran on the seq_len=60 path and is therefore not directly
+comparable to post-fix Fox numbers. The actual scientific output of
+the day is this research note plus the train.py simplification commit
+(924f98e) — both preserved. Regenerating any of the probes is a
+one-line train.py invocation if needed; storing the artifacts cost
+more than reproducing them ever will.
+
+The intermediate `_step{NNNNNN}.pt` snapshots in particular were the
+real bulk of the waste — the default save-every-N-steps cadence
+produces ~20 files per 32k-step run, almost all of which serve no
+purpose post-hoc once `_best.pt` and `_bestloss.pt` are in hand. A
+future `train.py` cleanup could plausibly drop the step snapshots
+entirely (or gate them behind an opt-in flag), since they're
+load-bearing for resume only and resume is rarely used in this
+project.
