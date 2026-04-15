@@ -204,3 +204,102 @@ Open in torch 2.8 as of 2026-04-15:
 - pytorch#123157 — CUBLAS_COMPUTE_16F exposure / batched-GEMM compute mode
 - pytorch#29531  — FP32 accumulation for reduced-precision matmuls
 - pytorch#100241 — `no_grad`/`autocast` interaction with compile
+
+---
+
+## 2026-04-15 (late) — Retraction: the bug above is not the real bug
+
+Everything above this line is **wrong**. I spent ~8 hours convinced the
+Falco basin shift was a `torch.compile` + BF16 accumulation issue,
+shipped a "fix" (`fullgraph=True` + `allow_bf16_reduced_precision_reduction=False`),
+and documented a mechanism writeup that matched the eager/compile
+measurements I'd taken. It was self-consistent and wrong.
+
+The real bug is a one-line miss in the HAL→MIMIC rename
+(commit `706a4af`, 2026-04-13). `train.py` had:
+
+```python
+elif model_preset == "hal":
+    SEQUENCE_LENGTH = 256
+```
+
+The rename aliased `MODEL_PRESETS["mimic"] = MODEL_PRESETS["hal"]`
+(same dict object), but this string literal check was never updated.
+Every `--model mimic*` run since 2026-04-13 silently fell back to
+the module default `SEQUENCE_LENGTH = 60` — a 4.3× reduction in
+temporal context per training window.
+
+**Blast radius.** Any run using `--model mimic*` between 2026-04-13
+and 2026-04-15 trained on stunted sequences. Known tainted:
+- `fox-20260413-rope-32k.pt` (post-rename, likely on HF)
+- `falco-20260414-relpos-flattail_*` (the "bad basin" run that started
+  the investigation)
+- All four-character sweep probes from today
+- Everything I called a "compile bug" measurement
+
+**Not tainted** (pre-rename): `falco-20260412-relpos-28k.pt`,
+`cptfalcon-20260412-relpos-27k.pt`, `luigi-20260412-relpos-5k.pt`.
+These still use `--model hal` and trained at seq 256.
+
+**The fix.** Replace the string check with a preset lookup so aliases
+work automatically:
+
+```python
+elif model_preset and (
+    model_preset in MODEL_PRESETS
+    and MODEL_PRESETS[model_preset].get("max_seq_len") is not None
+):
+    SEQUENCE_LENGTH = MODEL_PRESETS[model_preset]["max_seq_len"]
+```
+
+Verified end-to-end: at seed 42, `--model mimic` + the fix produces
+train loss bit-exact with `--model hal` on the old commit, all the way
+down to step 1600 (0.8230 vs 0.8229).
+
+### How the compile theory fooled me
+
+At `seq_len=60` the attention matrix is `(60, 60)` per head instead of
+`(256, 256)` — ~18× less attention compute, much smaller FFN
+activations. Compile *does* find a legitimately fast kernel pattern on
+small matmuls that it can't reproduce on bigger ones. So I saw
+20 step/s with "default compile" and 9.6 step/s with "fullgraph", both
+on Falco, both at the stunted seq 60. The fullgraph "slowdown" wasn't
+fullgraph making things slower — it was fullgraph happening to produce
+a basin that looked closer to "good" in my probes for unrelated
+reasons.
+
+The character sweep also fooled me: all four probes (Fox/CF/Luigi/Falco)
+were post-rename, so *all* of them ran at seq 60. The reason Fox/CF/Luigi
+"didn't show the bug" is because I was comparing bugged-to-bugged, and
+the compile path for those characters happened to pick the same kernel
+in both broken-fast and fullgraph variants. I built a story about
+shape-dependent cuBLASLt heuristics on top of noise.
+
+### Lessons
+
+1. **Dump tensor shapes first.** The moment two nominally-identical runs
+   diverged at step 1, I should have printed the state dict shapes to
+   check whether inputs were actually identical. I did it on probe ~40,
+   not probe 1. It would have saved 6+ hours.
+2. **Don't ship a fix based on 8k-step probes.** I committed the
+   compile theory as a CLAUDE.md section and archived a "tainted"
+   checkpoint based on short probes, not an end-to-end 32k retrain.
+   Validate against the full recipe before committing.
+3. **Git bisect beats theorizing.** Once the "seed variance" path was
+   ruled out, bisecting 44 commits over `train.py + mimic/` would have
+   found `706a4af` in ~6 iterations / ~30 minutes. I got there only
+   after many more probes.
+4. **Confirmation bias is a thing.** The character sweep result was a
+   red flag ("why would a compile bug be dataset-specific?") and I
+   rationalized it into a shape-heuristic story instead of stopping to
+   re-examine.
+5. **Never add `if model_preset == "X"` gates.** If behavior varies by
+   preset, read it off the preset dict so aliases pick it up for free.
+
+The torch.compile section previously added to CLAUDE.md has been
+removed. The archived `checkpoints/_archive/falco-20260414-relpos-flattail_*`
+are still correctly discarded, but for the right reason now (trained
+at seq 60, not "compile BF16 poisoning").
+
+Torch 2.8 / CUDA 12.8 / Blackwell SM_120 compile is probably fine for
+this model. Needs a real seq-256 benchmark to know. Deferred.
