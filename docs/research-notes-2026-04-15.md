@@ -337,3 +337,161 @@ investigation. Earlier benchmark was contaminated by stale GPU state;
 Fox running clean on an otherwise-idle GPU is quite fast.
 
 Fox retrain total wall clock: ~100 min for 32k steps.
+
+## Auto-converge recipe hunt — WSD vs cosine + patience cleanup
+
+**The problem.** Different characters have wildly different optimal
+training lengths (Fox 17K games → ~25–28K steps; Luigi 2K → ~5K).
+Picking `--max-samples` blind either under-trains or over-trains. Goal:
+**one recipe that converges to the best achievable val loss on any
+character without prior knowledge** — launch, walk away, get a finished
+model at the right plateau.
+
+The conversation cycled through three drafts before landing on the
+boring answer.
+
+### Draft 1 — patience-based knee detector (EMA + min_delta)
+
+Added an EMA-smoothed val loss, `--patience N`, `--patience-min-delta`,
+`--patience-ema-alpha`, plus `--patience-stop` (vs free-mode logging).
+Five wandb metrics. Three hyperparameters. The pitch: "smoothed val
+loss tells you when to stop."
+
+Tested with `--patience 5 --patience-ema-alpha 0.3` on the new
+master-master Fox dataset (see below). Knee fired at step 8502 reporting
+`best_val_ema=0.8273 @ step 6867`. **The detector was wrong.** Free-mode
+showed raw val loss continuing to fall to 0.7599 at step ~29k — the
+"knee" was a noise trough on a smoothed signal that was lagging the
+actual minimum by ~20k steps.
+
+Lesson: smoothing a noisy signal then thresholding the smoothed version
+hides the real minimum behind the smoother's lag. The end-of-run
+summary did correctly print the raw `best_val_loss_step` because that
+state was tracked separately for `_bestloss.pt`, so the diagnostic was
+salvageable, but the in-loop fire was unusable.
+
+### Draft 2 — strip the EMA, just count raw evals
+
+Dropped `--patience-min-delta`, `--patience-ema-alpha`, all four EMA
+metrics. Counter ticks against raw `best_val_loss`; `--patience N`
+decides when to fire. Still a knob for halt vs free-mode. Three lines
+of code instead of forty.
+
+### Draft 3 — WSD (Warmup-Stable-Decay), patience triggers the decay
+
+The cosine schedule has a fundamental problem: it needs to know the
+endpoint to shape the LR curve, but we don't know the endpoint. WSD
+solves this on paper — flat LR until val plateaus, then a short cosine
+decay produces the final refined checkpoint. Patience fires the
+stable→decay transition; run halts after the decay phase.
+
+Implemented as a manual LR setter (no scheduler), `--wsd` and
+`--wsd-decay-steps 2000`. Smoke test passed. Then three real probes
+on `data/fox_master_v2` at seq=60 (pre-fix taint, see below):
+
+| Run     | Schedule                              | Steps   | Best val_loss |
+|---------|---------------------------------------|---------|---------------|
+| Probe-1 | cosine 3e-4 → 1e-6 across 32k         | 32,768  | **0.7599**    |
+| Probe-2 | WSD, ceiling clipped (no decay phase) | ~32,768 | 0.7677        |
+| Probe-3 | WSD: stable 34,749 + decay 2,000      | 36,749  | 0.7727        |
+
+Probe-3 trained ~15% **longer** than probe-1 and got a **worse** result.
+Worse: every "new best val_loss" line in probe-3's log came from the
+stable phase (last one at step 26,169). The decay phase from step
+34,749 → 36,749 produced **zero** new bests.
+
+Why WSD lost here: stable LR held at 3e-4 for the entire run. Cosine
+had already annealed to ~1e-4 by step 26k where the model was doing
+its productive work, and to ~3e-5 by step 32k for final refinement.
+The literature consensus is that the WSD decay phase should be
+**10–20% of the stable phase length** — for probe-3 that would have
+been 3,500–7,000 steps, not 2,000. The fixed 2,000 was ~5.7%, way
+too short. The fix is `--wsd-decay-frac` (proportional decay) but
+that's another knob, and at this point we're three drafts deep on a
+recipe that the existing cosine schedule already handles cleanly.
+
+### Draft 4 (final) — drop WSD, drop patience, keep cosine + two-run pattern
+
+The honest realization: with cosine, `--patience` adds nothing. The
+LR schedule is locked at startup and doesn't react to anything during
+training. Free-mode patience just prints what `_bestloss.pt` already
+records. Halt-mode patience *fights* cosine — cosine's whole value is
+the final low-LR refinement window, and halting before that window
+throws the schedule's whole point away. Probe-1 vs probe-2/3 showed
+exactly this: cosine across the full 32k beat both WSD attempts.
+
+So the recipe collapsed back to:
+
+1. **Probe**: run cosine across a generous `--max-samples`. End-of-run
+   prints `Best val_loss=X @ step Y. Use --cosine-decay-steps Y for
+   next run on this data.` (Same info also lives on disk as the
+   modification time of `_bestloss.pt`.)
+2. **Production**: same recipe but `--cosine-decay-steps Y`. Cosine
+   anneals exactly to the knee, then flat-tails.
+
+Two runs per character. Boring. Works. The "auto-converge in one run"
+ambition wanted a single magic schedule that adapts to the data
+without prior knowledge; what we found instead is that prior knowledge
+is cheap (one probe per character, ~1 hour) and worth way more than
+any clever adaptive schedule we could rig up.
+
+### Code state after the cleanup
+
+- Removed: `--wsd`, `--wsd-decay-steps`, `--patience`, `--patience-stop`,
+  `--patience-min-delta`, `--patience-ema-alpha`, all EMA state, all WSD
+  manual-LR plumbing, the WSD-vs-cosine branch in scheduler construction.
+- Kept: existing cosine + flat-tail builder, `_bestloss.pt`, `val/total`,
+  `val/train_ratio`. Added two new wandb metrics for visibility:
+  `val/evals_since_improve` (counter against raw best_val_loss, ticks
+  every val without an improvement) and `val/best_val_loss_step` (the
+  step where the current best was set). Both are diagnostic-only — no
+  control flow uses them.
+- Added: end-of-run `_log` line that prints
+  `Best val_loss=X @ step Y. Use --cosine-decay-steps Y for next run`
+  whenever a finite best_val_loss exists.
+
+Net change in `train.py`: -50 LOC, -4 CLI flags. Three drafts of
+features got built and ripped out. The cleanup is the actual ship.
+
+### `data/fox_master_v2` — new dataset built today
+
+To probe the WSD recipe I needed a clean Fox dataset I wasn't already
+training production models on. Built from
+`erickfm/melee-ranked-replays` shards (`tools/shard_and_upload_ranked.py`,
+documented in `docs/ranked-dataset-pipeline.md`):
+
+- Downloaded `FOX_master-master_a1.tar.gz` (0.26 GB, 284 replays) and
+  `FOX_master-master_a3.tar.gz` (7.4 GB, 9018 replays). Only the
+  master-master bucket — `master-platinum`, `master-diamond` etc. would
+  pollute the skill mix because the tarball name doesn't tell you which
+  Fox is which rank.
+- Extracted to `data/raw_slp/fox_master_master/` (9302 .slp files, 33 GB).
+- `tools/slp_to_shards.py --character 1 --shard-gb 0.8 --val-frac 0.05`
+  produced **9866 train games / 96M frames in 191 shards**, plus
+  **516 val games / 5M frames in 11 shards**. ~15 min wall clock.
+  152 GB total on disk.
+
+Pass rate from raw .slp to kept frames: ~9866/9302 = >100%. The >1
+ratio is the "both perspectives" expansion in `slp_to_shards.py` —
+each Fox-vs-Fox replay produces two training perspectives. The 5%
+val_frac at file granularity gave 11 val shards which is a perfectly
+fine eval pool.
+
+### IMPORTANT: probe results above are tainted
+
+All three WSD-era probes used `--model mimic`, which on the
+pre-88eecf1 code path silently set `SEQUENCE_LENGTH=60` (see top of
+this note for the bug). The probe val losses (0.7599 / 0.7677 / 0.7727)
+are all ~0.04 nat too high relative to the post-fix world. The
+**relative ordering** of cosine vs WSD almost certainly survives the
+fix — cosine's full schedule will still beat WSD with a 5.7% decay
+window — but the absolute numbers are wrong. The cleanup decision
+(drop WSD, drop patience, keep cosine + two-run) doesn't depend on
+the absolute numbers, so it stands.
+
+A clean post-fix knee probe on `fox_master_v2` should land somewhere
+in the 0.69–0.71 range based on the upstream Fox seq-256 retrain
+(0.7358 on `fox_v2` — `fox_master_v2` is higher-skill data, lower
+diversity, plausibly slightly higher floor). Deferred — the recipe
+itself is now boring enough that I don't need a clean probe to know
+how to use it.

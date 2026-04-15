@@ -854,10 +854,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     _eta_min = cosine_min_lr if cosine_min_lr is not None else 0.0
     # Decouple the cosine decay length from the total training length so a
     # longer run still gets a proper low-LR refinement window at the end
-    # instead of stretching the cosine across the whole schedule.
-    # If --cosine-decay-steps is set, decay cosine to eta_min by that step
-    # and hold flat at eta_min for the remainder. Otherwise preserve the
-    # legacy "cosine across full max_steps" behavior.
+    # instead of stretching the cosine across the whole schedule. If
+    # --cosine-decay-steps is set, decay cosine to eta_min by that step
+    # and hold flat at eta_min for the remainder.
     _decay_steps = cosine_decay_steps if cosine_decay_steps is not None else max_steps
     if _decay_steps > max_steps:
         _log(f"  [WARN] --cosine-decay-steps {cosine_decay_steps} > max_steps {max_steps}, clamping")
@@ -868,8 +867,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         return optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=max(n, 1), eta_min=_eta_min)
 
     def _build_flat_tail(n):
-        # ConstantLR holds base_lr * factor for n iters. We want to hold
-        # at eta_min regardless of base_lr, so factor is eta_min / peak_lr.
         factor = (_eta_min / actual_lr) if actual_lr > 0 else 1.0
         return optim.lr_scheduler.ConstantLR(optimiser, factor=factor, total_iters=max(n, 1))
 
@@ -996,6 +993,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     _oom_retries = 0
     best_val_f1 = -1.0
     best_val_loss = float("inf")
+    best_val_loss_step = 0
+    evals_since_improve = 0
     _log(f"\n=== Training {max_steps} steps ===")
     _target_hit = False
     for step in range(start_step + 1, max_steps + 1):
@@ -1184,6 +1183,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     val_avg["val/train_ratio"] = val_avg["val/total"] / _train_rolling if _train_rolling > 0 else float("inf")
                 else:
                     _train_rolling = float("nan")
+                _cur_v = val_avg.get('val/total', float("inf"))
+                _next_n = 0 if _cur_v < best_val_loss else evals_since_improve + 1
+                val_avg["val/evals_since_improve"] = _next_n
+                val_avg["val/best_val_loss_step"] = best_val_loss_step
                 wandb.log(val_avg, step=step)
                 _ratio_str = ""
                 if _train_loss_window:
@@ -1226,11 +1229,15 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         _log(f"  -- new best val f1={cur_val_f1:.1%} → {best_path}")
                 if cur_val_loss < best_val_loss:
                     best_val_loss = cur_val_loss
+                    best_val_loss_step = step
+                    evals_since_improve = 0
                     if _is_main:
                         os.makedirs("checkpoints", exist_ok=True)
                         best_loss_path = f"checkpoints/{run_name}_bestloss.pt"
                         torch.save(_build_best_ckpt(), best_loss_path)
                         _log(f"  -- new best val loss={cur_val_loss:.4f} → {best_loss_path}")
+                elif math.isfinite(cur_val_loss):
+                    evals_since_improve += 1
                 if target_val_f1 and cur_val_f1 >= target_val_f1:
                     _elapsed = time.time() - t0
                     _log(f"TARGET REACHED: val_f1={cur_val_f1:.4f} at step {step} in {_elapsed:.1f}s")
@@ -1316,6 +1323,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
          f"({step/elapsed:.1f} step/s){skip_msg}")
     if target_val_f1 and not _target_hit:
         _log(f"TARGET NOT REACHED: best val_f1={best_val_f1:.4f} (target={target_val_f1:.4f})")
+    if math.isfinite(best_val_loss):
+        _log(f"Best val_loss={best_val_loss:.4f} @ step {best_val_loss_step}. "
+             f"Use --cosine-decay-steps {best_val_loss_step} for next run on this data.")
     wandb.finish()
     if is_distributed:
         dist.destroy_process_group()
