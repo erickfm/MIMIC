@@ -101,12 +101,106 @@ default compile. Should be discarded and retrained with `fullgraph=True`
 once the character sweep confirms the picture. Old `falco-20260412-relpos-28k`
 (val 0.7374) remains the production Falco checkpoint.
 
-## Open questions
+## Character sweep — complete
 
-1. Does CptFalcon/Luigi trigger the aggressive kernel? If yes, same fix.
-   If no, compile is safe by default for those characters.
-2. Why does Fox compile at 6 step/s while Falco compiles at 20? Same hw,
-   same model, same config. Only data-dir differs. Possibly linked to
-   Dynamo's shape specialization during warmup.
-3. Is the bad-basin Falco actually worse in gameplay, or just a val loss
-   artifact? Not tested. Gameplay comparison deferred.
+4-character sweep (Fox / CptFalcon / Luigi / Falco, each with a pair of
+2048-step probes: default compile and `fullgraph=True`, seed=7, otherwise
+identical commands):
+
+```
+Character    broken-fast step/s    step 1600 train loss           basin
+                                   broken      fullgraph
+Falco              20              1.019       0.853               BAD
+Fox                 6              0.890       0.892                clean
+CptFalcon           7              0.869       0.869                clean
+Luigi              11              0.825       0.825                clean
+```
+
+Only Falco exhibits the bug. The other three are byte-identical under
+both compile modes and sit at entirely different throughputs — 6, 7, 11
+step/s — none near Falco's 20.
+
+## Mechanism (confirmed via PyTorch docs, GitHub issues, and cuBLAS 12.x notes)
+
+Default `torch.compile(model)` allows Dynamo **graph breaks**. When
+Dynamo can't trace something, it commits the partial FX graph, runs the
+offending fragment in eager Python, then resumes tracing a fresh graph.
+Inductor lowers each subgraph independently.
+
+`torch.autocast` is a C++ TLS context manager. Dynamo models it
+symbolically *inside* one traced graph, but across a break boundary the
+autocast state is torn down and re-entered. Our
+`CausalSelfAttentionRelPos.forward` has a nested `autocast(enabled=False)`
+block with explicit `.float()` casts on Q/K/Er — exactly the pattern
+that's known to break around graph boundaries (pytorch#93890, #114818,
+#140118).
+
+Inductor emits `extern_kernels.bmm/mm` for most matmuls (confirmed in
+the output_code dump — no `tl.dot`). Those calls go to cuBLASLt, whose
+algorithm heuristic keys on **dtype + stride + leading-dim + the current
+autocast math-mode TLS**. Around a graph break, Inductor can lower the
+FFN matmul with BF16 inputs under a TLS state where the outer
+autocast's "inner disable" was lost. cuBLASLt is then free to pick
+`CUBLAS_COMPUTE_16BF` (accumulate-in-BF16) tensor-core algos — new in
+cuBLAS 12.8 for Blackwell SM_120 and preferentially selected for
+certain shape classes.
+
+K=2048 BF16 accumulations lose ~3 bits of mantissa per reduction.
+Training lands in a consistently worse basin: +0.17 nat train loss,
++0.03 nat val loss, stable parallel offset from step 500 onward — the
+textbook signature of an accumulation-precision delta, not noise.
+
+**Why only Falco**: cuBLASLt's heuristic is shape-dependent. Fox,
+CptFalcon, Luigi land on shapes where the top-ranked algo is
+`COMPUTE_32F` regardless of TLS state. Falco's shape mix tips exactly
+one GEMM into preferring `COMPUTE_16BF` under the corrupted TLS path.
+Same code, same seed, same weights — the heuristic just lands on a
+different algo for a different shape distribution.
+
+## Fix shipped
+
+Two independent fixes, applied together for belt-and-suspenders:
+
+1. **`torch.compile(model, fullgraph=True)`** — forces a single compiled
+   graph with consistent autocast TLS throughout Inductor lowering.
+   PyTorch docs explicitly recommend fullgraph for production
+   ("Use fullgraph=True to Identify and Eliminate Graph Breaks").
+   Failure mode is loud: any untraceable op raises
+   `torch._dynamo.exc.Unsupported` at compile time.
+
+2. **`torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False`**
+   in `train.py` startup — globally blacklists BF16-accumulate algos
+   at cuBLASLt heuristic time. Free on FP32-accumulate paths; immunizes
+   against future cuBLAS heuristic changes on Blackwell / CUDA 13.
+
+Either one alone fixes the basin. Together they guarantee correctness
+across future model and dataset changes.
+
+## Discarded artifacts
+
+- `checkpoints/falco-20260414-relpos-flattail_*.pt`: all tainted by
+  default-compile bug. `_bestloss.pt` (val 0.7651) should be treated
+  as a compile-bug victim, not a real Falco model. Moved to
+  `checkpoints/_archive/` for historical reference. Production Falco
+  remains `falco-20260412-relpos-28k.pt` (val 0.7374).
+
+## Open / deferred
+
+1. Gameplay comparison old-Falco vs bad-basin-Falco: not tested. A
+   0.03 val loss gap is real but its game-play impact is unmeasured.
+   Deferred because the fix is cheap enough that we don't need to
+   argue about whether it mattered.
+2. Why exactly the Falco shape distribution tips cuBLASLt into the
+   BF16-accum algo while Fox/CF/Luigi don't: not investigated. We'd
+   need to dump per-batch shapes and cross-reference with cuBLAS algo
+   selection logs. Not load-bearing — the fix works regardless.
+
+## Related GitHub issues
+
+Open in torch 2.8 as of 2026-04-15:
+- pytorch#140118 — `set_autocast_enabled` + fullgraph interaction
+- pytorch#93890  — autocast context manager doesn't survive graph breaks
+- pytorch#114818 — `@torch.amp.autocast` decorator causes breaks
+- pytorch#123157 — CUBLAS_COMPUTE_16F exposure / batched-GEMM compute mode
+- pytorch#29531  — FP32 accumulation for reduced-precision matmuls
+- pytorch#100241 — `no_grad`/`autocast` interaction with compile

@@ -187,6 +187,68 @@ unresponsive and miss inputs. Always suspend or kill training before
 running inference. Verified 2026-04-07: same inference code went from
 "less responsive, can't combo" to working correctly after freeing the GPU.
 
+### torch.compile (Critical — 2026-04-15)
+
+`train.py` uses `torch.compile(model, fullgraph=True)` **and** sets
+`torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False`
+at startup. Both are required. Do not silently drop either — they are
+numerical correctness knobs, not speed knobs.
+
+**Why both are needed.** Under default `torch.compile(model)` (no
+fullgraph), Dynamo allows graph breaks. When a break tears down the
+`torch.autocast` TLS state around our `autocast(enabled=False)` block in
+`CausalSelfAttentionRelPos.forward`, Inductor lowers the surrounding
+subgraph under the wrong autocast state. The resulting `extern_kernels.bmm/mm`
+calls land at cuBLASLt, whose heuristic is then free to pick
+`CUBLAS_COMPUTE_16BF` (accumulate-in-BF16) tensor-core kernels for
+certain FFN matmul shapes. On Blackwell SM_120 / cuBLAS 12.8 those
+algos are new and preferentially selected for some shape distributions.
+The result: BF16 accumulation loses ~3 bits of mantissa per K=2048
+reduction, and training lands in a worse basin (+0.17 nat train loss,
++0.03 nat val loss, stable parallel offset from step 500 onward).
+
+`fullgraph=True` forces one compiled graph with consistent autocast TLS
+throughout lowering. `allow_bf16_reduced_precision_reduction=False`
+globally blacklists BF16-accumulate algos at cuBLASLt heuristic time.
+Either one alone fixes the basin; together they're belt-and-suspenders
+against future heuristic changes and future model changes that might
+re-introduce a break.
+
+**The bug is dataset-dependent.** Only Falco triggered it (cuBLASLt's
+heuristic keys on shape, and Falco's shape mix tips exactly one GEMM
+into picking `COMPUTE_16BF` under the corrupted TLS). Fox, CptFalcon,
+Luigi produced byte-identical train loss with and without `fullgraph=True`.
+Do not assume a future dataset is safe just because the current ones are.
+
+**Cost.** On Falco, `fullgraph=True` halves throughput (20 → 9.6 step/s)
+because the aggressive kernel is no longer picked. On the other three
+characters, it's a no-op. The 20 step/s was never legitimate — it was
+buying correctness with training quality.
+
+**What will break this silently — nothing.** `fullgraph=True`'s whole
+point is loud failure. Any new Python construct Dynamo can't trace
+(`.item()`, `print`, data-dependent control flow, new context managers,
+custom C-extension calls) raises `torch._dynamo.exc.Unsupported` at
+compile time. It cannot regress to the broken path without errors.
+
+**Monitoring**: after any architecture change run a 4096-sample smoke
+test with `TORCH_LOGS=graph_breaks,recompiles python3 train.py ...
+--max-samples 4096`. Zero breaks logged = safe.
+
+**Never wrap autocast around compile.** Put `torch.compile` on the
+inside of the training-loop autocast context, not around it. Nested
+`autocast(enabled=False)` inside a compiled region is safe under
+`fullgraph=True`; it's a landmine under default compile.
+
+**Escape hatch**: if a future model change legitimately needs a graph
+break (e.g., data-dependent control flow), switch to sub-module
+compilation — `torch.compile(model.blocks[i], fullgraph=True)` — rather
+than falling back to `fullgraph=False` on the whole model.
+
+Related GitHub issues that document the mechanism (all open in torch 2.8
+as of 2026-04-15): pytorch#140118, #93890, #114818, #123157, #29531,
+#100241. Full investigation writeup: `docs/research-notes-2026-04-15.md`.
+
 ## Inference
 
 ### Running HAL's Original Checkpoint

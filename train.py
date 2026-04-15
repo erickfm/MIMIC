@@ -88,6 +88,14 @@ CKPT_FRAC          = 0.05     # checkpoint every ~5%
 torch.backends.cudnn.benchmark = True
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
+# Belt-and-suspenders against cuBLASLt picking COMPUTE_16BF (BF16-accumulate)
+# tensor-core algos on Blackwell SM_120 / cuBLAS 12.8. Under `torch.compile`
+# (even with fullgraph=True), the heuristic is free to pick BF16-accumulate
+# kernels for certain shape distributions. On Falco's shapes this costs
+# ~0.17 nat of train loss. Global restriction to FP32-accumulate algos is
+# free on FP32-accum code paths and immunizes us against future heuristic
+# changes. See docs/research-notes-2026-04-15.md.
+torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 torch.set_float32_matmul_precision("high")
 
 # -----------------------------------------------------------------------------
@@ -565,7 +573,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
-        model = torch.compile(model)
+        model = torch.compile(model, fullgraph=True)
     return model, cfg
 
 def infinite_loader(dl, sampler=None):
