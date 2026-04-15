@@ -563,6 +563,21 @@ too short. The fix is `--wsd-decay-frac` (proportional decay) but
 that's another knob, and at this point we're three drafts deep on a
 recipe that the existing cosine schedule already handles cleanly.
 
+**The headline finding: WSD works, the loss penalty is intolerable.**
+The mechanism — patience watches val, fires the stable→decay transition,
+decay phase produces the final checkpoint, run halts cleanly — all
+worked end-to-end on probe-3. The plumbing is sound. The problem is
+the *result*: probe-3 trained 15% **longer** than cosine probe-1 and
+landed at val_loss 0.7727 vs probe-1's 0.7599 — a **+0.013 nat penalty**.
+For a BC bot whose entire output quality is downstream of val loss,
+that's not a wash, that's a real regression. WSD's pitch was "no prior
+knowledge needed about the knee," but the cost is a model that's
+measurably worse at predicting controller inputs. Even with a
+better-tuned `--wsd-decay-frac`, the structural gap (peak LR for the
+entire stable phase vs cosine annealing through the productive zone)
+is going to cost *something*. Cheaper to just run a probe and use
+cosine.
+
 ### Draft 4 (final) — drop WSD, drop patience, keep cosine + two-run pattern
 
 The honest realization: with cosine, `--patience` adds nothing. The
