@@ -423,6 +423,51 @@ would suggest — FFN / overhead / memory bandwidth dominate at small
 seq lengths. At larger seq the crossover makes attention more
 important and throughput drops steeper.
 
+### Intermediate points: seq 180 (3s) and seq 192 (3.2s)
+
+Filled in two extra points between 128 and 256 to probe the region
+where Melee-semantic window sizes live. Both at seed=42, same config
+as the main sweep:
+
+```
+seq   wall     best_val
+180   22.8m    0.7840
+192   23.5m    0.7858
+```
+
+seq 180 beat seq 192 by ~0.0018 nats — small but surprising given the
+otherwise smooth curve. Reran both at seed=7 to check if it was
+pure variance:
+
+```
+seq    seed42   seed7
+180    0.7840   0.7842
+192    0.7858   0.7856
+```
+
+**Both seeds reproduce the ordering**: seq 180 < seq 192 by ~0.0015
+nat regardless of seed. Not noise — small and reproducible.
+
+Most likely mechanism: **leftover-frame waste**. The pre-windowed
+shards contain games of varying length, and each game contributes
+`floor(game_frames / seq_len)` windows with the tail dropped. At seq
+192 vs seq 180, more of each game's tail lands below the window
+threshold and gets discarded, so the effective dataset is slightly
+smaller at 192 than at 180. Over 4k training steps with batch 512,
+the 192 run has seen marginally fewer unique windows than the 180
+run, which costs a hair of val loss.
+
+This is an artifact of shard construction, not a model-architecture
+effect. The practical lesson is that val-loss curves across seq
+lengths won't be perfectly smooth — sequence lengths that divide
+typical game lengths evenly will look slightly better per training
+step than ones that don't. The overall diminishing-returns shape
+still holds.
+
+If you ever need a sub-256 "cheap but good" sequence length, prefer
+seq 180 over seq 192 — same wall time, same step count, slightly
+better val, same seed variance.
+
 ## Auto-converge recipe hunt — WSD vs cosine + patience cleanup
 
 **The problem.** Different characters have wildly different optimal
