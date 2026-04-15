@@ -88,6 +88,36 @@ def find_slp_files(root: Path):
     return sorted(str(p) for p in root.rglob("*.slp"))
 
 
+def _gunzip_one(src: str):
+    import gzip
+    dst = src[:-3]  # strip .gz
+    try:
+        with gzip.open(src, "rb") as gf, open(dst, "wb") as out:
+            shutil.copyfileobj(gf, out, length=1 << 20)
+        os.remove(src)
+        return (src, None)
+    except Exception as e:
+        return (src, f"{type(e).__name__}:{e}")
+
+
+def decompress_slp_gz(root: Path, jobs: int):
+    gz_files = sorted(str(p) for p in root.rglob("*.slp.gz"))
+    if not gz_files:
+        return
+    print(f"Decompressing {len(gz_files)} .slp.gz files", flush=True)
+    t0 = time.time()
+    bad = 0
+    with ProcessPoolExecutor(max_workers=jobs) as ex:
+        for i, (src, err) in enumerate(ex.map(_gunzip_one, gz_files, chunksize=64)):
+            if err:
+                bad += 1
+                if bad <= 5:
+                    print(f"  gunzip failed: {src}: {err}", flush=True)
+            if (i + 1) % 5000 == 0:
+                print(f"  gunzipped {i + 1}/{len(gz_files)} ({time.time() - t0:.0f}s)", flush=True)
+    print(f"Decompressed in {time.time() - t0:.0f}s ({bad} failures)", flush=True)
+
+
 def already_uploaded(api: HfApi):
     try:
         return set(api.list_repo_files(REPO, repo_type="dataset"))
@@ -143,8 +173,14 @@ def main():
             sys.exit(1)
         extract_archive(args.archive, extract_dir)
 
+    # Some archives (a4/a5/a6) contain individually gzipped .slp.gz files; decompress in place.
+    decompress_slp_gz(extract_dir, args.jobs)
+
     slp_files = find_slp_files(extract_dir)
     print(f"Found {len(slp_files)} .slp files")
+    if not slp_files:
+        print(f"ERROR: no .slp files found under {extract_dir}", file=sys.stderr)
+        sys.exit(1)
     if args.limit:
         slp_files = slp_files[: args.limit]
         print(f"  limited to {len(slp_files)} for debug")
