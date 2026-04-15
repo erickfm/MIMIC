@@ -18,6 +18,7 @@ except ImportError:
 import math
 import time
 import argparse
+from collections import deque
 from contextlib import nullcontext
 import torch
 import torch.nn as nn
@@ -624,6 +625,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           hal_mode: bool = False,
           no_amp: bool = False,
           cosine_min_lr: float = None,
+          cosine_decay_steps: int = None,
           lean_features: bool = False,
           no_warmup: bool = False,
           stick_clusters: str = None,
@@ -847,16 +849,51 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     )
 
     _eta_min = cosine_min_lr if cosine_min_lr is not None else 0.0
+    # Decouple the cosine decay length from the total training length so a
+    # longer run still gets a proper low-LR refinement window at the end
+    # instead of stretching the cosine across the whole schedule.
+    # If --cosine-decay-steps is set, decay cosine to eta_min by that step
+    # and hold flat at eta_min for the remainder. Otherwise preserve the
+    # legacy "cosine across full max_steps" behavior.
+    _decay_steps = cosine_decay_steps if cosine_decay_steps is not None else max_steps
+    if _decay_steps > max_steps:
+        _log(f"  [WARN] --cosine-decay-steps {cosine_decay_steps} > max_steps {max_steps}, clamping")
+        _decay_steps = max_steps
+    _use_flat_tail = (_decay_steps < max_steps)
+
+    def _build_cosine(n):
+        return optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=max(n, 1), eta_min=_eta_min)
+
+    def _build_flat_tail(n):
+        # ConstantLR holds base_lr * factor for n iters. We want to hold
+        # at eta_min regardless of base_lr, so factor is eta_min / peak_lr.
+        factor = (_eta_min / actual_lr) if actual_lr > 0 else 1.0
+        return optim.lr_scheduler.ConstantLR(optimiser, factor=factor, total_iters=max(n, 1))
+
     if warmup_steps > 0:
         warmup  = optim.lr_scheduler.LinearLR(
             optimiser, start_factor=0.01, total_iters=warmup_steps)
-        cosine  = optim.lr_scheduler.CosineAnnealingLR(
-            optimiser, T_max=max(max_steps - warmup_steps, 1), eta_min=_eta_min)
-        scheduler = optim.lr_scheduler.SequentialLR(
-            optimiser, [warmup, cosine], milestones=[warmup_steps])
+        cosine_phase_len = max(_decay_steps - warmup_steps, 1)
+        cosine  = _build_cosine(cosine_phase_len)
+        if _use_flat_tail:
+            flat = _build_flat_tail(max_steps - _decay_steps)
+            scheduler = optim.lr_scheduler.SequentialLR(
+                optimiser, [warmup, cosine, flat],
+                milestones=[warmup_steps, _decay_steps])
+        else:
+            scheduler = optim.lr_scheduler.SequentialLR(
+                optimiser, [warmup, cosine], milestones=[warmup_steps])
     else:
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimiser, T_max=max_steps, eta_min=_eta_min)
+        cosine = _build_cosine(_decay_steps)
+        if _use_flat_tail:
+            flat = _build_flat_tail(max_steps - _decay_steps)
+            scheduler = optim.lr_scheduler.SequentialLR(
+                optimiser, [cosine, flat], milestones=[_decay_steps])
+        else:
+            scheduler = cosine
+    if _use_flat_tail:
+        _log(f"  LR schedule: cosine to eta_min={_eta_min:g} over {_decay_steps} steps, "
+             f"then flat at eta_min for the remaining {max_steps - _decay_steps} steps")
 
     start_step = 0
     if resume:
@@ -943,6 +980,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                  "main_top1_acc", "shoulder_top1_acc", "grad_norm"]
     _run_sums = {k: 0.0 for k in _AVG_KEYS}
     _run_ct = 0
+    # Rolling window of train total loss for val/train ratio. 100 steps of
+    # smoothing is enough to damp batch noise without lagging behind the
+    # current training regime — short enough that the ratio still moves
+    # when val/train diverge (overfitting signal).
+    _train_loss_window = deque(maxlen=100)
 
     if start_step and not isinstance(ds, IterableDataset):
         for _ in range(start_step):
@@ -1044,6 +1086,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         scheduler.step()
 
         total_loss_val = accum_loss.item() if isinstance(accum_loss, torch.Tensor) else accum_loss
+        if math.isfinite(total_loss_val):
+            _train_loss_window.append(total_loss_val)
         metrics = accum_metrics
         _run_sums["total"]     += total_loss_val
         _run_sums["grad_norm"] += grad_norm
@@ -1129,14 +1173,26 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
             if val_ct > 0:
                 val_avg = {f"val/{k}": val_sums[k] / val_ct for k in _VAL_KEYS}
+                # Generalization gap: val_total / rolling_train_total.
+                # > 1.0 is normal; trending up over time = overfitting.
+                if _train_loss_window:
+                    _train_rolling = sum(_train_loss_window) / len(_train_loss_window)
+                    val_avg["train/rolling_total"] = _train_rolling
+                    val_avg["val/train_ratio"] = val_avg["val/total"] / _train_rolling if _train_rolling > 0 else float("inf")
+                else:
+                    _train_rolling = float("nan")
                 wandb.log(val_avg, step=step)
+                _ratio_str = ""
+                if _train_loss_window:
+                    _ratio_str = f" train_roll={_train_rolling:.4f} v/t={val_avg['val/train_ratio']:.3f}"
                 _log(f"  -- val total={val_avg['val/total']:.4f}  "
                      f"bf1={val_avg['val/btn_f1']:.1%} "
                      f"bP={val_avg['val/btn_precision']:.1%} bR={val_avg['val/btn_recall']:.1%}  "
                      f"mf1={val_avg['val/main_f1']:.1%} "
                      f"sf1={val_avg['val/shldr_f1']:.1%} "
                      f"cf1={val_avg['val/cdir_f1']:.1%}  "
-                     f"(batches={val_ct})")
+                     f"(batches={val_ct})"
+                     + _ratio_str)
                 cur_val_f1 = val_avg.get('val/btn_f1', 0.0)
                 cur_val_loss = val_avg.get('val/total', float("inf"))
                 # Helper so we save the same ckpt dict for both criteria
@@ -1366,6 +1422,12 @@ if __name__ == "__main__":
                         help="Disable AMP (train in FP32)")
     parser.add_argument("--cosine-min-lr", type=float, default=None,
                         help="Minimum LR for cosine schedule (default: 0; 1e-6 matches standard MIMIC recipe)")
+    parser.add_argument("--cosine-decay-steps", type=int, default=None,
+                        help="Decouple cosine decay length from total training. "
+                             "If set, cosine decays from peak to --cosine-min-lr "
+                             "over this many steps, then holds flat at min_lr for "
+                             "the remainder. Useful for long runs on small-data "
+                             "characters to avoid stretching the refinement window.")
     parser.add_argument("--no-warmup", action="store_true",
                         help="Disable LR warmup (start at full LR)")
     parser.add_argument("--stick-clusters", type=str, default=None,
@@ -1448,6 +1510,7 @@ if __name__ == "__main__":
         hal_mode=args.mimic_mode,
         no_amp=args.no_amp,
         cosine_min_lr=args.cosine_min_lr,
+        cosine_decay_steps=args.cosine_decay_steps,
         lean_features=args.lean_features,
         no_warmup=args.no_warmup,
         stick_clusters=args.stick_clusters,
