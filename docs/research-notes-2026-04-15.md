@@ -338,6 +338,91 @@ Fox running clean on an otherwise-idle GPU is quite fast.
 
 Fox retrain total wall clock: ~100 min for 32k steps.
 
+## Window-size sweep — how much does seq length actually buy us
+
+Once the fix was confirmed, natural follow-up: how much of the ~0.04
+nat gap between seq 60 and seq 256 comes from each doubling, and is
+there a bigger win above 256?
+
+Setup: Falco, seed=42, batch 512, compile default, 4096 steps per
+probe, seeds/data identical except `--seq-len`. Seq values:
+32 / 64 / 128 / 256 / 384 / 512. Sequential run via
+`/tmp/run_sweep.sh` on an otherwise idle GPU.
+
+Results:
+
+```
+seq   step   train    best_val   rate (step/s)   OOM (halved?)
+ 32   4096   0.8621   0.8421     8.60             0  clean batch 512
+ 64   4096   0.8190   0.8170     6.40             0  clean batch 512
+128   4096   0.8113   0.7949     4.20             0  clean batch 512
+256   4096   0.7840   0.7757     2.20             0  clean batch 512   ← production
+384   4096   0.7566   0.7728     1.70             2  OOM'd, batch 256
+512   4096   0.7866   0.7753     1.40             4  OOM'd, batch 128
+```
+
+### Clean region (seq 32 → 256, batch 512 throughout)
+
+Best val is monotonic and shows a textbook diminishing-returns curve:
+
+```
+seq doubling    Δ best val
+ 32 → 64       −0.025
+ 64 → 128      −0.022
+128 → 256      −0.019
+```
+
+Each doubling buys ~0.02 nat of val loss improvement at this training
+length. The sum (seq 32 → 256) is −0.066 nats, consistent with the
+0.045–0.065 gap we observed when the rename silently dropped the
+window from 256 to 60 and every `--model mimic*` run trained stunted.
+
+### Above 256 — tainted by OOM-halving, not directly comparable
+
+seq 384 and 512 cannot fit batch 512 on a 32 GB 5090 at this model
+size — the attention activations are quadratic in seq. train.py's
+OOM-retry halves the batch on the first OOM, so:
+- seq 384 effectively ran at batch 256
+- seq 512 effectively ran at batch 128
+
+Smaller batch = more optimizer steps per sample = lower train loss at
+the same step count, independently of the window change. The seq 384
+train loss (0.7566) is noticeably lower than seq 256 (0.7840) partly
+because of that, not because seq 384 "learns better" per se. Can't
+separate the two effects from one run.
+
+Seq 512 is suspicious: its train loss bounces *up* vs seq 384 (0.7866
+vs 0.7566), probably because batch 128 is too small to offset the seq
+penalty. Best val tracks it: 0.7753 vs 0.7728.
+
+### Conclusion
+
+**seq 256 is on the sweet spot of the curve.** Every doubling before
+256 gives a clear win; every doubling after is either noise or tainted
+by batch-size side effects.
+
+If you want to push past 256 properly, you need either gradient
+accumulation (keep batch 512 logical, split physical), a smaller model
+(fewer params → fits longer sequences), or a larger GPU. Not worth
+doing blind — benchmark first.
+
+Throughput follows the attention-is-quadratic law reasonably well:
+
+```
+seq   step/s   rel to seq 256
+ 32   8.60     3.9×
+ 64   6.40     2.9×
+128   4.20     1.9×
+256   2.20     1.0×
+384   1.70     0.77×  (but batch 256)
+512   1.40     0.64×  (but batch 128)
+```
+
+The 32 → 256 throughput ratio is ~4×, not the 64× pure attention math
+would suggest — FFN / overhead / memory bandwidth dominate at small
+seq lengths. At larger seq the crossover makes attention more
+important and throughput drops steeper.
+
 ## Auto-converge recipe hunt — WSD vs cosine + patience cleanup
 
 **The problem.** Different characters have wildly different optimal
