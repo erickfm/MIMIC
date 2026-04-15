@@ -41,7 +41,7 @@ GPTv5Controller and later diverged):
 - **Input:** Linear(166 → 512) from concatenated [stage_emb(4) + 2*char_emb(12) + 2*action_emb(32) + gamestate(18) + controller(56)]
 - **Output heads (autoregressive with detach):** shoulder(3) → c_stick(9) → main_stick(37) → buttons(7)
 - **Head hidden dim:** `input_dim // 2` (NOT a fixed 256 — each head has different hidden size)
-- **Sequence length:** 256 frames (~4.3 seconds)
+- **Sequence length:** 180 frames (~3 seconds)
 - **Dropout:** 0.1 (mimic-rope) or 0.2 (mimic/relpos)
 
 The gamestate is 9 features per player (ego + opponent = 18):

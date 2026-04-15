@@ -468,6 +468,29 @@ If you ever need a sub-256 "cheap but good" sequence length, prefer
 seq 180 over seq 192 — same wall time, same step count, slightly
 better val, same seed variance.
 
+### New default: seq 180
+
+Bumped all `MODEL_PRESETS` entries in `mimic/model.py` from
+`max_seq_len=256` to `max_seq_len=180`, and the module-level
+`SEQUENCE_LENGTH = 60` fallback in `train.py` to `180`.
+
+Rationale: seq 180 gives ~92% of the basin improvement of seq 256
+(0.7840 vs 0.7757 best val at 4k steps, both from seq 32's 0.8421)
+at **70% of the wall time** (22.8m vs 32.5m per 4k-step probe).
+The extra 0.008 nat at seq 256 is real but not load-bearing given
+the throughput cost. Production Fox retrain from earlier today
+(`fox-20260415-rope-25k.pt`) is at seq 256; next retrain can drop
+to 180 if that margin matters less than training speed.
+
+Note: existing checkpoints trained at seq 256 (e.g.
+`fox-20260415-rope-25k.pt`, `falco-20260412-relpos-28k.pt`) continue
+to load fine because `max_seq_len` is a buffer dimension at load
+time — shorter inference-time sequences just use the first 180
+positions of the learned/registered position stuff. Longer than 180
+would need the old preset, which we've now overwritten. If a legacy
+checkpoint needs seq 256 decoding, override with `--seq-len 256`
+on the CLI at training/eval time.
+
 ## Auto-converge recipe hunt — WSD vs cosine + patience cleanup
 
 **The problem.** Different characters have wildly different optimal
