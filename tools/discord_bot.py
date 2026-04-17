@@ -24,7 +24,10 @@ Optional env vars:
 
 import os
 import re
+import signal
+import subprocess
 import sys
+import time
 import asyncio
 import logging
 from dataclasses import dataclass
@@ -176,10 +179,11 @@ if not _ensure_user_json(SLIPPI_HOME):
 
 # Character -> (best checkpoint, data dir, melee name)
 CHARACTERS = {
-    "FOX":       ("checkpoints/fox-20260413-rope-32k.pt",      "data/fox_v2",       "FOX"),
-    "FALCO":     ("checkpoints/falco-20260412-relpos-28k.pt", "data/falco_v2",     "FALCO"),
-    "CPTFALCON": ("checkpoints/cptfalcon-20260412-relpos-27k.pt",  "data/cptfalcon_v2", "CPTFALCON"),
-    "LUIGI":     ("checkpoints/luigi-20260412-relpos-5k.pt", "data/luigi_v2",     "LUIGI"),
+    "FOX":       ("checkpoints/fox-20260414-relpos-55k.pt",       "hf_checkpoints/fox",       "FOX"),
+    "FALCO":     ("checkpoints/falco-20260412-relpos-28k.pt",     "data/falco_v2",            "FALCO"),
+    "CPTFALCON": ("checkpoints/cptfalcon-20260412-relpos-27k.pt", "data/cptfalcon_v2",        "CPTFALCON"),
+    "LUIGI":     ("checkpoints/luigi-20260412-relpos-5k.pt",      "data/luigi_v2",            "LUIGI"),
+    "MARTH":     ("checkpoints/marth-20260417-relpos-27k.pt",     "hf_checkpoints/marth",     "MARTH"),
 }
 
 CHAR_ALIASES = {
@@ -190,6 +194,7 @@ CHAR_ALIASES = {
     "cpt": "CPTFALCON",
     "cf": "CPTFALCON",
     "luigi": "LUIGI",
+    "marth": "MARTH",
 }
 
 CONNECT_CODE_RE = re.compile(r"^[A-Z]{1,8}#\d+$")
@@ -672,5 +677,62 @@ async def announce_result(channel, req: MatchRequest, result: str, replay_path: 
     await channel.send(msg, files=files)
 
 
+def _cleanup_orphan_processes() -> None:
+    """Kill leftover play_netplay.py + dolphin-emu processes from a prior
+    bot run. These get reparented to init when the parent bot exits and
+    otherwise burn CPU/GPU forever (we've seen a 10+ hour Dolphin eating
+    85% CPU with no replay activity). Called once at startup BEFORE the
+    match worker starts consuming the queue — at this point no legitimate
+    children exist yet, so anything matching our spawn pattern is junk."""
+    my_pid = os.getpid()
+
+    def _pgrep(pattern: str) -> list[int]:
+        try:
+            out = subprocess.run(
+                ["pgrep", "-f", pattern],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return []
+        return [int(p) for p in out.stdout.split() if p.strip() and int(p) != my_pid]
+
+    def _kill(pids: list[int], sig: int) -> None:
+        for pid in pids:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                log.warning("Can't signal pid %d (permission denied)", pid)
+
+    play_pids = _pgrep("tools/play_netplay.py")
+    if play_pids:
+        log.warning("Found orphan play_netplay.py processes: %s — terminating", play_pids)
+        _kill(play_pids, signal.SIGTERM)
+        time.sleep(3.0)
+        survivors = [p for p in play_pids if _pgrep_alive(p)]
+        if survivors:
+            log.warning("play_netplay.py survivors after SIGTERM: %s — killing", survivors)
+            _kill(survivors, signal.SIGKILL)
+
+    # Sweep any Dolphin instances from our emulator path. play_netplay's
+    # shutdown_handler should cascade into Dolphin via console.stop(), but
+    # we've seen cases where Dolphin keeps running after the parent dies.
+    dolphin_pat = str(_REPO_ROOT / "emulator/squashfs-root/usr/bin/dolphin-emu")
+    dolphin_pids = _pgrep(dolphin_pat)
+    if dolphin_pids:
+        log.warning("Found orphan dolphin-emu processes: %s — killing", dolphin_pids)
+        _kill(dolphin_pids, signal.SIGKILL)
+
+
+def _pgrep_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
 if __name__ == "__main__":
+    _cleanup_orphan_processes()
     bot.run(DISCORD_BOT_TOKEN)

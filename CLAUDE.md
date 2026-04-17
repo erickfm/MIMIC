@@ -364,6 +364,14 @@ surface candidates to the user and ask before pushing — don't
 auto-promote. If a new character appears (e.g. first Marth run), flag it
 separately since the bot's character list needs wiring too.
 
+**Bot startup has an orphan sweep.** `_cleanup_orphan_processes()` runs
+before `bot.run()` and SIGTERMs (then SIGKILLs) any `play_netplay.py`
+and our-path `dolphin-emu` processes still alive from a prior bot run.
+These would otherwise be reparented to init and burn CPU/GPU forever —
+we had a 10+ hour Dolphin at 85% CPU with no replays being written. If
+you ever need a play_netplay.py to survive a bot restart, this is where
+to carve an exception, not by disabling the sweep.
+
 **Bot-startup audit.** Whenever you (re)start `tools/discord_bot.py`, do
 a promotion audit first. The authoritative source is HF
 `erickfm/MIMIC` — checkpoints live there after promotion, and the GPU
