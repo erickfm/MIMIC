@@ -217,6 +217,11 @@ queue: asyncio.Queue = None  # created in on_ready
 current_match: Optional[MatchRequest] = None
 pending_list: list[MatchRequest] = []  # mirror of queue for display / cancel
 
+# Live play_netplay.py subprocess for the in-flight session (if any).
+# Used so cmd_play / cmd_cancel can write "STOP\n" to its stdin to end
+# the back-to-back match chain cleanly after the current match.
+current_proc: Optional[asyncio.subprocess.Process] = None
+
 # ---- Discord client ----
 
 intents = discord.Intents.default()
@@ -266,7 +271,12 @@ async def cmd_info(ctx: commands.Context):
         f"Example: `!play falco WAVE#666`\n\n"
         f"The bot joins your Slippi Direct Connect lobby. Launch Slippi Online → "
         f"Direct Connect, enter `{BOT_SLIPPI_CODE}`, and wait — the bot will join you.\n\n"
-        f"`!queue` shows current queue. `!cancel` removes your pending match."
+        f"`!queue` shows current queue. `!cancel` removes your pending match.\n\n"
+        f"**Back-to-back matches:** the bot stays in your lobby after each "
+        f"match. Pick your next character and press Start on your side "
+        f"within 30s to queue another round — otherwise the bot disconnects "
+        f"and the chain ends. `!cancel` stops it early; another user's "
+        f"`!play` also ends your chain after the current match."
     )
     await ctx.reply(msg)
 
@@ -290,16 +300,45 @@ async def cmd_queue(ctx: commands.Context):
     await ctx.reply("\n".join(lines))
 
 
+async def _send_stop_to_current_session() -> bool:
+    """Write 'STOP\\n' to the running play_netplay subprocess's stdin so it
+    ends the chain cleanly after the current match. No-op if no session is
+    running or stdin is already closed. Returns True if STOP was sent."""
+    p = current_proc
+    if p is None or p.returncode is not None or p.stdin is None:
+        return False
+    try:
+        p.stdin.write(b"STOP\n")
+        await asyncio.wait_for(p.stdin.drain(), timeout=2.0)
+        log.info("Sent STOP to running session")
+        return True
+    except (BrokenPipeError, ConnectionResetError):
+        return False
+    except asyncio.TimeoutError:
+        log.warning("stdin.drain() timed out; subprocess may be hung")
+        return False
+
+
 @bot.command(name="cancel")
 async def cmd_cancel(ctx: commands.Context):
     uid = ctx.author.id
+    # Case 1: cancelling a pending (not-yet-running) queued match.
     removed = [r for r in pending_list if r.user_id == uid]
-    if not removed:
-        await ctx.reply("❌ You don't have a pending match in the queue.")
+    if removed:
+        for r in removed:
+            pending_list.remove(r)
+        await ctx.reply(f"✅ Cancelled your queued match ({removed[0].character} vs {removed[0].connect_code}).")
         return
-    for r in removed:
-        pending_list.remove(r)
-    await ctx.reply(f"✅ Cancelled your queued match ({removed[0].character} vs {removed[0].connect_code}).")
+    # Case 2: cancelling mid-chain — user is the current player. Ask the
+    # running session to stop after the current match.
+    if current_match is not None and current_match.user_id == uid:
+        ok = await _send_stop_to_current_session()
+        if ok:
+            await ctx.reply("✅ Chain will end after the current match.")
+        else:
+            await ctx.reply("⚠️ Couldn't reach the running session — it may already be exiting.")
+        return
+    await ctx.reply("❌ You don't have a pending or running match.")
 
 
 @bot.command(name="play")
@@ -346,6 +385,11 @@ async def cmd_play(ctx: commands.Context, character: str = None, connect_code: s
     pending_list.append(req)
     await queue.put(req)
 
+    # If someone else is currently playing a chain, ask their session to
+    # wrap up after the current match so this user gets served.
+    if current_match is not None and current_match.user_id != ctx.author.id:
+        await _send_stop_to_current_session()
+
     pos = len(pending_list)
     if current_match is None and pos == 1:
         eta_msg = "starting soon"
@@ -358,7 +402,10 @@ async def cmd_play(ctx: commands.Context, character: str = None, connect_code: s
 
 
 async def match_worker():
-    """Single background task: pops queue, runs matches one at a time."""
+    """Single background task: pops queue, runs one persistent-Dolphin
+    session at a time. Each session plays back-to-back matches until the
+    opponent idles, disconnects, another user queues (writes STOP), or
+    the user !cancels."""
     global current_match
     while True:
         req: MatchRequest = await queue.get()
@@ -371,35 +418,36 @@ async def match_worker():
 
         current_match = req
         ckpt_name = os.path.basename(CHARACTERS[req.character][0])
-        log.info("Starting match: %s -> %s (%s) checkpoint=%s",
+        log.info("Starting session: %s -> %s (%s) checkpoint=%s",
                  req.user_name, req.character, req.connect_code, ckpt_name)
 
         channel = bot.get_channel(req.channel_id)
         if channel is not None:
             try:
                 await channel.send(
-                    f"▶️ **Match starting**: {req.user_name} vs MIMIC ({req.character})\n"
+                    f"🎯 **Session starting**: {req.user_name} vs MIMIC ({req.character})\n"
                     f"Checkpoint: `{ckpt_name}`\n"
-                    f"Enter `{BOT_SLIPPI_CODE}` in Slippi Online → Direct Connect now."
+                    f"Enter `{BOT_SLIPPI_CODE}` in Slippi Online → Direct Connect now. "
+                    f"After each match, pick your next character and press Start within 30s "
+                    f"to keep going. `!cancel` ends the chain."
                 )
             except Exception:
-                log.exception("Failed to send match-starting message")
+                log.exception("Failed to send session-starting message")
 
-        result, replay_path, err_tail, score = await run_match(req)
-        log.info("Match finished: result=%s score=%s checkpoint=%s replay=%s",
-                 result, score, ckpt_name, replay_path)
-
-        if channel is not None:
-            try:
-                await announce_result(channel, req, result, replay_path, err_tail, score, ckpt_name)
-            except Exception:
-                log.exception("Failed to send result message")
+        try:
+            await run_session(req, channel, ckpt_name)
+        except Exception:
+            log.exception("run_session raised")
 
         current_match = None
 
 
-async def run_match(req: MatchRequest) -> tuple[str, str, str]:
-    """Spawn play_netplay.py for one match. Returns (result, replay_path, err_tail)."""
+async def run_session(req: MatchRequest, channel, ckpt_name: str) -> None:
+    """Spawn play_netplay.py in persistent-session mode and stream
+    per-match announcements in real time. Returns when the subprocess
+    emits SESSION_END and exits."""
+    global current_proc
+
     ckpt, data_dir, melee_char = CHARACTERS[req.character]
     ckpt_abs = os.path.join(MIMIC_REPO, ckpt)
     data_dir_abs = os.path.join(MIMIC_REPO, data_dir)
@@ -415,52 +463,150 @@ async def run_match(req: MatchRequest) -> tuple[str, str, str]:
         "--connect-code", req.connect_code,
         "--match-timeout", str(MATCH_TIMEOUT_SEC),
         "--slippi-home", SLIPPI_HOME,
+        "--max-matches", "-1",
+        "--rematch-timeout", "30",
+        "--check-stdin",
     ]
     log.info("Spawn: %s", " ".join(cmd))
 
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=MIMIC_REPO,
         )
     except Exception as e:
         log.exception("Failed to spawn play_netplay.py")
-        return ("failed", "", str(e))
+        if channel is not None:
+            try:
+                await channel.send(f"❌ Failed to start session: {e}")
+            except Exception:
+                pass
+        return
+
+    current_proc = proc
+    pending: dict = {}          # accumulates one match's RESULT/SCORE/REPLAY
+    session_end_reason: Optional[str] = None
+
+    async def _flush_pending():
+        """Announce the accumulated match result, if any."""
+        nonlocal pending
+        if not pending.get("result"):
+            pending = {}
+            return
+        try:
+            await announce_result(
+                channel, req,
+                pending["result"],
+                pending.get("replay", ""),
+                "",
+                pending.get("score", ""),
+                ckpt_name,
+            )
+        except Exception:
+            log.exception("Failed to announce match result")
+        log.info("Match %s finished: result=%s score=%s replay=%s",
+                 pending.get("idx", "?"),
+                 pending["result"],
+                 pending.get("score", ""),
+                 pending.get("replay", ""))
+        pending = {}
 
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            proc.communicate(),
-            timeout=MATCH_TIMEOUT_SEC + 120,  # extra buffer over the script's own timeout
-        )
+        # Hard upper bound on a single session: 30 matches × match-timeout.
+        # Well beyond what anyone will play in one sitting; guards against a
+        # stuck subprocess that never emits SESSION_END.
+        session_deadline = MATCH_TIMEOUT_SEC * 30
+        try:
+            async with asyncio.timeout(session_deadline):
+                while True:
+                    raw = await proc.stdout.readline()
+                    if not raw:
+                        break
+                    text = raw.decode(errors="replace").strip()
+                    if not text:
+                        continue
+                    if text.startswith("MATCH_START:"):
+                        await _flush_pending()
+                        idx = text.split(":", 1)[1].strip()
+                        pending = {"idx": idx}
+                        if channel is not None:
+                            try:
+                                await channel.send(
+                                    f"▶️ **Match {idx} starting** — "
+                                    f"{req.user_name} vs MIMIC ({req.character})"
+                                )
+                            except Exception:
+                                log.exception("Failed to send match-starting message")
+                    elif text.startswith("RESULT:"):
+                        pending["result"] = text.split(":", 1)[1].strip()
+                    elif text.startswith("SCORE:"):
+                        pending["score"] = text.split(":", 1)[1].strip()
+                    elif text.startswith("REPLAY:"):
+                        pending["replay"] = text.split(":", 1)[1].strip()
+                    elif text.startswith("SESSION_END:"):
+                        session_end_reason = text.split(":", 1)[1].strip()
+                        await _flush_pending()
+                        break
+                    # Any other line on stdout is ignored.
+        except asyncio.TimeoutError:
+            log.warning("Session exceeded hard wall-clock limit; killing")
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            session_end_reason = "hard-timeout"
+            await _flush_pending()
+    finally:
+        current_proc = None
+
+    # Drain remaining stderr + wait for exit.
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=30.0)
     except asyncio.TimeoutError:
-        log.warning("play_netplay.py exceeded hard wall-clock limit; killing")
         try:
             proc.kill()
         except Exception:
             pass
-        await proc.communicate()
-        return ("timeout", "", "hard wall-clock timeout")
+        await proc.wait()
 
-    stdout = stdout_bytes.decode(errors="replace")
-    stderr = stderr_bytes.decode(errors="replace")
+    stderr_tail = ""
+    try:
+        stderr_bytes = await proc.stderr.read()
+        stderr_tail = stderr_bytes.decode(errors="replace")[-500:]
+    except Exception:
+        pass
 
-    result = "failed"
-    replay_path = ""
-    score = ""
-    for line in stdout.splitlines():
-        if line.startswith("RESULT:"):
-            result = line.split(":", 1)[1].strip()
-        elif line.startswith("REPLAY:"):
-            replay_path = line.split(":", 1)[1].strip()
-        elif line.startswith("SCORE:"):
-            score = line.split(":", 1)[1].strip()
+    # Session-end announcements.
+    if channel is not None:
+        try:
+            if session_end_reason == "opponent-timeout":
+                await channel.send(
+                    "⌛ Opponent idled on the rematch screen — chain ended. "
+                    "`!play` again to come back."
+                )
+            elif session_end_reason == "stopped":
+                # Another user queued and triggered a graceful handoff.
+                # Worker will pick up the next request immediately.
+                pass
+            elif session_end_reason in ("opponent-gone", "max-matches", "signal"):
+                # Already covered by the final match's RESULT announcement.
+                pass
+            elif session_end_reason == "hard-timeout":
+                await channel.send("⏱️ Session watchdog fired — subprocess killed.")
+            elif session_end_reason == "error" or (proc.returncode not in (0, None)):
+                msg = f"❌ Session crashed (exit={proc.returncode}, reason={session_end_reason})"
+                if stderr_tail:
+                    msg += f"\n```\n{stderr_tail[-400:]}\n```"
+                await channel.send(msg)
+        except Exception:
+            log.exception("Failed to send session-end message")
 
-    err_tail = stderr[-500:] if stderr else ""
-    if proc.returncode != 0 and result == "failed":
-        log.warning("play_netplay.py exit=%d, stderr tail:\n%s", proc.returncode, err_tail)
-    return (result, replay_path, err_tail, score)
+    if proc.returncode not in (0, None):
+        log.warning("play_netplay.py exit=%d, stderr tail:\n%s",
+                    proc.returncode, stderr_tail)
 
 
 async def announce_result(channel, req: MatchRequest, result: str, replay_path: str,

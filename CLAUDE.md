@@ -352,6 +352,48 @@ were left alone — they're historical records.
 **Set `--run-name` to `{char}-{YYYYMMDD}-{descriptor}`** when starting a new
 run (the step suffix gets appended when renaming the finished `_best.pt`).
 
+**Promotion policy.** When a finished wandb run beats the current best
+`val/total` for its character, the candidate promotion is: pull the
+checkpoint, rename it to `{char}-{YYYYMMDD}-{descriptor}-{steps}k.pt`,
+upload it to `erickfm/MIMIC` on HF, and update the Discord bot's default
+for that character. Skip runs whose name starts with `SWEEP-`, `DBG`,
+`DEBUG-`, `FIX-`, or `BENCH-` — those are infra/debug and not production
+candidates even if their loss is lower. A promotable run is a
+named-character training like `fox-20260416-master-relpos`. Always
+surface candidates to the user and ask before pushing — don't
+auto-promote. If a new character appears (e.g. first Marth run), flag it
+separately since the bot's character list needs wiring too.
+
+**Bot-startup audit.** Whenever you (re)start `tools/discord_bot.py`, do
+a promotion audit first. The authoritative source is HF
+`erickfm/MIMIC` — checkpoints live there after promotion, and the GPU
+boxes are ephemeral so wandb checkpoints aren't retrievable once the
+machine dies. Procedure:
+
+1. List files under `erickfm/MIMIC` via `HfApi.list_repo_files`. For each
+   character dir (`fox/`, `falco/`, `cptfalcon/`, `luigi/`, plus any new
+   ones), read `metadata.json` for `run_name`, `global_step`, and
+   `val_loss`.
+2. Compare each character's HF `run_name` to the filename the bot's
+   `CHARACTERS` dict in `tools/discord_bot.py` currently points at. If
+   HF has a newer run (different `run_name` / higher step / better
+   `val_loss`) than what's wired into the bot, it's a replacement
+   candidate.
+3. Also flag any HF character directory the bot doesn't know about —
+   that's a new character the bot needs wired up (extend `CHARACTERS`
+   dict + aliases).
+4. Report candidates to the user and ask whether to pull + swap before
+   bringing the bot up. On approval: `snapshot_download` the new
+   character dirs into `hf_checkpoints/`, copy the `.pt` into
+   `checkpoints/` with the project naming convention, edit
+   `tools/discord_bot.py` `CHARACTERS` dict, and restart the bot.
+
+Secondary (supplementary) check: wandb `erickfm/MIMIC` for finished
+non-debug runs newer than HF's `last_modified` — useful to remind the
+user "you have trained X but it hasn't been uploaded yet," but the
+checkpoints themselves have to come from the GPU box (or be re-trained)
+since wandb doesn't store the `.pt`.
+
 ## File Map
 
 ### Core
@@ -370,8 +412,37 @@ run (the step suffix gets appended when renaming the finished `_best.pt`).
 - `tools/run_hal_model.py` — Our reimplementation of HAL's 5-class inference. Loads HAL checkpoints. Structurally can't wavedash (no TRIG class).
 
 **Inference (online, Slippi netplay):**
-- `tools/play_netplay.py` — Joins a Slippi Online Direct Connect lobby. Uses `MenuHelper.menu_helper_simple(connect_code=...)`, detects bot's port via the `connectCode` field on `PlayerState` (handles dittos and palette swaps). Prints machine-readable `RESULT:` / `SCORE:` / `REPLAY:` lines for the Discord bot.
-- `tools/discord_bot.py` — Discord front-end (prefix commands: `!play`, `!queue`, `!cancel`, `!info`). Single-match FIFO queue via `asyncio.Queue`. Spawns `play_netplay.py` as a subprocess per match, uploads the saved replay back to the channel. Config via `.env` (see `.env.example`).
+- `tools/play_netplay.py` — Joins a Slippi Online Direct Connect lobby. Uses `MenuHelper.menu_helper_simple(connect_code=...)`, detects bot's port via the `connectCode` field on `PlayerState` (handles dittos and palette swaps). **Persistent-session mode** (see below): plays up to `--max-matches N` back-to-back matches in one Dolphin process, emitting a per-match stdout block (`MATCH_START:`, `RESULT:`, `SCORE:`, `REPLAY:`) and a single `SESSION_END:` on exit. Default `--max-matches 1` preserves the old one-shot CLI behavior; the Discord bot passes `-1` for unlimited.
+- `tools/discord_bot.py` — Discord front-end (prefix commands: `!play`, `!queue`, `!cancel`, `!info`). Single-session FIFO queue via `asyncio.Queue`. Spawns `play_netplay.py` once per user and streams its stdout: each `MATCH_START` → `▶️ Match N starting` post, each `RESULT/SCORE/REPLAY` triplet → result announcement + replay upload. Uploads the saved replay back to the channel. Config via `.env` (see `.env.example`).
+
+**Persistent-session model (2026-04-16).** Each Discord `!play` spawns
+one `play_netplay.py` that keeps Dolphin alive across multiple matches
+in the same Slippi Direct Connect lobby. After each match, `MenuHelper`
+drives through POSTGAME_SCORES back to CSS; the opponent has
+`--rematch-timeout` seconds (default 30) to pick a character and press
+Start for the next match. The session ends when (a) opponent DCs or
+idles, (b) another user calls `!play` (the bot writes `STOP\n` to the
+subprocess's stdin, which finishes the current match then exits), or
+(c) the current player `!cancel`s (same STOP path). **Do NOT
+reintroduce per-match subprocess spawning** — the 30–60 s of Dolphin
+relaunch dead air was the exact UX problem this refactor fixed.
+
+Stdout protocol emitted by `play_netplay.py`:
+```
+MATCH_START: <1-based idx>     # emitted when IN_GAME is first reached
+RESULT: win|loss|draw|disconnect|no-opponent|timeout|failed
+SCORE: bot=Xstk/Y% opp=Xstk/Y%
+REPLAY: /abs/path/Game_YYYYMMDDThhmmss.slp
+# (above four repeat per match)
+SESSION_END: max-matches|opponent-gone|opponent-timeout|stopped|error|signal|hard-timeout
+```
+
+Per-match state reset lives in the outer match loop of `play_netplay.py`
+(MenuHelper `stage_selected` / `frozen_stadium_selected`, `PlayerState`
+recreated on each IN_GAME transition). `opponent_last_seen` and
+`opponent_ever_seen` deliberately persist across matches for DC
+detection. STOP polling uses `select.select([sys.stdin], [], [], 0)` —
+non-blocking, checked once per console step.
 
 **Inference (shared):**
 - `tools/inference_utils.py` — Shared inference pipeline: `load_mimic_model`, `load_inference_context`, `build_frame`, `build_frame_p2`, `PlayerState`, `decode_and_press`. **This is where the L-button fix (2026-04-13) lives.** Any new inference entry point should import from here, not reimplement.

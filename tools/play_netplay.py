@@ -31,6 +31,7 @@ import argparse
 import json
 import logging
 import os
+import select
 import signal
 import time
 
@@ -69,6 +70,18 @@ parser.add_argument("--opponent-lost-timeout", type=float, default=10.0,
                          "crash) before giving up and exiting the direct-connect lobby")
 parser.add_argument("--match-timeout", type=float, default=900.0,
                     help="Maximum seconds for a single match (15 min default)")
+parser.add_argument("--max-matches", type=int, default=1,
+                    help="Play up to N matches back-to-back in one Dolphin session. "
+                         "Default 1 (one-shot, matches pre-refactor CLI behavior). "
+                         "Pass -1 for unlimited (Discord bot uses this).")
+parser.add_argument("--rematch-timeout", type=float, default=30.0,
+                    help="Seconds to wait in CSS after a match for the opponent to "
+                         "ready up for the next one. Only applies to matches 2+; "
+                         "the initial connect uses --no-opponent-timeout.")
+parser.add_argument("--check-stdin", action="store_true",
+                    help="Poll stdin non-blocking for 'STOP' — the Discord bot writes "
+                         "this to the subprocess to end the chain cleanly after the "
+                         "current match. Off by default for CLI use.")
 parser.add_argument("--bot-slippi-code", default=None,
                     help="Bot's own Slippi connect code (e.g. MIMIC#01). "
                          "Used to identify the bot's player in gs.players during "
@@ -128,16 +141,63 @@ if not BOT_CODE:
           "port detection", file=sys.stderr)
 
 
-def emit_result(result: str, replay_path: str = "",
-                bot_stocks: int = -1, opp_stocks: int = -1,
-                bot_percent: float = 0.0, opp_percent: float = 0.0):
-    """Print machine-readable final status for the Discord bot parser."""
+def emit_match_start(idx: int):
+    print(f"MATCH_START: {idx}", flush=True)
+
+
+def emit_match_result(result: str, replay_path: str = "",
+                      bot_stocks: int = -1, opp_stocks: int = -1,
+                      bot_percent: float = 0.0, opp_percent: float = 0.0):
+    """Per-match status line(s) for the Discord bot parser."""
     print(f"RESULT: {result}", flush=True)
     if bot_stocks >= 0 and opp_stocks >= 0:
         print(f"SCORE: bot={bot_stocks}stk/{bot_percent:.0f}% "
               f"opp={opp_stocks}stk/{opp_percent:.0f}%", flush=True)
     if replay_path:
         print(f"REPLAY: {replay_path}", flush=True)
+
+
+def emit_session_end(reason: str):
+    print(f"SESSION_END: {reason}", flush=True)
+
+
+class _SessionExit(Exception):
+    """Sentinel to unwind the outer match loop from deep inside the inner one."""
+
+
+def _snapshot_replay_mtimes(replay_dir_: str) -> dict:
+    try:
+        return {p.name: p.stat().st_mtime for p in Path(replay_dir_).glob("*.slp")}
+    except Exception:
+        return {}
+
+
+def _find_new_replay(replay_dir_: str, before_snapshot: dict) -> str:
+    try:
+        after = list(Path(replay_dir_).glob("*.slp"))
+        new = [p for p in after
+               if p.name not in before_snapshot
+               or p.stat().st_mtime > before_snapshot[p.name]]
+        new.sort(key=lambda p: p.stat().st_mtime)
+        return str(new[-1].resolve()) if new else ""
+    except Exception:
+        return ""
+
+
+def _stdin_has_stop() -> bool:
+    if not args.check_stdin:
+        return False
+    try:
+        r, _, _ = select.select([sys.stdin], [], [], 0)
+    except (ValueError, OSError):
+        return False
+    if not r:
+        return False
+    try:
+        line = sys.stdin.readline()
+    except Exception:
+        return False
+    return line.strip().upper() == "STOP"
 
 
 # ---- Load model + inference context ----
@@ -151,7 +211,9 @@ try:
     ctx = load_inference_context(args.data_dir)
 except Exception as e:
     log.exception("Failed to load model/context")
-    emit_result("failed")
+    emit_match_start(1)
+    emit_match_result("failed")
+    emit_session_end("error")
     sys.exit(1)
 
 BOT_CHAR = melee.Character[args.character]
@@ -200,6 +262,10 @@ menu_helper = melee.MenuHelper()
 
 def shutdown_handler(*_):
     try:
+        emit_session_end("signal")
+    except Exception:
+        pass
+    try:
         console.stop()
     except Exception:
         pass
@@ -208,248 +274,296 @@ def shutdown_handler(*_):
 signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
 
-# ---- Main loop: menu navigation → match → exit ----
+# ---- Main loop: outer match loop + inner per-match loop ----
+#
+# Session-persistent state (lives across matches):
+#   opponent_last_seen / opponent_ever_seen — set once the opponent appears
+#       in gs.players; used for DC detection. Do NOT reset per match.
+#   match_idx — 1-based counter of matches started this session.
+#   session_reason — why the session ends (max-matches / opponent-gone /
+#       opponent-timeout / stopped / error / signal).
+#   detected_port / player_state — per-match but kept at module scope so
+#       _build_frame() can close over detected_port without shenanigans.
 player_state: PlayerState = None
 detected_port: int = 0
-match_started = False
-match_start_time = None
-last_known_state = "UNKNOWN"
-start_time = time.time()
-last_in_game_time = None
-# Track when we last saw an opponent (>=2 players in gs.players). Used to
-# detect mid-match DCs: if the opponent's Dolphin crashes, the bot gets
-# dumped back to the menu but the lobby stays open, and without this check
-# it would sit there forever waiting for someone to press Start.
 opponent_last_seen = None
 opponent_ever_seen = False
 
-# Track stocks to detect game end robustly. We remember the last-seen
-# stock counts because by the time the script exits the in-game loop the
-# gamestate may have already reset for post-game.
-initial_stocks = None
-last_seen_me_stock = None
-last_seen_opp_stock = None
-last_seen_me_percent = 0.0
-last_seen_opp_percent = 0.0
-final_result = "timeout"
-replay_path_out = ""
 
-# Figure out which build_frame to call based on detected port
 def _build_frame(gs, prev_sent, ctx_):
     if detected_port <= 1:
         return build_frame(gs, prev_sent, ctx_)
     else:
         return build_frame_p2(gs, prev_sent, ctx_)
 
+
+session_reason = "max-matches"
+stop_requested = False
+match_idx = 0
+
 try:
     while True:
-        gs = console.step()
-        if gs is None:
-            continue
+        match_idx += 1
+        if args.max_matches > 0 and match_idx > args.max_matches:
+            session_reason = "max-matches"
+            break
 
-        now = time.time()
+        # Per-match reset. MenuHelper latches stage_selected /
+        # frozen_stadium_selected to True once a stage is picked; in a
+        # persistent-lobby rematch the stage picker isn't re-shown, but
+        # reset defensively in case Slippi ever does surface it again.
+        menu_helper.stage_selected = False
+        menu_helper.frozen_stadium_selected = False
+        player_state = None
+        detected_port = 0
+        match_started = False
+        match_start_time = None
+        initial_stocks = None
+        last_seen_me_stock = None
+        last_seen_opp_stock = None
+        last_seen_me_percent = 0.0
+        last_seen_opp_percent = 0.0
+        match_final_result = "timeout"
+        dc_detected = False
 
-        # Track opponent presence for DC detection. At least 2 players in
-        # gs.players means we're either in a lobby/CSS with the opponent,
-        # or in-match.
-        if gs.players and len(gs.players) >= 2:
-            opponent_last_seen = now
-            opponent_ever_seen = True
+        replay_snapshot = _snapshot_replay_mtimes(replay_dir)
+        css_wait_start = time.time()
 
-        # Menu / lobby navigation — let MenuHelper drive until we reach IN_GAME
-        if gs.menu_state not in (melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH):
-            if match_started:
-                # We were in a game and now we're not — match ended
-                log.info("Game ended (menu=%s)", gs.menu_state)
-                break
-
-            # Opponent-DC detection: if we saw the opponent at some point
-            # (in CSS / in-match) but they've been missing from gs.players
-            # for longer than the DC timeout, bail out. This covers the
-            # "user's Dolphin crashed mid-match and the bot is now stuck
-            # on the post-game menu with an empty lobby" case.
-            if (opponent_ever_seen
-                    and opponent_last_seen is not None
-                    and (now - opponent_last_seen) > args.opponent_lost_timeout):
-                log.warning("Opponent missing for %.1fs, treating as disconnect",
-                            now - opponent_last_seen)
-                final_result = "disconnect"
-                break
-
-            # Connect-code timeout: if we've been in menus for too long without
-            # the opponent showing up, give up.
-            if (now - start_time) > args.no_opponent_timeout:
-                log.warning("No opponent connected within %ds, giving up", args.no_opponent_timeout)
-                final_result = "no-opponent"
-                break
-
-            menu_helper.menu_helper_simple(
-                gs,
-                bot_ctrl,
-                BOT_CHAR,
-                STAGE,
-                connect_code=args.connect_code,
-                costume=args.costume,
-                autostart=True,
-                swag=False,
-            )
-            continue
-
-        # --- IN_GAME ---
-        if not match_started:
-            # Detect which port the bot ended up on. Prefer the bot's own
-            # Slippi connect code (unambiguous, handles dittos and palette
-            # swaps), then fall back to character+costume, then character only.
-            detected_port = 0
-            if BOT_CODE:
-                for pid, p in gs.players.items():
-                    if getattr(p, "connectCode", "") == BOT_CODE:
-                        detected_port = pid
-                        break
-            if detected_port == 0:
-                detected_port = melee.gamestate.port_detector(gs, BOT_CHAR, args.costume)
-            if detected_port == 0:
-                matches = [pid for pid, p in gs.players.items()
-                           if p.character == BOT_CHAR]
-                if len(matches) == 1:
-                    detected_port = matches[0]
-                    log.info("port_detector fallback: char-only match on port %d", detected_port)
-                elif len(matches) > 1:
-                    detected_port = matches[0]
-                    log.warning("port_detector fallback: ditto detected and no "
-                                "connectCode match, defaulting to port %d",
-                                detected_port)
-            if detected_port == 0:
-                if gs.players:
-                    log.debug("port_detector failed, players=%s",
-                              {pid: (p.character.name, getattr(p, "connectCode", ""))
-                               for pid, p in gs.players.items()})
+        # ---- Inner: one match (menu → CSS → in-game → game end) ----
+        while True:
+            gs = console.step()
+            if gs is None:
                 continue
-            match_started = True
-            match_start_time = now
-            last_known_state = "IN_GAME"
-            me = gs.players[detected_port]
-            log.info("Match started. Bot is on port %d (char=%s costume=%d code=%s)",
-                     detected_port, BOT_CHAR.name, me.costume,
-                     getattr(me, "connectCode", "?"))
-            player_state = PlayerState(model, cfg.max_seq_len, DEVICE, ctx=ctx)
-            initial_stocks = None
 
-        last_in_game_time = now
+            now = time.time()
 
-        # Match timeout
-        if (now - match_start_time) > args.match_timeout:
-            log.warning("Match exceeded %ds timeout", args.match_timeout)
-            final_result = "timeout"
-            break
+            # Non-blocking STOP poll from the Discord bot (only when
+            # --check-stdin is set). If STOP arrives before the match has
+            # started, exit the session immediately. If it arrives
+            # mid-match, flag it and let the current match complete —
+            # opponents should always see their match finish.
+            if _stdin_has_stop():
+                stop_requested = True
+                if not match_started:
+                    log.info("STOP received pre-match; exiting session")
+                    session_reason = "stopped"
+                    raise _SessionExit()
 
-        # Mid-match DC: opponent vanished from gs.players while IN_GAME.
-        # (opponent_last_seen is refreshed above whenever len(players) >= 2.)
-        if (opponent_last_seen is not None
-                and (now - opponent_last_seen) > args.opponent_lost_timeout):
-            log.warning("Opponent missing mid-match for %.1fs, treating as disconnect",
-                        now - opponent_last_seen)
-            final_result = "disconnect"
-            break
+            # Track opponent presence for DC detection.
+            if gs.players and len(gs.players) >= 2:
+                opponent_last_seen = now
+                opponent_ever_seen = True
 
-        # Build frame from bot's perspective
-        frame = _build_frame(gs, player_state.prev_sent, ctx)
-        if frame is None:
-            continue
+            # --- Menu / CSS / post-game path ---
+            if gs.menu_state not in (melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH):
+                if match_started:
+                    log.info("Game ended (menu=%s)", gs.menu_state)
+                    break
 
-        player_state.push_frame(frame)
-        preds = player_state.predict()
+                # Opponent DC in menus — either the first connect never
+                # landed, or the opponent left the lobby after an earlier
+                # match in this session.
+                if (opponent_ever_seen
+                        and opponent_last_seen is not None
+                        and (now - opponent_last_seen) > args.opponent_lost_timeout):
+                    log.warning("Opponent missing for %.1fs, treating as disconnect",
+                                now - opponent_last_seen)
+                    match_final_result = "disconnect"
+                    dc_detected = True
+                    break
 
-        new_sent, pressed, btn_names = decode_and_press(
-            bot_ctrl, preds, player_state.prev_sent, temperature=args.temperature,
-        )
-        player_state.prev_sent = new_sent
+                # CSS-wait timeout. Match 1 uses the longer no-opponent
+                # timeout (covers initial Slippi handshake latency); match
+                # 2+ uses the snappier rematch timeout for "opponent didn't
+                # ready up on the CSS." The rematch case ends the session
+                # without emitting a RESULT — this iteration's match never
+                # started, so there's nothing to announce.
+                if match_idx >= 2:
+                    if (now - css_wait_start) > args.rematch_timeout:
+                        log.warning("Opponent didn't ready up within %.1fs, "
+                                    "ending session", args.rematch_timeout)
+                        session_reason = "opponent-timeout"
+                        raise _SessionExit()
+                else:
+                    if (now - css_wait_start) > args.no_opponent_timeout:
+                        log.warning("No opponent connected within %ds, giving up",
+                                    args.no_opponent_timeout)
+                        match_final_result = "no-opponent"
+                        dc_detected = True
+                        break
 
-        # Snapshot current stocks for win/loss detection. Record the
-        # last-seen non-zero stocks for each side so we can report scores
-        # even after the game state resets.
-        game_over = False
-        try:
-            players = sorted(gs.players.items())
-            if len(players) >= 2:
+                menu_helper.menu_helper_simple(
+                    gs,
+                    bot_ctrl,
+                    BOT_CHAR,
+                    STAGE,
+                    connect_code=args.connect_code,
+                    costume=args.costume,
+                    autostart=True,
+                    swag=False,
+                )
+                continue
+
+            # --- IN_GAME ---
+            if not match_started:
+                # Detect which port the bot ended up on. Prefer the bot's
+                # own Slippi connect code (unambiguous — handles dittos and
+                # palette swaps), then fall back to character+costume,
+                # then character only.
+                detected_port = 0
+                if BOT_CODE:
+                    for pid, p in gs.players.items():
+                        if getattr(p, "connectCode", "") == BOT_CODE:
+                            detected_port = pid
+                            break
+                if detected_port == 0:
+                    detected_port = melee.gamestate.port_detector(gs, BOT_CHAR, args.costume)
+                if detected_port == 0:
+                    matches = [pid for pid, p in gs.players.items()
+                               if p.character == BOT_CHAR]
+                    if len(matches) == 1:
+                        detected_port = matches[0]
+                        log.info("port_detector fallback: char-only match on port %d", detected_port)
+                    elif len(matches) > 1:
+                        detected_port = matches[0]
+                        log.warning("port_detector fallback: ditto detected and no "
+                                    "connectCode match, defaulting to port %d",
+                                    detected_port)
+                if detected_port == 0:
+                    if gs.players:
+                        log.debug("port_detector failed, players=%s",
+                                  {pid: (p.character.name, getattr(p, "connectCode", ""))
+                                   for pid, p in gs.players.items()})
+                    continue
+                match_started = True
+                match_start_time = now
                 me = gs.players[detected_port]
-                opp_ports = [p for p in gs.players if p != detected_port]
-                opp = gs.players[opp_ports[0]] if opp_ports else None
-                if initial_stocks is None:
-                    initial_stocks = (me.stock, opp.stock if opp else 0)
-                last_seen_me_stock = me.stock
-                last_seen_me_percent = me.percent
-                if opp is not None:
-                    last_seen_opp_stock = opp.stock
-                    last_seen_opp_percent = opp.percent
-                # Game over: either side reached 0 stocks
-                if me.stock == 0 or (opp is not None and opp.stock == 0):
-                    game_over = True
-                # Emit a periodic log
-                if int(now) % 2 == 0 and int(now * 10) % 20 < 2:
-                    log.info("BOT(p%d) %dstk %d%% | OPP %dstk %d%%",
-                             detected_port, me.stock, int(me.percent),
-                             opp.stock if opp else 0, int(opp.percent) if opp else 0)
+                log.info("Match %d started. Bot is on port %d (char=%s costume=%d code=%s)",
+                         match_idx, detected_port, BOT_CHAR.name, me.costume,
+                         getattr(me, "connectCode", "?"))
+                # Fresh PlayerState drops any rolling context from a prior
+                # match — position/stage/stocks all reset on a new match,
+                # so carrying frames across would push the model OOD.
+                player_state = PlayerState(model, cfg.max_seq_len, DEVICE, ctx=ctx)
+                initial_stocks = None
+                emit_match_start(match_idx)
+
+            if (now - match_start_time) > args.match_timeout:
+                log.warning("Match %d exceeded %ds timeout", match_idx, args.match_timeout)
+                match_final_result = "timeout"
+                break
+
+            if (opponent_last_seen is not None
+                    and (now - opponent_last_seen) > args.opponent_lost_timeout):
+                log.warning("Opponent missing mid-match for %.1fs, treating as disconnect",
+                            now - opponent_last_seen)
+                match_final_result = "disconnect"
+                dc_detected = True
+                break
+
+            frame = _build_frame(gs, player_state.prev_sent, ctx)
+            if frame is None:
+                continue
+
+            player_state.push_frame(frame)
+            preds = player_state.predict()
+
+            new_sent, pressed, btn_names = decode_and_press(
+                bot_ctrl, preds, player_state.prev_sent, temperature=args.temperature,
+            )
+            player_state.prev_sent = new_sent
+
+            # Snapshot stocks each frame so we can resolve the result from
+            # the last-seen values (post-game gamestate may reset before
+            # we exit the inner loop).
+            game_over = False
+            try:
+                players = sorted(gs.players.items())
+                if len(players) >= 2:
+                    me = gs.players[detected_port]
+                    opp_ports = [p for p in gs.players if p != detected_port]
+                    opp = gs.players[opp_ports[0]] if opp_ports else None
+                    if initial_stocks is None:
+                        initial_stocks = (me.stock, opp.stock if opp else 0)
+                    last_seen_me_stock = me.stock
+                    last_seen_me_percent = me.percent
+                    if opp is not None:
+                        last_seen_opp_stock = opp.stock
+                        last_seen_opp_percent = opp.percent
+                    if me.stock == 0 or (opp is not None and opp.stock == 0):
+                        game_over = True
+                    if int(now) % 2 == 0 and int(now * 10) % 20 < 2:
+                        log.info("BOT(p%d) %dstk %d%% | OPP %dstk %d%%",
+                                 detected_port, me.stock, int(me.percent),
+                                 opp.stock if opp else 0, int(opp.percent) if opp else 0)
+            except Exception:
+                pass
+
+            if game_over:
+                log.info("Stock-out detected. Match %d ending.", match_idx)
+                time.sleep(1.0)
+                break
+
+        # ---- Inner loop exited: resolve this match's result ----
+        try:
+            if not match_started:
+                # Match never started. If we'd seen the opponent earlier in
+                # the session, treat as disconnect; otherwise (match 1)
+                # it's no-opponent.
+                if match_final_result not in ("disconnect", "no-opponent"):
+                    match_final_result = "disconnect" if opponent_ever_seen else "no-opponent"
+            elif last_seen_me_stock is not None and last_seen_opp_stock is not None:
+                if last_seen_me_stock > 0 and last_seen_opp_stock == 0:
+                    match_final_result = "win"
+                elif last_seen_me_stock == 0 and last_seen_opp_stock > 0:
+                    match_final_result = "loss"
+                elif last_seen_me_stock > last_seen_opp_stock:
+                    match_final_result = "win"
+                elif last_seen_me_stock < last_seen_opp_stock:
+                    match_final_result = "loss"
+                else:
+                    if last_seen_me_percent < last_seen_opp_percent:
+                        match_final_result = "win"
+                    elif last_seen_me_percent > last_seen_opp_percent:
+                        match_final_result = "loss"
+                    else:
+                        match_final_result = "draw"
+            # else: match started but no stocks observed — leave as "timeout"
         except Exception:
             pass
 
-        if game_over:
-            # Wait ~1 second for the dying animation to complete, then bail
-            # out of the match. console.stop() in the finally block will kill
-            # Dolphin, ending the netplay session cleanly so the opponent
-            # doesn't linger in a rematch lobby.
-            log.info("Stock-out detected. Ending match.")
-            time.sleep(1.0)
+        replay_path_out = _find_new_replay(replay_dir, replay_snapshot)
+
+        # Emit this match's result. If MATCH_START was never printed
+        # (match didn't reach IN_GAME — e.g. match 1 no-opponent), print
+        # one now so the Discord bot can pair the lines cleanly.
+        if not match_started:
+            emit_match_start(match_idx)
+        emit_match_result(
+            match_final_result, replay_path_out,
+            bot_stocks=last_seen_me_stock if last_seen_me_stock is not None else -1,
+            opp_stocks=last_seen_opp_stock if last_seen_opp_stock is not None else -1,
+            bot_percent=last_seen_me_percent,
+            opp_percent=last_seen_opp_percent,
+        )
+
+        # Session-continue decisions.
+        if stop_requested:
+            session_reason = "stopped"
+            break
+        if dc_detected or match_final_result in ("no-opponent", "disconnect"):
+            session_reason = "opponent-gone"
             break
 
-    # ---- Determine result ----
-    # Use the last-seen stock counts during the in-game loop — by the time we
-    # exit, gs.players may have already been reset for the post-game menu.
-    try:
-        if not match_started:
-            final_result = "no-opponent"
-        elif last_seen_me_stock is not None and last_seen_opp_stock is not None:
-            if last_seen_me_stock > 0 and last_seen_opp_stock == 0:
-                final_result = "win"
-            elif last_seen_me_stock == 0 and last_seen_opp_stock > 0:
-                final_result = "loss"
-            elif last_seen_me_stock > last_seen_opp_stock:
-                final_result = "win"  # time-out with stock lead
-            elif last_seen_me_stock < last_seen_opp_stock:
-                final_result = "loss"
-            else:
-                # Equal stocks — fall back to percent (lower wins)
-                if last_seen_me_percent < last_seen_opp_percent:
-                    final_result = "win"
-                elif last_seen_me_percent > last_seen_opp_percent:
-                    final_result = "loss"
-                else:
-                    final_result = "draw"
-        # else: leave as "timeout" (set at top)
-    except Exception:
-        pass
-
-    # Find the most recent .slp in replay_dir
-    try:
-        replays = sorted(
-            (p for p in Path(replay_dir).glob("*.slp")),
-            key=lambda p: p.stat().st_mtime,
-        )
-        if replays:
-            replay_path_out = str(replays[-1].resolve())
-    except Exception:
-        pass
-
+except _SessionExit:
+    pass
+except Exception:
+    log.exception("Unexpected error in session loop")
+    session_reason = "error"
 finally:
     try:
         console.stop()
     except Exception:
         pass
 
-emit_result(
-    final_result, replay_path_out,
-    bot_stocks=last_seen_me_stock if last_seen_me_stock is not None else -1,
-    opp_stocks=last_seen_opp_stock if last_seen_opp_stock is not None else -1,
-    bot_percent=last_seen_me_percent,
-    opp_percent=last_seen_opp_percent,
-)
+emit_session_end(session_reason)
