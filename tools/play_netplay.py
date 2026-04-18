@@ -33,6 +33,8 @@ import logging
 import os
 import select
 import signal
+import subprocess
+import threading
 import time
 
 import melee
@@ -82,6 +84,10 @@ parser.add_argument("--check-stdin", action="store_true",
                     help="Poll stdin non-blocking for 'STOP' — the Discord bot writes "
                          "this to the subprocess to end the chain cleanly after the "
                          "current match. Off by default for CLI use.")
+parser.add_argument("--stall-timeout", type=float, default=30.0,
+                    help="Seconds with no Dolphin frames before the watchdog kills "
+                         "our child Dolphin process to unblock console.step(). "
+                         "Covers mid-match netplay desyncs / opponent hard-DCs.")
 parser.add_argument("--bot-slippi-code", default=None,
                     help="Bot's own Slippi connect code (e.g. MIMIC#01). "
                          "Used to identify the bot's player in gs.players during "
@@ -184,20 +190,52 @@ def _find_new_replay(replay_dir_: str, before_snapshot: dict) -> str:
         return ""
 
 
-def _stdin_has_stop() -> bool:
-    if not args.check_stdin:
-        return False
-    try:
-        r, _, _ = select.select([sys.stdin], [], [], 0)
-    except (ValueError, OSError):
-        return False
-    if not r:
-        return False
-    try:
-        line = sys.stdin.readline()
-    except Exception:
-        return False
-    return line.strip().upper() == "STOP"
+# Shared state between the watchdog thread and the main loop.
+# _last_frame_time updates whenever console.step() returns a non-None gs.
+# _stop_flag gets set by the watchdog when STOP arrives on stdin; the main
+# loop checks it every iteration. The watchdog also detects mid-match
+# stalls (Dolphin blocked waiting for remote netplay frames that never
+# come) and hard-kills our child Dolphin to unblock console.step() so the
+# main loop can exit cleanly.
+_last_frame_time: float = time.time()
+_stop_flag: bool = False
+
+
+def _watchdog():
+    while True:
+        time.sleep(1.0)
+        # stdin STOP poll — runs here so STOP gets noticed even when the
+        # main loop is blocked in console.step().
+        if args.check_stdin:
+            try:
+                r, _, _ = select.select([sys.stdin], [], [], 0)
+                if r:
+                    line = sys.stdin.readline()
+                    if line and line.strip().upper() == "STOP":
+                        globals()["_stop_flag"] = True
+                        log.info("Watchdog: STOP received")
+            except (ValueError, OSError):
+                pass
+            except Exception:
+                log.exception("Watchdog stdin poll failed")
+        # Stall detection — if no frames from Dolphin for stall_timeout
+        # seconds, assume Dolphin is wedged on a remote netplay wait and
+        # hard-kill our child processes so the main loop unblocks.
+        stall = time.time() - _last_frame_time
+        if stall > args.stall_timeout:
+            log.error("No Dolphin frames for %.1fs — killing child processes", stall)
+            try:
+                subprocess.run(
+                    ["pkill", "-KILL", "-P", str(os.getpid())],
+                    timeout=5, check=False,
+                )
+            except Exception:
+                log.exception("pkill failed")
+            # Mark that we're tearing down so the main loop's session_reason
+            # reflects this instead of a generic exit.
+            globals()["_stop_flag"] = True
+            # Reset the timer so we don't pkill in a tight loop.
+            globals()["_last_frame_time"] = time.time()
 
 
 # ---- Load model + inference context ----
@@ -274,6 +312,9 @@ def shutdown_handler(*_):
 signal.signal(signal.SIGINT, shutdown_handler)
 signal.signal(signal.SIGTERM, shutdown_handler)
 
+# Watchdog: polls stdin for STOP and kills a wedged Dolphin.
+threading.Thread(target=_watchdog, daemon=True, name="play_netplay_watchdog").start()
+
 # ---- Main loop: outer match loop + inner per-match loop ----
 #
 # Session-persistent state (lives across matches):
@@ -333,16 +374,28 @@ try:
         while True:
             gs = console.step()
             if gs is None:
+                # Still check the STOP flag here — the watchdog sets it
+                # even when frames have stalled, so we can react without
+                # needing a fresh frame.
+                if _stop_flag:
+                    stop_requested = True
+                    if not match_started:
+                        log.info("STOP received pre-match; exiting session")
+                        session_reason = "stopped"
+                        raise _SessionExit()
                 continue
+
+            # Frame arrived — refresh the watchdog's stall clock.
+            globals()["_last_frame_time"] = time.time()
 
             now = time.time()
 
-            # Non-blocking STOP poll from the Discord bot (only when
-            # --check-stdin is set). If STOP arrives before the match has
-            # started, exit the session immediately. If it arrives
-            # mid-match, flag it and let the current match complete —
-            # opponents should always see their match finish.
-            if _stdin_has_stop():
+            # STOP flag is set by the watchdog thread when stdin receives
+            # "STOP\n" or when the watchdog had to kill a wedged Dolphin.
+            # Pre-match: exit the session immediately. Mid-match: finish
+            # the current match then exit (opponents should always see
+            # their match complete).
+            if _stop_flag:
                 stop_requested = True
                 if not match_started:
                     log.info("STOP received pre-match; exiting session")
