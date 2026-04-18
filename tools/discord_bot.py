@@ -177,25 +177,95 @@ if not _ensure_user_json(SLIPPI_HOME):
     )
     sys.exit(1)
 
-# Character -> (best checkpoint, data dir, melee name)
-CHARACTERS = {
-    "FOX":       ("checkpoints/fox-20260414-relpos-55k.pt",       "hf_checkpoints/fox",       "FOX"),
-    "FALCO":     ("checkpoints/falco-20260412-relpos-28k.pt",     "data/falco_v2",            "FALCO"),
-    "CPTFALCON": ("checkpoints/cptfalcon-20260412-relpos-27k.pt", "data/cptfalcon_v2",        "CPTFALCON"),
-    "LUIGI":     ("checkpoints/luigi-20260412-relpos-5k.pt",      "data/luigi_v2",            "LUIGI"),
-    "MARTH":     ("checkpoints/marth-20260417-relpos-27k.pt",     "hf_checkpoints/marth",     "MARTH"),
+import json as _json
+
+HF_REPO_ID = os.environ.get("MIMIC_HF_REPO", "erickfm/MIMIC").strip()
+
+# Aliases we hardcode for short-forms that can't be auto-derived from the
+# character's HF dir name. Per-character lowercase aliases are added
+# automatically by _build_aliases().
+_HARDCODED_ALIASES = {
+    "falcon":    "CPTFALCON",
+    "cpt":       "CPTFALCON",
+    "cf":        "CPTFALCON",
 }
 
-CHAR_ALIASES = {
-    "fox": "FOX",
-    "falco": "FALCO",
-    "cptfalcon": "CPTFALCON",
-    "falcon": "CPTFALCON",
-    "cpt": "CPTFALCON",
-    "cf": "CPTFALCON",
-    "luigi": "LUIGI",
-    "marth": "MARTH",
-}
+# Non-character top-level dirs on HF that we shouldn't treat as playable.
+_HF_NON_CHAR_DIRS = {"checkpoints"}
+
+
+def _scan_local_hf_checkpoints() -> tuple[dict, dict]:
+    """Build CHARACTERS + per-char metadata from hf_checkpoints/*/model.pt
+    on disk. Returns (characters, metadata)."""
+    hf_root = _REPO_ROOT / "hf_checkpoints"
+    chars: dict = {}
+    meta: dict = {}
+    if not hf_root.exists():
+        return chars, meta
+    for d in sorted(hf_root.iterdir()):
+        if not d.is_dir() or d.name in _HF_NON_CHAR_DIRS:
+            continue
+        model_path = d / "model.pt"
+        if not model_path.exists():
+            continue
+        key = d.name.upper()
+        chars[key] = (
+            str(model_path.relative_to(_REPO_ROOT)),
+            str(d.relative_to(_REPO_ROOT)),
+            key,
+        )
+        meta_path = d / "metadata.json"
+        if meta_path.exists():
+            try:
+                meta[key] = _json.loads(meta_path.read_text())
+            except Exception:
+                meta[key] = {}
+        else:
+            meta[key] = {}
+    return chars, meta
+
+
+def _sync_hf_to_local(repo_id: str = None) -> tuple[dict, dict]:
+    """Pull any character dirs from HF into hf_checkpoints/ (cached — only
+    changed files redownload), then scan. Falls back to a local-only scan
+    if HF is unreachable so the bot still starts with the last-known set."""
+    repo_id = repo_id or HF_REPO_ID
+    try:
+        from huggingface_hub import HfApi, snapshot_download
+        api = HfApi()
+        files = api.list_repo_files(repo_id, repo_type="model")
+        char_dirs = set()
+        for f in files:
+            parts = f.split("/")
+            if len(parts) >= 2 and parts[1] == "model.pt":
+                char_dirs.add(parts[0])
+        char_dirs = {d for d in char_dirs if d not in _HF_NON_CHAR_DIRS}
+        if char_dirs:
+            patterns = [f"{d}/*" for d in sorted(char_dirs)]
+            snapshot_download(
+                repo_id,
+                local_dir=str(_REPO_ROOT / "hf_checkpoints"),
+                allow_patterns=patterns,
+            )
+        log.info("HF sync (%s): characters on HF = %s", repo_id, sorted(char_dirs))
+    except Exception as e:
+        log.warning("HF sync failed (%s) — falling back to local cache", e)
+    return _scan_local_hf_checkpoints()
+
+
+def _build_aliases(chars: dict) -> dict:
+    aliases = dict(_HARDCODED_ALIASES)
+    for key in chars:
+        aliases[key.lower()] = key
+    return aliases
+
+
+# Character -> (best checkpoint, data dir, melee name).
+# Populated from HF at startup via _load_character_catalog() and refreshable
+# at runtime via the !reload command.
+CHARACTERS: dict = {}
+CHAR_META: dict = {}
+CHAR_ALIASES: dict = {}
 
 CONNECT_CODE_RE = re.compile(r"^[A-Z]{1,8}#\d+$")
 
@@ -265,18 +335,32 @@ async def on_ready():
 async def cmd_info(ctx: commands.Context):
     char_lines = []
     for name in sorted(CHARACTERS.keys()):
-        ckpt = os.path.basename(CHARACTERS[name][0])
-        char_lines.append(f"  • **{name}** — `{ckpt}`")
-    char_block = "\n".join(char_lines)
+        meta = CHAR_META.get(name) or {}
+        # Prefer the run_name + step count from metadata; fall back to
+        # the filename basename if metadata is missing.
+        run = meta.get("run_name", "").strip()
+        ckpt_label = run if run and run != "?" else os.path.basename(CHARACTERS[name][0])
+        extras = []
+        if meta.get("val_loss"):
+            extras.append(f"val {meta['val_loss']}")
+        if meta.get("global_step") and meta["global_step"] != "?":
+            try:
+                extras.append(f"{int(meta['global_step']) // 1000}k steps")
+            except (TypeError, ValueError):
+                pass
+        extra_str = f" ({', '.join(extras)})" if extras else ""
+        char_lines.append(f"  • **{name}** — `{ckpt_label}`{extra_str}")
+    char_block = "\n".join(char_lines) if char_lines else "  (none loaded — HF sync failed?)"
     msg = (
         f"**MIMIC Melee bot**\n"
         f"Bot's Slippi connect code: `{BOT_SLIPPI_CODE}` — enter this on YOUR side.\n\n"
-        f"**Characters + checkpoints:**\n{char_block}\n\n"
+        f"**Characters + checkpoints** (from `{HF_REPO_ID}`):\n{char_block}\n\n"
         f"Usage: `!play <character> <your_connect_code>`\n"
         f"Example: `!play falco WAVE#666`\n\n"
         f"The bot joins your Slippi Direct Connect lobby. Launch Slippi Online → "
         f"Direct Connect, enter `{BOT_SLIPPI_CODE}`, and wait — the bot will join you.\n\n"
-        f"`!queue` shows current queue. `!cancel` removes your pending match.\n\n"
+        f"`!queue` shows current queue. `!cancel` removes your pending match. "
+        f"`!reload` re-syncs the character list from HuggingFace.\n\n"
         f"**Back-to-back matches:** the bot stays in your lobby after each "
         f"match. Pick your next character and press Start on your side "
         f"within 30s to queue another round — otherwise the bot disconnects "
@@ -284,6 +368,38 @@ async def cmd_info(ctx: commands.Context):
         f"`!play` also ends your chain after the current match."
     )
     await ctx.reply(msg)
+
+
+@bot.command(name="reload")
+async def cmd_reload(ctx: commands.Context):
+    """Re-sync CHARACTERS from HF without a bot restart."""
+    global CHARACTERS, CHAR_META, CHAR_ALIASES
+    await ctx.reply("⏳ Re-syncing character list from HuggingFace…")
+    try:
+        new_chars, new_meta = await asyncio.to_thread(_sync_hf_to_local)
+    except Exception as e:
+        log.exception("HF reload failed")
+        await ctx.reply(f"❌ Reload failed: {e}")
+        return
+    added = sorted(set(new_chars) - set(CHARACTERS))
+    removed = sorted(set(CHARACTERS) - set(new_chars))
+    changed = sorted(
+        k for k in (set(new_chars) & set(CHARACTERS))
+        if new_chars[k] != CHARACTERS[k]
+    )
+    CHARACTERS = new_chars
+    CHAR_META = new_meta
+    CHAR_ALIASES = _build_aliases(new_chars)
+    lines = [f"✅ Reloaded: {len(CHARACTERS)} characters"]
+    if added:
+        lines.append(f"  added: {', '.join(added)}")
+    if removed:
+        lines.append(f"  removed: {', '.join(removed)}")
+    if changed:
+        lines.append(f"  updated: {', '.join(changed)}")
+    if not (added or removed or changed):
+        lines.append("  no changes")
+    await ctx.reply("\n".join(lines))
 
 
 @bot.command(name="queue")
@@ -733,6 +849,21 @@ def _pgrep_alive(pid: int) -> bool:
         return False
 
 
+def _load_character_catalog() -> None:
+    """Sync HF → local cache and populate the module-level CHARACTERS /
+    CHAR_META / CHAR_ALIASES dicts. Called once at startup."""
+    global CHARACTERS, CHAR_META, CHAR_ALIASES
+    CHARACTERS, CHAR_META = _sync_hf_to_local()
+    CHAR_ALIASES = _build_aliases(CHARACTERS)
+    if CHARACTERS:
+        log.info("Loaded %d characters: %s",
+                 len(CHARACTERS), ", ".join(sorted(CHARACTERS.keys())))
+    else:
+        log.warning("No characters loaded! !play will reject everything. "
+                    "Check HF connectivity and hf_checkpoints/ contents.")
+
+
 if __name__ == "__main__":
     _cleanup_orphan_processes()
+    _load_character_catalog()
     bot.run(DISCORD_BOT_TOKEN)
