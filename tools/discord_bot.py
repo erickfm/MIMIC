@@ -629,6 +629,32 @@ async def run_session(req: MatchRequest, channel, ckpt_name: str) -> None:
     pending: dict = {}          # accumulates one match's RESULT/SCORE/REPLAY
     session_end_reason: Optional[str] = None
 
+    # Drain stderr concurrently into a small ring buffer. play_netplay emits
+    # ~300 log lines/sec at peak (per-frame BOT/OPP logs + libmelee chatter),
+    # which fills the 64 KB pipe buffer in seconds. If we don't drain it, the
+    # child blocks on stderr writes, the main loop freezes, the watchdog's own
+    # log.error() blocks too, and the whole thing wedges. Keeping the last
+    # ~4 KB is plenty for crash diagnostics.
+    stderr_tail_chars = 4096
+    stderr_buf: list[str] = []
+
+    async def _drain_stderr():
+        try:
+            while True:
+                chunk = await proc.stderr.read(4096)
+                if not chunk:
+                    return
+                stderr_buf.append(chunk.decode(errors="replace"))
+                total = sum(len(s) for s in stderr_buf)
+                if total > stderr_tail_chars * 2:
+                    joined = "".join(stderr_buf)
+                    stderr_buf.clear()
+                    stderr_buf.append(joined[-stderr_tail_chars:])
+        except Exception:
+            log.exception("stderr drain task failed")
+
+    stderr_task = asyncio.create_task(_drain_stderr())
+
     async def _flush_pending():
         """Announce the accumulated match result, if any."""
         nonlocal pending
@@ -701,7 +727,8 @@ async def run_session(req: MatchRequest, channel, ckpt_name: str) -> None:
     finally:
         current_proc = None
 
-    # Drain remaining stderr + wait for exit.
+    # Wait for exit; the stderr drain task will finish on its own once the
+    # pipe closes.
     try:
         await asyncio.wait_for(proc.wait(), timeout=30.0)
     except asyncio.TimeoutError:
@@ -711,12 +738,14 @@ async def run_session(req: MatchRequest, channel, ckpt_name: str) -> None:
             pass
         await proc.wait()
 
-    stderr_tail = ""
     try:
-        stderr_bytes = await proc.stderr.read()
-        stderr_tail = stderr_bytes.decode(errors="replace")[-500:]
+        await asyncio.wait_for(stderr_task, timeout=5.0)
+    except asyncio.TimeoutError:
+        stderr_task.cancel()
     except Exception:
         pass
+
+    stderr_tail = "".join(stderr_buf)[-500:]
 
     # Session-end announcements.
     if channel is not None:
