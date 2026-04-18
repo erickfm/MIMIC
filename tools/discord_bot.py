@@ -196,7 +196,20 @@ _HF_NON_CHAR_DIRS = {"checkpoints"}
 
 def _scan_local_hf_checkpoints() -> tuple[dict, dict]:
     """Build CHARACTERS + per-char metadata from hf_checkpoints/*/model.pt
-    on disk. Returns (characters, metadata)."""
+    on disk. Returns (characters, metadata).
+
+    The user-facing key is the uppercased HF dir name (so `!play puff`
+    works). The melee.Character enum name is read from metadata.json's
+    `melee_enum` field — required for characters whose HF dir name is a
+    nickname (e.g. `puff` → `JIGGLYPUFF`). Falls back to the uppercased
+    dir name if metadata is missing it; characters with an unknown
+    melee enum are logged and skipped."""
+    try:
+        import melee as _melee
+        valid_enums = set(_melee.Character.__members__)
+    except Exception:
+        valid_enums = None
+
     hf_root = _REPO_ROOT / "hf_checkpoints"
     chars: dict = {}
     meta: dict = {}
@@ -209,19 +222,24 @@ def _scan_local_hf_checkpoints() -> tuple[dict, dict]:
         if not model_path.exists():
             continue
         key = d.name.upper()
+        meta_path = d / "metadata.json"
+        char_meta = {}
+        if meta_path.exists():
+            try:
+                char_meta = _json.loads(meta_path.read_text())
+            except Exception:
+                pass
+        melee_enum = (char_meta.get("melee_enum") or key).strip().upper()
+        if valid_enums is not None and melee_enum not in valid_enums:
+            log.warning("Skipping HF dir %s: melee_enum %r not in melee.Character",
+                        d.name, melee_enum)
+            continue
         chars[key] = (
             str(model_path.relative_to(_REPO_ROOT)),
             str(d.relative_to(_REPO_ROOT)),
-            key,
+            melee_enum,
         )
-        meta_path = d / "metadata.json"
-        if meta_path.exists():
-            try:
-                meta[key] = _json.loads(meta_path.read_text())
-            except Exception:
-                meta[key] = {}
-        else:
-            meta[key] = {}
+        meta[key] = char_meta
     return chars, meta
 
 
