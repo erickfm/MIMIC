@@ -380,6 +380,66 @@ def normalize_code(code: str) -> Optional[str]:
     return None
 
 
+_DISPLAY_NAME_CODE_RE = re.compile(r"[A-Z]{1,8}#\d+")
+
+
+def extract_connect_code_from_display_name(display_name: str) -> Optional[str]:
+    """Find a `TAG#NUMBER` substring inside a Discord display name. Used by
+    the `!<char>` shortcuts so users can drop the explicit connect-code
+    arg if their nickname already contains it (e.g. `WAVE | WAVE#666`)."""
+    if not display_name:
+        return None
+    m = _DISPLAY_NAME_CODE_RE.search(display_name.upper())
+    return m.group(0) if m else None
+
+
+# Command names that must never be shadowed by a `!<char>` shortcut.
+_RESERVED_COMMAND_NAMES = {"play", "queue", "cancel", "info", "reload", "help"}
+# Shortcuts we've registered — tracked so !reload can rebuild cleanly.
+_SHORTCUT_COMMAND_NAMES: set[str] = set()
+
+
+def _make_char_shortcut(char_key: str):
+    async def _shortcut(ctx: commands.Context):
+        code = extract_connect_code_from_display_name(ctx.author.display_name)
+        if code is None:
+            await ctx.reply(
+                f"❌ Couldn't find a connect code in your display name "
+                f"(`{ctx.author.display_name}`). Add `TAG#NUMBER` to your "
+                f"server nickname (e.g. `WAVE#666`), or use the long form: "
+                f"`!play {char_key.lower()} <your_code>`."
+            )
+            return
+        await ctx.invoke(cmd_play, character=char_key, connect_code=code)
+    return _shortcut
+
+
+def _register_char_shortcuts() -> None:
+    """Register a `!<name>` shortcut for every character key and alias.
+    Safe to call repeatedly — removes previously-registered shortcuts
+    first so `!reload` picks up added/removed characters."""
+    global _SHORTCUT_COMMAND_NAMES
+    for name in list(_SHORTCUT_COMMAND_NAMES):
+        if bot.get_command(name) is not None:
+            bot.remove_command(name)
+    _SHORTCUT_COMMAND_NAMES = set()
+    # CHAR_ALIASES already contains the lowercase character keys plus the
+    # hardcoded aliases (falcon/cpt/cf), so iterating it is enough.
+    for alias, canon in CHAR_ALIASES.items():
+        if alias in _RESERVED_COMMAND_NAMES:
+            continue
+        if bot.get_command(alias) is not None:
+            log.warning("Skipping shortcut !%s: name already in use", alias)
+            continue
+        cmd = commands.Command(
+            _make_char_shortcut(canon),
+            name=alias,
+            help=f"Queue a match as {canon} (connect code from your display name).",
+        )
+        bot.add_command(cmd)
+        _SHORTCUT_COMMAND_NAMES.add(alias)
+
+
 @bot.event
 async def on_ready():
     global queue
@@ -405,6 +465,9 @@ async def cmd_info(ctx: commands.Context):
         f"**Characters + checkpoints** (from `{HF_REPO_ID}`):\n{char_block}\n\n"
         f"Usage: `!play <character> <your_connect_code>`\n"
         f"Example: `!play falco WAVE#666`\n\n"
+        f"**Shortcut:** `!<character>` (e.g. `!falco`, `!marth`) picks up "
+        f"your connect code from your Discord display name if it contains "
+        f"`TAG#NUMBER`.\n\n"
         f"The bot joins your Slippi Direct Connect lobby. Launch Slippi Online → "
         f"Direct Connect, enter `{BOT_SLIPPI_CODE}`, and wait — the bot will join you.\n\n"
         f"`!queue` shows current queue. `!cancel` removes your pending match. "
@@ -447,6 +510,7 @@ async def cmd_reload(ctx: commands.Context):
     CHARACTERS = new_chars
     CHAR_META = new_meta
     CHAR_ALIASES = _build_aliases(new_chars)
+    _register_char_shortcuts()
     lines = [f"✅ Reloaded: {len(CHARACTERS)} characters"]
     if added:
         lines.append(f"  added: {', '.join(added)}")
@@ -966,6 +1030,7 @@ def _load_character_catalog() -> None:
     global CHARACTERS, CHAR_META, CHAR_ALIASES
     CHARACTERS, CHAR_META = _sync_hf_to_local()
     CHAR_ALIASES = _build_aliases(CHARACTERS)
+    _register_char_shortcuts()
     if CHARACTERS:
         log.info("Loaded %d characters: %s",
                  len(CHARACTERS), ", ".join(sorted(CHARACTERS.keys())))
