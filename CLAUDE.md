@@ -35,18 +35,21 @@ where the transformer backbone came from.
 MIMIC's canonical config (preset name `mimic`, bootstrapped from HAL's
 GPTv5Controller and later diverged):
 
-- **Params:** ~19.95M (minimal-features) / ~20.00M (full-features; +18K
-  projection weights for 36 additional input scalars)
+- **Params:** ~19.95M (minimal-features) / ~19.99M (full-features, post
+  2026-04-20 schema drop — was ~20.00M before dropping 9 dead cols)
 - **Transformer:** d_model=512, 6 layers, 8 heads, block_size=1024
 - **Position encoding:** Shaw relative-position attention (`mimic`).
   RoPE variants (`mimic-rope*`) are deprecated — see Pitfalls.
 - **Input:**
   - **Minimal features** (historical default, `--mimic-minimal-features`):
     Linear(166 → 512) from `[stage_emb(4) + 2*char_emb(12) + 2*action_emb(32) + gamestate(18) + controller(56)]`.
-  - **Full features** (new default as of 2026-04-19): Linear(202 → 512) —
-    same categorical embeddings, but the 18-dim `gamestate` becomes
-    54-dim (27 per player: 22 numeric + 5 flags). Drop
-    `--mimic-minimal-features` from the CLI to enable.
+  - **Full features** (new default as of 2026-04-19; schema pruned
+    2026-04-20): Linear(184 → 512) — same categorical embeddings, but
+    the 18-dim `gamestate` becomes 36-dim (18 per player: 13 numeric + 5
+    flags). Drop `--mimic-minimal-features` from the CLI to enable.
+    (Prior to the 2026-04-20 drop, full mode was 27 per player /
+    Linear(202→512); 9 of those 22 numeric cols were permanently zero
+    due to libmelee limitations and were removed — see pitfall 12d.)
 - **Output heads (autoregressive with detach):** shoulder(3) → c_stick(9) → main_stick(37) → buttons(7)
 - **Head hidden dim:** `input_dim // 2` (NOT a fixed 256 — each head has different hidden size)
 - **Sequence length:** 180 frames (~3 seconds)
@@ -59,16 +62,19 @@ GPTv5Controller and later diverged):
 on_ground, shield_strength, position_x, position_y` (exact HAL order
 is preserved by a reindex in the encoder's minimal path).
 
-**Full (27):** 22 numeric + 5 flags in native shard order:
+**Full (18, post 2026-04-20 schema drop):** 13 numeric + 5 flags in
+native shard order:
 
     numeric[0-4]   : pos_x, pos_y, percent, stock, jumps_left
     numeric[5-9]   : speed_air_x_self, speed_ground_x_self,
                      speed_x_attack, speed_y_attack, speed_y_self
-    numeric[10-12] : hitlag_left, hitstun_left, invuln_left
-    numeric[13]    : shield_strength
-    numeric[14-21] : ecb_{bottom,left,right,top}_{x,y}
+    numeric[10-11] : hitlag_left, hitstun_left
+    numeric[12]    : shield_strength
     flags[0-4]     : on_ground, off_stage, facing, invulnerable,
                      moonwalkwarning
+
+Dropped 2026-04-20: `invuln_left` (column used to be numeric[12]) and
+all 8 ECB corners (used to be numeric[14-21]). See pitfall 12d for why.
 
 The controller is a 56-dim one-hot: main_stick(37) + c_stick(9) +
 buttons(7) + shoulder(3).
@@ -838,26 +844,37 @@ This is Eric Gu's original HAL codebase. Key files:
     fullfeat checkpoints** because the minimal encoder path slices the
     22-col input to 6 cols internally.
 
-12d. **Train/infer parity: 9 numeric fields are always zero in shards
-    (fixed 2026-04-20).** `libmelee`'s Slippi-replay parse does NOT
-    populate `ps.invulnerability_left` or the ECB corners
-    (`ps.ecb_bottom`, `.ecb_left`, `.ecb_right`, `.ecb_top`) — they
-    always read as 0 from a `.slp`. But the **same attributes return
-    real values on a live console**. `slp_to_shards.py` writes these
-    zeros straight into the shard, so training sees zero-valued
-    columns; if inference naively reads the live values, the model
-    gets nonzero inputs it was never trained on. Verified directly
-    from a `data/luigi_v2/train_shard_000.pt` shard: all 2.5M frames
-    have `invuln_left` and all 8 ECB cols exactly 0.0.
-    `inference_utils._SHARD_ZERO_FEATURES` hard-zeros these at
-    inference to preserve parity. Orthogonal cross-check: the
-    L1-input-gate report from 2026-04-19 independently pruned all
-    these fields to the sparsity floor — because, from the model's
-    perspective, they only ever carried their constant zero.
-    The rest of the 22-col schema (position, percent, stock,
-    jumps_left, speeds, hitlag, hitstun, shield_strength) IS
-    populated normally by the `.slp` parse and matches train/infer
-    without additional handling.
+12d. **Dead features dropped from the schema (2026-04-20).** `libmelee`'s
+    Slippi-replay parse does NOT populate `ps.invulnerability_left` (the
+    attr is declared on `PlayerState` but never referenced by any parser
+    — library-level dead field) or the ECB corners (`ps.ecb_bottom/left/
+    right/top`), which `console.py` reads from event bytes at offsets
+    0x4D–0x65 but silently falls back to 0 if `event_bytes` is too short
+    — which it is for the `.slp` format we work with. Verified directly
+    from `data/luigi_v2/train_shard_000.pt`: 2.5M frames all 0.0 on
+    invuln_left + all 8 ECB cols. The L1-input-gate report (puff,
+    2026-04-19) independently pruned these features to the sparsity
+    floor — from the model's perspective, they only ever carried their
+    constant zero.
+    **Resolution:** those 9 fields were dropped from the schema on
+    2026-04-20. `mimic/features.py:numeric_state(full)` now returns 13
+    cols (was 22); fullfeat encoder `input_dim` is 184 (was 202);
+    minimal path still returns 6 cols after the HAL-reorder but reads
+    from a 13-col shard (`_IDX = [0,1,2,3,4,12]` for shield; legacy
+    22-col shards still accepted via `_IDX = [0,1,2,3,4,13]` dispatch,
+    and the very-legacy 7-col shim for pre-rename shards stays).
+    Nana numeric groups lose their invuln_left extra (was the one
+    library-level dead field they still carried).
+    **Breaks loading of pre-2026-04-20 fullfeat checkpoints** (`puff
+    xxl`, `peach baseline`, `falco xxl continue`, `ice_climbers xxl` all
+    have 202→512 projections that can't load into the new 184→512
+    encoder). Minimal-features checkpoints (the pre-fullfeat pipeline
+    runs — fox, cptfalcon, original falco/marth/sheik/luigi) still load
+    and play correctly — they go through the minimal path which is
+    shard-width-aware and HAL-reorders to the same 9-slot layout.
+    Resharding required for future fullfeat training runs; shards
+    automatically get the new 13-col layout via
+    `slp_to_shards.py`'s schema-driven writes.
 
 13. **Discord bot portability: keep paths relative in `.env`.** The Discord
     bot's `.env` uses relative paths (`./emulator/...`, `./melee.iso`,

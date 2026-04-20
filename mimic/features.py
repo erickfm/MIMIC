@@ -65,15 +65,24 @@ def numeric_state(prefix: str, minimal: bool = False, hal_minimal: bool = None) 
     # Backwards-compat: old callers passed hal_minimal=
     if hal_minimal is not None:
         minimal = hal_minimal
+    # Note: invuln_left + all 8 ECB corners were part of this schema
+    # pre-2026-04-20 but were never populated by libmelee's .slp parse
+    # (see CLAUDE.md pitfall 12d). They were always stored as zero in
+    # shards, so the model learned nothing from them. Dropped from both
+    # training and inference on 2026-04-20 — shrinks shard numeric from
+    # 22→13 cols and encoder input_dim from 202→184 on fullfeat runs.
+    # This breaks loading of pre-2026-04-20 fullfeat checkpoints; retrain
+    # if you need them.
     if minimal:
-        # Minimal mode: 9 features per player (no speeds, ECB, hitlag/hitstun)
+        # Minimal mode: 6 features per player (was 7 including dropped invuln_left).
         return [
             f"{prefix}_pos_x", f"{prefix}_pos_y",
             f"{prefix}_percent", f"{prefix}_stock",
             f"{prefix}_jumps_left",
-            f"{prefix}_invuln_left", f"{prefix}_shield_strength",
+            f"{prefix}_shield_strength",
         ]
-    base = [
+    # Full mode: 13 numeric features per player (was 22).
+    return [
         f"{prefix}_pos_x", f"{prefix}_pos_y",
         f"{prefix}_percent", f"{prefix}_stock",
         f"{prefix}_jumps_left",
@@ -81,12 +90,8 @@ def numeric_state(prefix: str, minimal: bool = False, hal_minimal: bool = None) 
         f"{prefix}_speed_x_attack", f"{prefix}_speed_y_attack",
         f"{prefix}_speed_y_self",
         f"{prefix}_hitlag_left", f"{prefix}_hitstun_left",
-        f"{prefix}_invuln_left", f"{prefix}_shield_strength",
+        f"{prefix}_shield_strength",
     ]
-    ecb = [f"{prefix}_ecb_{part}_{axis}"
-           for part in ("bottom", "left", "right", "top")
-           for axis in ("x", "y")]
-    return base + ecb
 
 
 def flags(prefix: str) -> List[str]:
@@ -134,7 +139,6 @@ def build_feature_groups(no_opp_inputs: bool = False,
         "numeric": numeric_state("opp_nana") + [
             "opp_nana_stock", "opp_nana_jumps_left",
             "opp_nana_hitlag_left", "opp_nana_hitstun_left",
-            "opp_nana_invuln_left",
         ],
         "action_elapsed": ["opp_nana_action_frame"],
     }
@@ -166,7 +170,6 @@ def build_feature_groups(no_opp_inputs: bool = False,
         "numeric": numeric_state("self_nana") + [
             "self_nana_stock", "self_nana_jumps_left",
             "self_nana_hitlag_left", "self_nana_hitstun_left",
-            "self_nana_invuln_left",
         ],
         "action_elapsed": ["self_nana_action_frame"],
     }
@@ -397,9 +400,11 @@ hal_normalize = mimic_normalize
 hal_normalize_array = mimic_normalize_array
 
 
-# Column suffixes in the order they appear in self_numeric (minimal_features=True)
+# Column suffixes in the order they appear in self_numeric (minimal_features=True).
+# Note: invuln_left was dropped 2026-04-20 (unpopulated by libmelee — see
+# CLAUDE.md pitfall 12d). shield_strength moved from index 6 to index 5.
 NUMERIC_COLS = ["pos_x", "pos_y", "percent", "stock", "jumps_left",
-                "invuln_left", "shield_strength"]
+                "shield_strength"]
 # Flag indices [0, 2, 3] from the 5-flag tensor → on_ground, facing, invulnerable
 FLAG_COLS = ["on_ground", "facing", "invulnerable"]
 

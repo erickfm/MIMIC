@@ -745,12 +745,13 @@ class MimicFlatEncoder(nn.Module):
         emb_dim = self.STAGE_EMB_DIM + 2 * self.CHAR_EMB_DIM + 2 * self.ACTION_EMB_DIM
         # = 4 + 24 + 64 = 92
 
-        # Gamestate dim per player × 2:
+        # Gamestate dim per player × 2 (schema as of 2026-04-20, after
+        # dropping invuln_left + 8 ECB corners — see CLAUDE.md 12d):
         #   minimal: 6 numeric (pos_x/y, percent, stock, jumps_left, shield) + 3 flags
         #            (on_ground, facing, invulnerable) = 9
-        #   full:    22 numeric (adds speeds/hitlag/hitstun/invuln_left/ECB) + 5 flags
-        #            (adds off_stage, moonwalkwarning) = 27
-        per_player = 9 if mimic_minimal_features else 27
+        #   full:    13 numeric (adds speeds/hitlag/hitstun) + 5 flags
+        #            (adds off_stage, moonwalkwarning) = 18
+        per_player = 9 if mimic_minimal_features else 18
         numeric_dim = per_player * 2
 
         # Controller: one-hot vector (37 stick + 9 cstick + N combos + 3 shoulder)
@@ -813,14 +814,21 @@ class MimicFlatEncoder(nn.Module):
         if self._minimal:
             # HAL minimal: 6 numeric + 3 flags per player, reordered into HAL's
             # exact concat order so minimal-trained checkpoints load unchanged.
-            if sn.shape[-1] > 7:
-                _IDX = [0, 1, 2, 3, 4, 13]  # pos_x, pos_y, percent, stock, jumps_left, shield
-                sn = sn[..., _IDX]
-                on = on[..., _IDX]
+            # Shard size dispatch: 22 = legacy (pre-2026-04-20 with invuln+ECB),
+            # 13 = current (invuln+ECB dropped), 7 = very-legacy hal_minimal.
+            if sn.shape[-1] == 22:
+                _IDX = [0, 1, 2, 3, 4, 13]  # legacy: shield at idx 13
+            elif sn.shape[-1] == 13:
+                _IDX = [0, 1, 2, 3, 4, 12]  # current: shield at idx 12 after drops
             elif sn.shape[-1] == 7:
-                _IDX = [0, 1, 2, 3, 4, 6]   # legacy 7-col minimal shards (drop invuln_left)
-                sn = sn[..., _IDX]
-                on = on[..., _IDX]
+                _IDX = [0, 1, 2, 3, 4, 6]   # very-legacy 7-col
+            else:
+                raise ValueError(
+                    f"MimicFlatEncoder(minimal): unexpected self_numeric width "
+                    f"{sn.shape[-1]}; expected 7, 13, or 22."
+                )
+            sn = sn[..., _IDX]
+            on = on[..., _IDX]
             _FLAG_IDX = [0, 2, 3]  # on_ground, facing, invulnerable
             sf = sf_all[..., _FLAG_IDX]
             of = of_all[..., _FLAG_IDX]
@@ -830,15 +838,15 @@ class MimicFlatEncoder(nn.Module):
             self_num = torch.cat([sn, sf], dim=-1)[..., _HAL_ORDER]
             opp_num = torch.cat([on, of], dim=-1)[..., _HAL_ORDER]
         else:
-            # Full: all 22 numeric + 5 flags per player, no HAL reorder (a single
-            # learned Linear downstream makes the ordering functionally irrelevant).
-            if sn.shape[-1] != 22:
+            # Full: 13 numeric + 5 flags per player. No HAL reorder (a single
+            # learned Linear downstream makes ordering functionally irrelevant).
+            if sn.shape[-1] != 13:
                 raise ValueError(
-                    f"MimicFlatEncoder(mimic_minimal_features=False) requires 22-col "
-                    f"self_numeric shards; got shape[-1]={sn.shape[-1]}. Either rebuild "
-                    f"shards with the full numeric state or pass --mimic-minimal-features."
+                    f"MimicFlatEncoder(fullfeat): requires 13-col self_numeric "
+                    f"shards (post 2026-04-20 schema drop); got shape[-1]={sn.shape[-1]}. "
+                    f"Legacy 22-col fullfeat shards / checkpoints need reshard or retrain."
                 )
-            self_num = torch.cat([sn, sf_all], dim=-1)  # (B, T, 27)
+            self_num = torch.cat([sn, sf_all], dim=-1)  # (B, T, 18)
             opp_num = torch.cat([on, of_all], dim=-1)
 
         # (parts built below — gate applied after concat)
@@ -911,15 +919,14 @@ class MimicFlatEncoder(nn.Module):
             names.extend(f"self_{n}" for n in mini_ordered)
             names.extend(f"opp_{n}" for n in mini_ordered)
         else:
-            # Full: all 22 numeric + 5 flags per player in native order.
+            # Full: 13 numeric + 5 flags per player in native order
+            # (schema as of 2026-04-20 — see numeric_state in features.py).
             num_cols = [
                 "pos_x", "pos_y", "percent", "stock", "jumps_left",
                 "speed_air_x_self", "speed_ground_x_self",
                 "speed_x_attack", "speed_y_attack", "speed_y_self",
-                "hitlag_left", "hitstun_left", "invuln_left",
+                "hitlag_left", "hitstun_left",
                 "shield_strength",
-                "ecb_bottom_x", "ecb_bottom_y", "ecb_left_x", "ecb_left_y",
-                "ecb_right_x", "ecb_right_y", "ecb_top_x", "ecb_top_y",
             ]
             flag_cols = ["on_ground", "off_stage", "facing",
                          "invulnerable", "moonwalkwarning"]

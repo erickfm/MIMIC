@@ -35,19 +35,17 @@ BUTTONS_NO_SHOULDER_5 = [
     melee.enums.Button.BUTTON_X, melee.enums.Button.BUTTON_Z,
 ]
 
-# Numeric features in shard column order (full 22-col schema — see
-# mimic/features.py:numeric_state and tools/slp_to_shards.py). The
-# MimicFlatEncoder slices to 6 cols internally for minimal-features
-# checkpoints, so producing the full 22 works for both minimal and
-# fullfeat models (2026-04-20 inference update).
+# Numeric features in shard column order (13-col schema, post 2026-04-20
+# drop of invuln_left + ECB corners — see mimic/features.py:numeric_state
+# and tools/slp_to_shards.py). The MimicFlatEncoder slices to 6 cols
+# internally for minimal-features checkpoints, so producing the full 13
+# works for both minimal and fullfeat models.
 MIMIC_NUM_FULL = [
     "pos_x", "pos_y", "percent", "stock", "jumps_left",
     "speed_air_x_self", "speed_ground_x_self",
     "speed_x_attack", "speed_y_attack", "speed_y_self",
-    "hitlag_left", "hitstun_left", "invuln_left",
+    "hitlag_left", "hitstun_left",
     "shield_strength",
-    "ecb_bottom_x", "ecb_bottom_y", "ecb_left_x", "ecb_left_y",
-    "ecb_right_x", "ecb_right_y", "ecb_top_x", "ecb_top_y",
 ]
 
 # Legacy alias — earlier inference code only produced 7 of these. Kept
@@ -74,34 +72,14 @@ XFORM = {
     "shield_strength": _inv, "pos_x": _std, "pos_y": _std,
 }
 
-# libmelee's Slippi-replay parse does NOT populate these fields — they
-# read as 0 during shard builds even though the same attribute returns
-# real values on a LIVE console. The model was trained on zero-valued
-# columns for these, so at live inference we must also send zero to
-# preserve train/inference consistency. Verified 2026-04-20 by
-# inspecting a shard: all values exactly 0.0 across 2.5M frames.
-#
-# Cross-check: the L1-gate feature-importance report (puff, 2026-04-19)
-# independently pruned every one of these features to the sparsity floor
-# — that's what happens when a column's only signal is its constant zero.
-_SHARD_ZERO_FEATURES = frozenset({
-    "invuln_left",
-    "ecb_bottom_x", "ecb_bottom_y",
-    "ecb_left_x",   "ecb_left_y",
-    "ecb_right_x",  "ecb_right_y",
-    "ecb_top_x",    "ecb_top_y",
-})
-
-
 def _player_numeric_full(ps, hal_features, norm_stats):
-    """Produce the 22-col normalized numeric vector for a PlayerState.
+    """Produce the 13-col normalized numeric vector for a PlayerState.
 
-    Storage schema stays at 22 cols for backward compat with existing
-    fullfeat checkpoints. But 9 of those (invuln_left + all 8 ECB
-    corners) are permanently zero — they're read as 0 from .slp by
-    libmelee and invuln_left is a never-populated PlayerState field
-    library-wide (see CLAUDE.md pitfall 12d). We don't bother reading
-    or normalizing them; just emit zero straight into the column.
+    Schema (post 2026-04-20, matches tools/slp_to_shards.py writes):
+      idx 0-4  pos_x, pos_y, percent, stock, jumps_left
+      idx 5-9  5 speeds (air_x, ground_x, x_attack, y_attack, y_self)
+      idx 10-11 hitlag_left, hitstun_left
+      idx 12   shield_strength
 
     hal_features: dict keyed by suffix (e.g. "pos_x"), values have
         {min,max,mean,std,transform}.
@@ -110,9 +88,6 @@ def _player_numeric_full(ps, hal_features, norm_stats):
         self_* keys since self and opp stats are bit-identical
         (verified 2026-04-20).
     """
-    # Raw libmelee reads — ONLY for features actually populated by the
-    # .slp parse. See tools/slp_to_shards.py:227-262 for the live-write
-    # path; the fields listed here are exactly the non-dead subset.
     raw = {
         "pos_x":              float(ps.position.x),
         "pos_y":              float(ps.position.y),
@@ -131,14 +106,12 @@ def _player_numeric_full(ps, hal_features, norm_stats):
 
     out = []
     for f in MIMIC_NUM_FULL:
-        if f in _SHARD_ZERO_FEATURES:
-            # Dead features — not read, not normalized, emitted as 0.
-            out.append(0.0)
-        elif f in hal_features and f in XFORM:
-            # Minimal-feature path: use mimic_norm.json transform
+        if f in hal_features and f in XFORM:
+            # Covered by mimic_norm.json transform
             out.append(XFORM[f](raw[f], hal_features[f]))
         else:
-            # Extra features: z-score standardize via norm_stats
+            # Z-score standardize via norm_stats (mirrors the else-branch
+            # of slp_to_shards.py's normalization pass).
             stats = norm_stats.get(f"self_{f}")
             if stats is None:
                 out.append(0.0)
@@ -385,13 +358,9 @@ def build_mock_frame(ctx):
     # Numerics: normalize raw value 1.0 through each feature's transform.
     # For features in mimic_norm: use its transform. For extras: z-score
     # via norm_stats (falling back to 0.0 when stats missing).
-    # invuln_left + ECB are always 0 in shards (see _SHARD_ZERO_FEATURES),
-    # so mock sends 0 for those regardless of the raw=1.0 convention.
     mock_nums = []
     for f in MIMIC_NUM_FULL:
-        if f in _SHARD_ZERO_FEATURES:
-            mock_nums.append(0.0)
-        elif f in hal_features and f in XFORM:
+        if f in hal_features and f in XFORM:
             mock_nums.append(XFORM[f](1.0, hal_features[f]))
         else:
             stats = norm_stats.get(f"self_{f}")

@@ -235,31 +235,13 @@ def _write_player(arrays, wmap, frame_i, ps, port):
     key, idx = wmap["speed_y_self"]
     arrays[key][frame_i, idx] = float(ps.speed_y_self)
 
-    # Hit/stun/invuln
+    # Hitlag + hitstun (invuln_left + ECB corners dropped 2026-04-20 —
+    # libmelee never populates invuln_left and the .slp format we work
+    # with doesn't carry ECB either; see CLAUDE.md pitfall 12d).
     key, idx = wmap["hitlag_left"]
     arrays[key][frame_i, idx] = ps.hitlag_left
     key, idx = wmap["hitstun_left"]
     arrays[key][frame_i, idx] = ps.hitstun_frames_left
-    key, idx = wmap["invuln_left"]
-    arrays[key][frame_i, idx] = ps.invulnerability_left
-
-    # ECBs
-    key, idx = wmap["ecb_bottom_x"]
-    arrays[key][frame_i, idx] = float(ps.ecb_bottom[0])
-    key, idx = wmap["ecb_bottom_y"]
-    arrays[key][frame_i, idx] = float(ps.ecb_bottom[1])
-    key, idx = wmap["ecb_left_x"]
-    arrays[key][frame_i, idx] = float(ps.ecb_left[0])
-    key, idx = wmap["ecb_left_y"]
-    arrays[key][frame_i, idx] = float(ps.ecb_left[1])
-    key, idx = wmap["ecb_right_x"]
-    arrays[key][frame_i, idx] = float(ps.ecb_right[0])
-    key, idx = wmap["ecb_right_y"]
-    arrays[key][frame_i, idx] = float(ps.ecb_right[1])
-    key, idx = wmap["ecb_top_x"]
-    arrays[key][frame_i, idx] = float(ps.ecb_top[0])
-    key, idx = wmap["ecb_top_y"]
-    arrays[key][frame_i, idx] = float(ps.ecb_top[1])
 
     # Flags (stored as float32 in the flags group)
     key, idx = wmap["on_ground"]
@@ -332,31 +314,11 @@ def _write_nana(arrays, wmap, frame_i, nana):
     key, idx = wmap["speed_y_self"]
     arrays[key][frame_i, idx] = float(nana.speed_y_self)
 
-    # Hit/stun/invuln
+    # Hitlag + hitstun (invuln_left + ECB dropped 2026-04-20; see self-path comment above)
     key, idx = wmap["hitlag_left"]
     arrays[key][frame_i, idx] = nana.hitlag_left
     key, idx = wmap["hitstun_left"]
     arrays[key][frame_i, idx] = nana.hitstun_frames_left
-    key, idx = wmap["invuln_left"]
-    arrays[key][frame_i, idx] = nana.invulnerability_left
-
-    # ECBs
-    key, idx = wmap["ecb_bottom_x"]
-    arrays[key][frame_i, idx] = float(nana.ecb_bottom[0])
-    key, idx = wmap["ecb_bottom_y"]
-    arrays[key][frame_i, idx] = float(nana.ecb_bottom[1])
-    key, idx = wmap["ecb_left_x"]
-    arrays[key][frame_i, idx] = float(nana.ecb_left[0])
-    key, idx = wmap["ecb_left_y"]
-    arrays[key][frame_i, idx] = float(nana.ecb_left[1])
-    key, idx = wmap["ecb_right_x"]
-    arrays[key][frame_i, idx] = float(nana.ecb_right[0])
-    key, idx = wmap["ecb_right_y"]
-    arrays[key][frame_i, idx] = float(nana.ecb_right[1])
-    key, idx = wmap["ecb_top_x"]
-    arrays[key][frame_i, idx] = float(nana.ecb_top[0])
-    key, idx = wmap["ecb_top_y"]
-    arrays[key][frame_i, idx] = float(nana.ecb_top[1])
 
     # Flags
     key, idx = wmap["on_ground"]
