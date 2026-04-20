@@ -26,6 +26,15 @@ DATE_TAG="20260420"
 QLOG="${REPO_ROOT}/checkpoints/retrain_baseline.log"
 STATE_FILE="${REPO_ROOT}/checkpoints/retrain_baseline_state"
 
+# Export HF_TOKEN from .env so `hf download` is authenticated (avoids
+# anon rate limits on 144+ tar pulls). upload_char.py still does its own
+# load_dotenv in Python; this is belt-and-suspenders for the bash side.
+_env_token="$(awk -F= '/^HF_TOKEN=/{print $2}' "${REPO_ROOT}/.env" 2>/dev/null | tr -d '[:space:]')"
+if [[ -n "${_env_token}" ]]; then
+  export HF_TOKEN="${_env_token}"
+  export HUGGING_FACE_HUB_TOKEN="${_env_token}"
+fi
+
 CHARS=(
   "fox|FOX|1"
   "falco|FALCO|22"
