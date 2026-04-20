@@ -429,11 +429,20 @@ async def cmd_reload(ctx: commands.Context):
         log.exception("HF reload failed")
         await ctx.reply(f"❌ Reload failed: {e}")
         return
+    # Fingerprint includes metadata because the on-disk path
+    # (hf_checkpoints/{char}/model.pt) is stable across retrains — only the
+    # run_name / global_step / val_loss in metadata.json distinguishes one
+    # uploaded checkpoint from the next for the same character.
+    def _run_fingerprint(chars, meta, k):
+        m = meta.get(k) or {}
+        return (chars[k], m.get("run_name"), m.get("global_step"), m.get("val_loss"))
+
     added = sorted(set(new_chars) - set(CHARACTERS))
     removed = sorted(set(CHARACTERS) - set(new_chars))
     changed = sorted(
         k for k in (set(new_chars) & set(CHARACTERS))
-        if new_chars[k] != CHARACTERS[k]
+        if _run_fingerprint(new_chars, new_meta, k)
+        != _run_fingerprint(CHARACTERS, CHAR_META, k)
     )
     CHARACTERS = new_chars
     CHAR_META = new_meta
