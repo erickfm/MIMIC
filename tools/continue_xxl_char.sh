@@ -108,8 +108,46 @@ torchrun --nproc_per_node=2 train.py \
   --run-name "${RUN_NAME}" \
   --no-warmup --cosine-min-lr 1e-6 --nccl-timeout 3600 \
   --resume "${LATEST_CKPT}" \
-  >> "${LOG_FILE}" 2>&1
+  >> "${LOG_FILE}" 2>&1 &
+train_pid=$!
+log "[F/${C}] torchrun PID=${train_pid}"
+
+# Watchdog: early-stop at patience=12 no-improvement val evals. Set by
+# user 2026-04-20; tighter than the earlier patience=20 because most
+# xxl-continue val curves settle quickly after resuming from a pre-best
+# step checkpoint — a 12-eval plateau is a strong enough signal to stop.
+(
+  patience_limit=12
+  min_val=""
+  patience=0
+  while kill -0 "${train_pid}" 2>/dev/null; do
+    sleep 60
+    cur="$(grep -oP 'val total=\K[0-9.]+' "${LOG_FILE}" 2>/dev/null | tail -1)"
+    [[ -z "${cur}" ]] && continue
+    if [[ -z "${min_val}" ]] || awk "BEGIN{exit !(${cur} + 0 < ${min_val} + 0)}"; then
+      min_val="${cur}"
+      patience=0
+    else
+      patience=$((patience + 1))
+    fi
+    if (( patience >= patience_limit )); then
+      printf "[%s] [watchdog/%s] val=%s did not beat min=%s for %d evals — killing training\n" \
+        "$(date -u +%H:%M:%S)" "${C}" "${cur}" "${min_val}" "${patience}" | tee -a "${QLOG}"
+      pkill -TERM -P "${train_pid}" 2>/dev/null
+      kill -TERM "${train_pid}" 2>/dev/null
+      sleep 5
+      pkill -KILL -P "${train_pid}" 2>/dev/null
+      kill -KILL "${train_pid}" 2>/dev/null
+      break
+    fi
+  done
+) &
+watchdog_pid=$!
+wait "${train_pid}" 2>/dev/null
 train_rc=$?
+kill -TERM "${watchdog_pid}" 2>/dev/null || true
+wait "${watchdog_pid}" 2>/dev/null || true
+
 log "[F/${C}] training done (rc=${train_rc})"
 
 # ---- upload + cleanup ----
