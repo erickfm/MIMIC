@@ -726,6 +726,7 @@ replacing `match_worker` with a parallel pool and turning
 
 ### Docs
 - `docs/discord-bot-setup.md` — Full setup guide for the Discord bot (Slippi account, Dolphin, ISO, env vars, troubleshooting).
+- `docs/research-notes-2026-04-20.md` — **8-char retrain on the post-schema-drop / new-transforms basis.** Documents the invuln+ECB drop, the tanh_scale/linear_max/log_max transform spec with justifications, build_norm_stats parallelization, and the first four retrain results (fox/falco mild regressions, marth/sheik improvements). Includes hypotheses for the mixed outcome.
 - `docs/research-notes-2026-04-19.md` — **Scale sweep + the
   `--mimic-minimal-features` silent-ignore fix.** Shows that 2×/4×
   width/depth scale-ups plateau at ~2-3% val drop vs baseline, that
