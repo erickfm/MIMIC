@@ -322,6 +322,45 @@ intents.message_content = True  # needed for prefix commands
 bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
+def _ckpt_stats_suffix(char_key: str) -> str:
+    """Build a ' (val X, Nk steps, bf1 ..%)' suffix from CHAR_META.
+
+    Returns empty string if no metadata. Used to keep per-character
+    rendering consistent across !info, session-starting, and match-result
+    announcements — all of them pull the same fields from each char's
+    HF-downloaded metadata.json (written by tools/upload_char.py).
+    """
+    meta = CHAR_META.get(char_key) or {}
+    parts: list[str] = []
+    if meta.get("val_loss"):
+        parts.append(f"val {meta['val_loss']}")
+    step = meta.get("global_step")
+    if step and step != "?":
+        try:
+            parts.append(f"{int(step) // 1000}k steps")
+        except (TypeError, ValueError):
+            pass
+    btn = meta.get("val_btn_f1")
+    if btn and btn != "?":
+        parts.append(f"btn {btn}")
+    return f" ({', '.join(parts)})" if parts else ""
+
+
+def _ckpt_label_for(char_key: str) -> str:
+    """Human-readable 'ckpt_name (val X, Nk steps, btn Y%)' for a char.
+
+    Falls back to the checkpoint filename if metadata is sparse.
+    """
+    meta = CHAR_META.get(char_key) or {}
+    run = (meta.get("run_name") or "").strip()
+    if char_key in CHARACTERS:
+        fallback = os.path.basename(CHARACTERS[char_key][0])
+    else:
+        fallback = "?"
+    base = run if run and run != "?" else fallback
+    return f"{base}{_ckpt_stats_suffix(char_key)}"
+
+
 def parse_character(token: str) -> Optional[str]:
     key = token.strip().lower()
     if key in CHAR_ALIASES:
@@ -354,20 +393,9 @@ async def cmd_info(ctx: commands.Context):
     char_lines = []
     for name in sorted(CHARACTERS.keys()):
         meta = CHAR_META.get(name) or {}
-        # Prefer the run_name + step count from metadata; fall back to
-        # the filename basename if metadata is missing.
-        run = meta.get("run_name", "").strip()
+        run = (meta.get("run_name") or "").strip()
         ckpt_label = run if run and run != "?" else os.path.basename(CHARACTERS[name][0])
-        extras = []
-        if meta.get("val_loss"):
-            extras.append(f"val {meta['val_loss']}")
-        if meta.get("global_step") and meta["global_step"] != "?":
-            try:
-                extras.append(f"{int(meta['global_step']) // 1000}k steps")
-            except (TypeError, ValueError):
-                pass
-        extra_str = f" ({', '.join(extras)})" if extras else ""
-        char_lines.append(f"  • **{name}** — `{ckpt_label}`{extra_str}")
+        char_lines.append(f"  • **{name}** — `{ckpt_label}`{_ckpt_stats_suffix(name)}")
     char_block = "\n".join(char_lines) if char_lines else "  (none loaded — HF sync failed?)"
     msg = (
         f"**MIMIC Melee bot**\n"
@@ -557,15 +585,16 @@ async def match_worker():
 
         current_match = req
         ckpt_name = os.path.basename(CHARACTERS[req.character][0])
+        ckpt_label = _ckpt_label_for(req.character)
         log.info("Starting session: %s -> %s (%s) checkpoint=%s",
-                 req.user_name, req.character, req.connect_code, ckpt_name)
+                 req.user_name, req.character, req.connect_code, ckpt_label)
 
         channel = bot.get_channel(req.channel_id)
         if channel is not None:
             try:
                 await channel.send(
                     f"🎯 **Session starting**: {req.user_name} vs MIMIC ({req.character})\n"
-                    f"Checkpoint: `{ckpt_name}`\n"
+                    f"Checkpoint: `{ckpt_label}`\n"
                     f"Enter `{BOT_SLIPPI_CODE}` in Slippi Online → Direct Connect now. "
                     f"After each match, pick your next character and press Start within 30s "
                     f"to keep going. `!cancel` ends the chain."
@@ -815,7 +844,9 @@ async def announce_result(channel, req: MatchRequest, result: str, replay_path: 
     msg_lines = [f"{emoji} {verb} — MIMIC as **{req.character}** vs {req.user_name}"]
     msg_lines.append(f"Opponent code: `{req.connect_code}`")
     if ckpt_name:
-        msg_lines.append(f"Checkpoint: `{ckpt_name}`")
+        # Promote to the consistent label (checkpoint + val + step count)
+        # so match results match what !info and session-starting show.
+        msg_lines.append(f"Checkpoint: `{_ckpt_label_for(req.character) or ckpt_name}`")
     if score_line:
         msg_lines.append(score_line.lstrip("\n"))
     msg = "\n".join(msg_lines)
