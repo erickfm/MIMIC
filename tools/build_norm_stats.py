@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import argparse
 import json
 import math
+import os
+import multiprocessing as mp
 import random
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
@@ -170,10 +172,65 @@ def _extract_frame_values(gs, players):
     return rows
 
 
+def _process_one_file(args):
+    """Worker: parse a single .slp, return partial accumulators.
+
+    Returns (col_sum, col_sq, col_n, col_min, col_max, cat_unique,
+             success: bool).
+    Must be module-level + picklable for mp.Pool.
+    """
+    slp_path, norm_cols, dynamic_cat_cols = args
+    col_sum = {c: 0.0 for c in norm_cols}
+    col_sq  = {c: 0.0 for c in norm_cols}
+    col_n   = {c: 0   for c in norm_cols}
+    col_min = {c: float("inf")  for c in norm_cols}
+    col_max = {c: float("-inf") for c in norm_cols}
+    cat_unique = {c: set() for c in dynamic_cat_cols}
+
+    try:
+        console = Console(is_dolphin=False, path=str(slp_path),
+                          allow_old_version=True)
+        console.connect()
+    except Exception:
+        return (col_sum, col_sq, col_n, col_min, col_max, cat_unique, False)
+
+    while True:
+        gs = console.step()
+        if gs is None:
+            break
+        if gs.menu_state != Menu.IN_GAME or gs.frame < 0:
+            continue
+        players = list(gs.players.items())
+        if len(players) < 2:
+            continue
+
+        for row in _extract_frame_values(gs, players):
+            for c in norm_cols:
+                v = row.get(c)
+                if v is not None and math.isfinite(v):
+                    col_sum[c] += v
+                    col_sq[c]  += v * v
+                    col_n[c]   += 1
+                    if v < col_min[c]:
+                        col_min[c] = v
+                    if v > col_max[c]:
+                        col_max[c] = v
+            for c in dynamic_cat_cols:
+                v = row.get(c)
+                if v is not None:
+                    cat_unique[c].add(int(v))
+
+    return (col_sum, col_sq, col_n, col_min, col_max, cat_unique, True)
+
+
 def compute_stats(
-    slp_dir: Path, n_files: int = 5000, seed: int = 42,
+    slp_dir: Path, n_files: int = 5000, seed: int = 42, n_workers: int = 0,
 ) -> Tuple[Dict[str, Tuple[float, float]], Dict[str, Dict[int, int]]]:
-    """Single-pass streaming computation of norm stats and dynamic cat maps."""
+    """Parallel streaming computation of norm stats and dynamic cat maps.
+
+    n_workers=0 → auto, uses min(cpu_count(), 64). Single-threaded at
+    n_workers=1 (falls back to serial path for debugging).
+    """
     files = sorted(f for f in slp_dir.iterdir() if f.suffix.lower() == ".slp")
     if not files:
         raise RuntimeError(f"No .slp files in {slp_dir}")
@@ -187,7 +244,7 @@ def compute_stats(
     cat_cols = F.get_categorical_cols(fg)
     dynamic_cat_cols = F._cols_needing_dynamic_map(cat_cols)
 
-    # Accumulators
+    # Final accumulators (reduced from workers)
     col_sum: Dict[str, float] = {c: 0.0 for c in norm_cols}
     col_sq:  Dict[str, float] = {c: 0.0 for c in norm_cols}
     col_n:   Dict[str, int]   = {c: 0 for c in norm_cols}
@@ -195,48 +252,47 @@ def compute_stats(
     col_max: Dict[str, float] = {c: float("-inf") for c in norm_cols}
     cat_unique: Dict[str, Set[int]] = {c: set() for c in dynamic_cat_cols}
 
+    if n_workers <= 0:
+        n_workers = min(os.cpu_count() or 4, 64)
+    print(f"  [parallel] {n_workers} workers on {len(sample)} .slp files",
+          flush=True)
+
+    work = [(p, norm_cols, dynamic_cat_cols) for p in sample]
     n_processed = 0
-    for i, slp_path in enumerate(sample):
-        try:
-            console = Console(is_dolphin=False, path=str(slp_path),
-                              allow_old_version=True)
-            console.connect()
-        except Exception:
-            continue
+    n_done = 0
 
-        while True:
-            gs = console.step()
-            if gs is None:
-                break
-            if gs.menu_state != Menu.IN_GAME or gs.frame < 0:
-                continue
-            players = list(gs.players.items())
-            if len(players) < 2:
-                continue
+    def _reduce(result):
+        nonlocal n_processed
+        psum, psq, pn, pmin, pmax, pcat, ok = result
+        if ok:
+            n_processed += 1
+        for c in norm_cols:
+            col_sum[c] += psum[c]
+            col_sq[c]  += psq[c]
+            col_n[c]   += pn[c]
+            if pmin[c] < col_min[c]:
+                col_min[c] = pmin[c]
+            if pmax[c] > col_max[c]:
+                col_max[c] = pmax[c]
+        for c in dynamic_cat_cols:
+            cat_unique[c].update(pcat[c])
 
-            for row in _extract_frame_values(gs, players):
-                for c in norm_cols:
-                    v = row.get(c)
-                    if v is not None and math.isfinite(v):
-                        col_sum[c] += v
-                        col_sq[c] += v * v
-                        col_n[c] += 1
-                        if v < col_min[c]:
-                            col_min[c] = v
-                        if v > col_max[c]:
-                            col_max[c] = v
+    if n_workers == 1:
+        for w in work:
+            _reduce(_process_one_file(w))
+            n_done += 1
+            if n_done % 100 == 0:
+                print(f"  [{n_done}/{len(sample)}] processed ...", flush=True)
+    else:
+        # chunksize = ~5 balances IPC vs load-balancing for ~0.3s/file parse
+        with mp.Pool(n_workers) as pool:
+            for result in pool.imap_unordered(_process_one_file, work, chunksize=5):
+                _reduce(result)
+                n_done += 1
+                if n_done % 200 == 0:
+                    print(f"  [{n_done}/{len(sample)}] processed ...", flush=True)
 
-                for c in dynamic_cat_cols:
-                    v = row.get(c)
-                    if v is not None:
-                        cat_unique[c].add(int(v))
-
-        n_processed += 1
-        if (i + 1) % 100 == 0:
-            print(f"  [{i + 1}/{len(sample)}] .slp files processed ...",
-                  flush=True)
-
-    print(f"  Processed {n_processed} .slp files successfully")
+    print(f"  Processed {n_processed}/{len(sample)} .slp files successfully")
 
     # Finalize norm stats
     norm_stats = {}
@@ -275,6 +331,8 @@ def main():
     parser.add_argument("--n-files", type=int, default=5000,
                         help="Number of .slp files to sample")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--workers", type=int, default=0,
+                        help="Parallel workers (0=auto, uses min(cpu_count, 64))")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -282,7 +340,8 @@ def main():
 
     print("=== Computing Normalization Stats & Categorical Maps ===")
     norm_stats, cat_maps, minmax = compute_stats(
-        Path(args.slp_dir), n_files=args.n_files, seed=args.seed)
+        Path(args.slp_dir), n_files=args.n_files, seed=args.seed,
+        n_workers=args.workers)
 
     ns_path = out_dir / "norm_stats.json"
     with open(ns_path, "w") as f:
