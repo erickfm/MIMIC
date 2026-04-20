@@ -449,6 +449,22 @@ class PlayerState:
             return self.model(batch)
 
 
+def _safe_sample(logits, temperature: float = 1.0) -> int:
+    """Sample from softmax(logits / T), falling back to argmax if the
+    logits are NaN/Inf (undertrained XXL models hit this). Prevents a
+    `torch.multinomial` device-side assert from killing the session."""
+    logits = logits.float()
+    if not torch.isfinite(logits).all():
+        # Undertrained / broken model. argmax on raw logits is at least
+        # deterministic; if those are all NaN too, fall back to 0.
+        safe = torch.nan_to_num(logits, nan=-1e9, posinf=1e9, neginf=-1e9)
+        return int(torch.argmax(safe).item())
+    probs = Fn.softmax(logits / temperature, dim=-1)
+    if not torch.isfinite(probs).all() or float(probs.sum()) <= 0:
+        return int(torch.argmax(logits).item())
+    return int(torch.multinomial(probs, 1).item())
+
+
 def decode_and_press(ctrl, preds, prev_sent, temperature=1.0):
     """Decode model predictions, press controller, return updated prev_sent.
 
@@ -456,19 +472,16 @@ def decode_and_press(ctrl, preds, prev_sent, temperature=1.0):
 
     Returns: (prev_sent dict, pressed list, btn_names list)
     """
-    main_probs = Fn.softmax(preds["main_xy"][0, -1].float() / temperature, dim=-1)
-    main_idx = int(torch.multinomial(main_probs, 1))
+    main_idx = _safe_sample(preds["main_xy"][0, -1], temperature)
     mx = float(HAL_STICK_CLUSTERS_37[main_idx][0])
     my = float(HAL_STICK_CLUSTERS_37[main_idx][1])
 
-    shldr_probs = Fn.softmax(preds["shoulder_val"][0, -1].float() / temperature, dim=-1)
-    shldr_idx = int(torch.multinomial(shldr_probs, 1))
+    shldr_idx = _safe_sample(preds["shoulder_val"][0, -1], temperature)
     shldr = [0.0, 0.4, 1.0][shldr_idx]
 
     n_cdir = preds["c_dir_logits"].size(-1)
     if n_cdir == 9:
-        c_probs = Fn.softmax(preds["c_dir_logits"][0, -1].float() / temperature, dim=-1)
-        c_idx = int(torch.multinomial(c_probs, 1))
+        c_idx = _safe_sample(preds["c_dir_logits"][0, -1], temperature)
         cx = float(HAL_CSTICK_CLUSTERS_9[c_idx][0])
         cy = float(HAL_CSTICK_CLUSTERS_9[c_idx][1])
     else:
@@ -477,9 +490,8 @@ def decode_and_press(ctrl, preds, prev_sent, temperature=1.0):
                   3: (0.0, 0.5), 4: (1.0, 0.5)}
         cx, cy = _C_DIR.get(dir_idx, (0.5, 0.5))
 
-    btn_probs = Fn.softmax(preds["btn_logits"][0, -1].float() / temperature, dim=-1)
-    btn_idx = int(torch.multinomial(btn_probs, 1))
-    n_btn = btn_probs.size(-1)
+    btn_idx = _safe_sample(preds["btn_logits"][0, -1], temperature)
+    n_btn = preds["btn_logits"].size(-1)
 
     # Analog sticks
     ctrl.tilt_analog(melee.enums.Button.BUTTON_MAIN, mx, my)
