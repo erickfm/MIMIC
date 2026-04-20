@@ -323,12 +323,17 @@ bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 def _ckpt_stats_suffix(char_key: str) -> str:
-    """Build a ' (val X, Nk steps, bf1 ..%)' suffix from CHAR_META.
+    """Build a ' (val X, Nk steps)' suffix from CHAR_META.
 
     Returns empty string if no metadata. Used to keep per-character
     rendering consistent across !info, session-starting, and match-result
     announcements — all of them pull the same fields from each char's
     HF-downloaded metadata.json (written by tools/upload_char.py).
+
+    We intentionally skip val_btn_f1 and val_main_f1: button F1 pins near
+    91% for every character (not informative), and main F1 carries signal
+    but adds noise to an already-dense line. val_loss + step count is the
+    smallest informative summary.
     """
     meta = CHAR_META.get(char_key) or {}
     parts: list[str] = []
@@ -340,9 +345,6 @@ def _ckpt_stats_suffix(char_key: str) -> str:
             parts.append(f"{int(step) // 1000}k steps")
         except (TypeError, ValueError):
             pass
-    btn = meta.get("val_btn_f1")
-    if btn and btn != "?":
-        parts.append(f"btn {btn}")
     return f" ({', '.join(parts)})" if parts else ""
 
 
