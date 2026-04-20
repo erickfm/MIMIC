@@ -61,6 +61,11 @@ class ModelConfig:
     use_rmsnorm: bool    = False
     use_swiglu: bool     = False
 
+    # Per-input-column sigmoid gate on the encoder's final projection.
+    # When True and trained with an L1 penalty on the gate, the sigmoid
+    # values act as learned feature importance (0 = pruned, 1 = kept).
+    use_input_gate: bool = False
+
     # loss / output configuration
     stick_loss: str      = "clusters"
     btn_loss: str        = "focal"
@@ -148,6 +153,20 @@ MODEL_PRESETS = {
                          dropout=0.1, max_seq_len=180, pos_enc="rope",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
+    "mimic-xl":     dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
+                         dropout=0.1, max_seq_len=180, pos_enc="relpos",
+                         use_swiglu=True,
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "mimic-xl-rms": dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
+                         dropout=0.1, max_seq_len=180, pos_enc="relpos",
+                         use_swiglu=True, use_rmsnorm=True,
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "mimic-xxl":    dict(d_model=1024, nhead=16, num_layers=12, dim_feedforward=4096,
+                         dropout=0.1, max_seq_len=180, pos_enc="relpos",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
     "mimic-xpos":   dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.1, max_seq_len=180, pos_enc="xpos", xpos_scale_base=128.0,
                          num_stages=6, num_characters=27, num_actions=396,
@@ -172,6 +191,11 @@ MODEL_PRESETS = {
     "modern-relpos": dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2050,
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
                          n_kv_heads=2, use_rmsnorm=True, use_swiglu=True,
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "modern-relpos-gelu": dict(d_model=512, nhead=8, num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
+                         n_kv_heads=2, use_rmsnorm=True, use_swiglu=False,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
     "medium":       dict(d_model=768,  nhead=8,  num_layers=4, dim_feedforward=3072),
@@ -797,6 +821,7 @@ class FramePredictor(nn.Module):
             mimic_minimal_features=cfg.mimic_minimal_features,
             mimic_controller_encoding=cfg.mimic_controller_encoding,
             n_controller_combos=cfg.n_controller_combos,
+            use_input_gate=cfg.use_input_gate,
         )
 
         if cfg.pos_enc == "learned":

@@ -1127,9 +1127,14 @@ def stage_metadata(meta_dir: Path, staging_dir: Path) -> None:
     staging_dir.mkdir(parents=True, exist_ok=True)
     for name in METADATA_FILES:
         src = meta_dir / name
-        if src.exists():
-            shutil.copy2(src, staging_dir / name)
-            print(f"  Copied {name}")
+        dst = staging_dir / name
+        if not src.exists():
+            continue
+        if dst.exists() and src.resolve() == dst.resolve():
+            print(f"  Skipped {name} (meta_dir == staging_dir)")
+            continue
+        shutil.copy2(src, dst)
+        print(f"  Copied {name}")
 
 
 # --- Upload ------------------------------------------------------------------

@@ -35,19 +35,84 @@ where the transformer backbone came from.
 MIMIC's canonical config (preset name `mimic`, bootstrapped from HAL's
 GPTv5Controller and later diverged):
 
-- **Params:** ~19.95M
+- **Params:** ~19.95M (minimal-features) / ~20.00M (full-features; +18K
+  projection weights for 36 additional input scalars)
 - **Transformer:** d_model=512, 6 layers, 8 heads, block_size=1024
-- **Position encoding:** Shaw relative-position attention (`mimic`) or RoPE (`mimic-rope`)
-- **Input:** Linear(166 → 512) from concatenated [stage_emb(4) + 2*char_emb(12) + 2*action_emb(32) + gamestate(18) + controller(56)]
+- **Position encoding:** Shaw relative-position attention (`mimic`).
+  RoPE variants (`mimic-rope*`) are deprecated — see Pitfalls.
+- **Input:**
+  - **Minimal features** (historical default, `--mimic-minimal-features`):
+    Linear(166 → 512) from `[stage_emb(4) + 2*char_emb(12) + 2*action_emb(32) + gamestate(18) + controller(56)]`.
+  - **Full features** (new default as of 2026-04-19): Linear(202 → 512) —
+    same categorical embeddings, but the 18-dim `gamestate` becomes
+    54-dim (27 per player: 22 numeric + 5 flags). Drop
+    `--mimic-minimal-features` from the CLI to enable.
 - **Output heads (autoregressive with detach):** shoulder(3) → c_stick(9) → main_stick(37) → buttons(7)
 - **Head hidden dim:** `input_dim // 2` (NOT a fixed 256 — each head has different hidden size)
 - **Sequence length:** 180 frames (~3 seconds)
-- **Dropout:** 0.1 (mimic-rope) or 0.2 (mimic/relpos)
+- **Dropout:** 0.2 (mimic / modern-relpos), 0.1 (mimic-xl and other
+  post-bugfix presets)
 
-The gamestate is 9 features per player (ego + opponent = 18):
-`percent, stock, facing, invulnerable, jumps_left, on_ground, shield_strength, position_x, position_y`
+### Gamestate columns per player
 
-The controller is a 56-dim one-hot: main_stick(37) + c_stick(9) + buttons(7) + shoulder(3).
+**Minimal (9):** `percent, stock, facing, invulnerable, jumps_left,
+on_ground, shield_strength, position_x, position_y` (exact HAL order
+is preserved by a reindex in the encoder's minimal path).
+
+**Full (27):** 22 numeric + 5 flags in native shard order:
+
+    numeric[0-4]   : pos_x, pos_y, percent, stock, jumps_left
+    numeric[5-9]   : speed_air_x_self, speed_ground_x_self,
+                     speed_x_attack, speed_y_attack, speed_y_self
+    numeric[10-12] : hitlag_left, hitstun_left, invuln_left
+    numeric[13]    : shield_strength
+    numeric[14-21] : ecb_{bottom,left,right,top}_{x,y}
+    flags[0-4]     : on_ground, off_stage, facing, invulnerable,
+                     moonwalkwarning
+
+The controller is a 56-dim one-hot: main_stick(37) + c_stick(9) +
+buttons(7) + shoulder(3).
+
+### Preset variants (in `mimic/model.py:MODEL_PRESETS`)
+
+- `mimic` — canonical (relpos, LN, GELU, full attention). Production.
+- `mimic-rope`, `mimic-rope-lt`, `mimic-rope-lf`, `mimic-rope-deep`,
+  `mimic-xpos`, `mimic-selrope`, `mimic-ropenope`, `mimic-xpos-64`,
+  `mimic-flex`, `mimic-ropeflex`, `mimic-learned` — position-encoding
+  experiments. Mostly historical; RoPE-family underperforms. Not used
+  in production.
+- `mimic-xl` (2026-04-18) — width+FFN scale-up of `mimic`. d_model=768,
+  nhead=12, num_layers=6, dim_feedforward=3072, dropout=0.1, SwiGLU
+  FFN, relpos. ~44M params. Adding `--num-layers 10` gives a ~73M
+  deeper variant. See `research-notes-2026-04-19.md` for the full
+  scale sweep.
+- `mimic-xl-rms` (2026-04-19) — `mimic-xl` plus RMSNorm. Tested at
+  10-layer depth; did not meaningfully differ from LN variant.
+- `modern-relpos`, `modern-relpos-gelu`, `modern` — `mimic`-sized
+  (~20M) with GQA (n_kv_heads=2) + SwiGLU + RMSNorm. At puff scale
+  none of these beat the plain `mimic` recipe, in ties to within
+  0.001 val-loss across all three runs.
+- `tiny`, `small`, `medium`, `base`, `deep`, `shallow`,
+  `wide-shallow`, `xlarge`, `xxlarge`, `huge`, `giant` — legacy
+  generic presets without mimic-specific keys. **Avoid for mimic_mode
+  training** — they don't set `max_seq_len`, which triggers the
+  seq_len-fallback-to-60 path.
+
+### Optional: learned input gate (feature-importance diagnostic)
+
+`ModelConfig.use_input_gate: bool` (default False). Enable per-run with
+`--input-gate-l1 <lambda>` (typical: 0.01). When on,
+`MimicFlatEncoder` adds a per-input-column sigmoid gate on the final
+projection, and the training loop adds `lambda * sigmoid(gate).mean()`
+to the loss as an L1 sparsity penalty. End-of-training writes
+`checkpoints/{run_name}_gate_report.json` ranking every input scalar
+by its learned gate value (0 = model pruned it, 1 = model kept it).
+
+Primarily a diagnostic tool, not a production regularizer — at
+λ=0.01 it costs ~0 val-loss (and in our one measurement on puff
+actually *helped* slightly, likely through a small implicit
+regularization effect). Leave `--input-gate-l1` unset (default 0) for
+standard production runs.
 
 ## Stats Files (Critical)
 
@@ -90,25 +155,45 @@ at dataloader time (this is what HAL does).
 
 ## Training
 
-### Command (current best config — v2 shards)
+### Command (current best config — v2 shards, full features)
 
 ```bash
-python3 train.py \
-  --model mimic-rope --encoder mimic_flat \
-  --mimic-mode --mimic-minimal-features --mimic-controller-encoding \
+torchrun --nproc_per_node=2 train.py \
+  --model mimic --encoder mimic_flat \
+  --mimic-mode --mimic-controller-encoding \
   --stick-clusters hal37 --plain-ce \
-  --lr 3e-4 --batch-size 64 --grad-accum-steps 8 \
+  --lr 3e-4 --batch-size 256 --grad-accum-steps 1 \
   --max-samples 16777216 \
-  --data-dir data/fox_v2 \
+  --data-dir data/<char>_v2 \
   --self-inputs \
   --reaction-delay 0 \
   --run-name <name> \
-  --no-warmup --cosine-min-lr 1e-6
+  --no-warmup --cosine-min-lr 1e-6 \
+  --nccl-timeout 3600
 ```
+
+**Key 2026-04-19 change: DROP `--mimic-minimal-features`.** Prior to
+that date the flag was silently ignored by `MimicFlatEncoder` — every
+training run was using a 9-scalar-per-player gamestate (6 numeric + 3
+flags) regardless of the flag, because the encoder sliced the
+`self_numeric` tensor based on shape rather than honoring the config.
+The encoder now honors the flag. Dropping it exposes the full 22-col
+numeric + 5-flag per-player gamestate (velocity, hitlag, hitstun,
+invuln_left, ECB, off_stage, moonwalkwarning) and is worth ~1.5-3.5%
+val-loss reduction at no wall-clock cost. See
+`docs/research-notes-2026-04-19.md` for the measurements.
+
+Single-GPU variant: swap `torchrun --nproc_per_node=2` for `python3`
+and use `--batch-size 64 --grad-accum-steps 8` to keep effective batch
+at 512.
 
 The legacy `--hal-*` flags and `--model hal` / `--encoder hal_flat` names
 still work as aliases — saved checkpoints from before the 2026-04-13
 rename load unchanged.
+
+**`--model mimic-rope*` presets are deprecated as of 2026-04-18.** Use
+`--model mimic` (Shaw relative-position attention). See "Common
+Pitfalls" below for the RoPE note.
 
 **`--self-inputs` is required even on v2 shards.** Earlier v2 runs that
 dropped `--self-inputs` had val loss 2.3 and main stick F1 of 15%. With
@@ -296,12 +381,23 @@ new is pressed (partial release), the label is NO_BUTTON (4). Previously MIMIC
 kept the surviving held button — this was fixed in both `slp_to_shards.py` and
 the existing shard data (524K frames affected, 0.71%).
 
-### HuggingFace Dataset
+### HuggingFace Datasets
 
-`erickfm/slippi-public-dataset-v3.7` — 95K unique replays organized by
-character. Fox folder has 45,854 .slp files. This is the raw replay source.
-Shards must be built from these using `tools/slp_to_shards.py` with
-appropriate metadata and `--mimic-norm`.
+Two sources of raw replays. The ranked one is canonical for new training.
+
+- **`erickfm/melee-ranked-replays`** (canonical, since 2026-04-17 retrain).
+  Ranked Slippi replays stored as **.tar.gz per (character, rank_pair,
+  archive)**: `shards/{CHAR}_{rank_pair}_aN.tar.gz`. Rank pairs are
+  `master-master`, `master-diamond`, `master-platinum`, `diamond-*`,
+  `platinum-*`. Higher-rank token first (M>D>P). Per-char master-tier
+  training pulls **all three `master-*` pairs** (master-master has both
+  players master; master-diamond/platinum mixes in games where the other
+  player is sub-master and we can't tell from the .slp which port is
+  master — accepted as a data-quality/quantity tradeoff). See
+  `docs/ranked-dataset-pipeline.md`.
+- **`erickfm/slippi-public-dataset-v3.7`** — legacy. 95K replays by
+  character; Fox folder has 45,854 .slp. Used for the 2026-04-12/13/14
+  runs. `tools/download_fox.py` is hardcoded to this source.
 
 ### Building MIMIC-normalized Shards
 
@@ -311,6 +407,82 @@ The `controller_combos.json` MUST have 7 combos (A, B, Z, Jump, TRIG,
 A_TRIG, None) for the 7-class button head. The old 5-combo version
 (A, B, Jump, Z, None — HAL's scheme) still works via backcompat but
 cannot represent airdodge / wavedash / L-cancel.
+
+### Retraining a character from scratch (ranked master-* data)
+
+Summary stats are preserved — **you don't need to regenerate them**. All 5
+inference-relevant JSONs live on `huggingface.co/erickfm/MIMIC/<char>/`;
+the 6th (`norm_minmax.json`) stays local in `data/<char>_v2/` and is only
+needed if you want to rebuild `mimic_norm.json` from scratch.
+
+**What you have on HF** per char (`erickfm/MIMIC/<char>/`):
+`model.pt`, `config.json`, `metadata.json`, and the 5 JSONs —
+`cat_maps.json`, `controller_combos.json`, `mimic_norm.json`,
+`norm_stats.json`, `stick_clusters.json`.
+
+**Retrain recipe** (also lives in `tools/run_all_chars.sh` for the full
+7-char pipeline; the snippet below is the single-char equivalent):
+
+```bash
+C=fox; HF_BUCKET=FOX; IDX=1   # adjust per char
+
+# 1. Raw .slp — all three master-* pairs
+hf download erickfm/melee-ranked-replays --repo-type dataset \
+  --include "shards/${HF_BUCKET}_master-master_a*.tar.gz" \
+  --include "shards/${HF_BUCKET}_master-diamond_a*.tar.gz" \
+  --include "shards/${HF_BUCKET}_master-platinum_a*.tar.gz" \
+  --local-dir data/${C}_ranked_slp/_tars
+for t in data/${C}_ranked_slp/_tars/shards/*.tar.gz; do
+  tar -xzf "$t" -C data/${C}_ranked_slp/
+done
+
+# 2. Metadata — pull from HF if data/${C}_v2 is missing
+mkdir -p data/${C}_v2
+hf download erickfm/MIMIC --include "${C}/*.json" --local-dir data/${C}_v2
+mv data/${C}_v2/${C}/*.json data/${C}_v2/ && rmdir data/${C}_v2/${C}
+
+# 3. Re-shard using existing mimic_norm.json
+python3 tools/slp_to_shards.py \
+  --slp-dir data/${C}_ranked_slp \
+  --meta-dir data/${C}_v2 \
+  --mimic-norm data/${C}_v2/mimic_norm.json \
+  --character ${IDX} \
+  --staging-dir data/${C}_v2 \
+  --repo erickfm/mimic-${C}-v2 --no-upload --keep-staging \
+  --shard-gb 4.0 --val-frac 0.1 --seed 42
+
+# 4. Train (relpos, full features, eff_batch 512, 32,768 steps)
+torchrun --nproc_per_node=2 train.py \
+  --model mimic --encoder mimic_flat \
+  --mimic-mode --mimic-controller-encoding \
+  --stick-clusters hal37 --plain-ce \
+  --lr 3e-4 --batch-size 256 --grad-accum-steps 1 \
+  --max-samples 16777216 --data-dir data/${C}_v2 \
+  --self-inputs --reaction-delay 0 \
+  --run-name ${C}-retrain-$(date -u +%Y%m%d) \
+  --no-warmup --cosine-min-lr 1e-6 --nccl-timeout 3600
+```
+
+(Note: `--mimic-minimal-features` is intentionally absent — see
+"Training" section above and `docs/research-notes-2026-04-19.md`.)
+
+Wall time per char (2×RTX 5090): ~10 min download/extract + 30-90 min
+shard + ~50 min train = ~1.5-2.5 hours. Disk peak: 200-800 GB (chars with
+bigger master populations like sheik and cptfalcon are closer to the top).
+
+Character index + HF bucket name per char (bucket ≠ display name for
+Sheik and Puff because the ranked pipeline collapses Zelda+Sheik into one
+bucket and Jigglypuff is the full name):
+
+| char       | HF bucket     | idx |
+|------------|---------------|-----|
+| fox        | `FOX`         | 1   |
+| falco      | `FALCO`       | 22  |
+| marth      | `MARTH`       | 18  |
+| sheik      | `ZELDA_SHEIK` | 7   |
+| cptfalcon  | `CPTFALCON`   | 2   |
+| puff       | `JIGGLYPUFF`  | 15  |
+| luigi      | `LUIGI`       | 17  |
 
 ## Checkpoints
 
@@ -334,12 +506,39 @@ can also flag a non-standard recipe: `overfit`, `wavedash`, `small`,
 recognizable next to others for the same character on the same day.
 
 Current best checkpoints (all in `checkpoints/`):
-- `fox-20260415-rope-25k.pt` — current best Fox (RoPE, val 0.7358, retrained post seq_len fix)
+
+**Active per-character bests:**
+- `puff-20260419-mimic-fullfeat-gate01-33k.pt` — current best Puff
+  (mimic + full features + input-gate λ=0.01, val 0.6641). First
+  character trained with `--mimic-minimal-features` dropped; ~3.6%
+  below the 0.6890 minimal-features baseline at the same param count.
 - `falco-20260412-relpos-28k.pt` — current best Falco (relpos, val 0.7374)
 - `cptfalcon-20260412-relpos-27k.pt` — current best CptFalcon (relpos, val 0.71)
 - `luigi-20260412-relpos-5k.pt` — current best Luigi (relpos, early-stopped, val ~1.0)
-- `fox-20260413-rope-32k.pt` — superseded Fox, tainted by the seq_len=60 bug (kept for audit only)
-- `fox-20260411-relpos-noself-28k.pt` — superseded Fox (no --self-inputs, kept for reference)
+
+**Recent pipeline runs (wandb but not yet promoted to
+`{char}-{date}-{tag}-{steps}k.pt`; underlying `_best.pt` /
+`_bestloss.pt` still present):**
+- Fox ~0.7081 (run `qeka6rq8`), Falco ~0.7448 (`zb1vhjxs`),
+  Sheik ~0.6611 (`jc4xe4dv`), CptFalcon ~0.7356 (`6k1x8xdi`),
+  Marth ~0.6746 (`eo8yjem4`) — all relpos / `--model mimic` runs from
+  the 2026-04-17/18 per-character pipeline cycle, trained with
+  `--mimic-minimal-features` (pre-fullfeat). Expect ~1-3% val
+  improvement when re-run without that flag.
+
+**Scaling / architecture sweep checkpoints (puff, 2026-04-18/19) — see
+`research-notes-2026-04-19.md`:**
+- `puff-20260418-relpos-xl-30k.pt` — `mimic-xl` 6L, 44M, val 0.6766.
+- `puff-20260419-relpos-xl-deep-31k.pt` — `mimic-xl` 10L, 73M, val 0.6698.
+- `puff-20260419-modern-relpos-32k.pt` — modern block (GQA+SwiGLU+RMS), 20M, val 0.6882.
+- `puff-20260419-modern-relpos-gelu-29k.pt` — modern block, GELU FFN, 20M, val 0.6883.
+
+**Superseded / kept for audit only:**
+- `fox-20260415-rope-25k.pt` — old Fox best (RoPE, val 0.7358); RoPE
+  variants are deprecated as of 2026-04-18.
+- `fox-20260413-rope-32k.pt` — Fox tainted by the seq_len=60 bug.
+- `fox-20260411-relpos-noself-28k.pt` — Fox trained without
+  `--self-inputs`.
 
 Rationale: the old names (`hal-7class-v2-long`, `falco-7class-v2-full`,
 etc.) carried no date, no encoder info, and the "7class-v2" prefix was
@@ -408,7 +607,12 @@ since wandb doesn't store the `.pt`.
 - `train.py` — Training loop (DDP, gradient accumulation, mimic_mode, cosine LR)
 - `mimic/model.py` — Model architecture (FramePredictor, mimic presets, attention variants)
 - `mimic/dataset.py` — StreamingMeleeDataset (per-game and pre-windowed shards)
-- `mimic/frame_encoder.py` — Input encoders (MimicFlatEncoder for mimic_mode)
+- `mimic/frame_encoder.py` — Input encoders (MimicFlatEncoder for
+  mimic_mode). As of 2026-04-19: honors `mimic_minimal_features`
+  (previously ignored — minimal path unchanged for back-compat, full
+  path exposes 22 numeric + 5 flags per player). Also hosts the
+  optional L1-gated input projection (`use_input_gate`) used for
+  feature-importance diagnostics.
 - `mimic/features.py` — Feature encoding (cluster centers, controller one-hot, normalization)
 - `eval.py` — Offline evaluation (validation metrics)
 - `inference.py` — Legacy inference script (use `tools/play_vs_cpu.py` or `tools/play_netplay.py` in modern code paths)
@@ -467,6 +671,13 @@ non-blocking, checked once per console step.
 
 ### Docs
 - `docs/discord-bot-setup.md` — Full setup guide for the Discord bot (Slippi account, Dolphin, ISO, env vars, troubleshooting).
+- `docs/research-notes-2026-04-19.md` — **Scale sweep + the
+  `--mimic-minimal-features` silent-ignore fix.** Shows that 2×/4×
+  width/depth scale-ups plateau at ~2-3% val drop vs baseline, that
+  modern-block (GQA/SwiGLU/RMS) changes are null at this size, and
+  that exposing the full gamestate (dropping `--mimic-minimal-features`)
+  on a baseline-sized model beats every scaled variant. Also
+  documents the L1 input-gate feature-importance tooling.
 - `docs/research-notes-2026-04-13.md` — **The TRIG L-button bug debug story.** The most important note for anyone touching `decode_and_press` or questioning why BC bots can't wavedash.
 - `docs/research-notes-2026-04-12.md` — Multi-character v2 training results (Falco/CptFalcon/Luigi) + bot-vs-bot ditto analysis.
 - `docs/research-notes-2026-04-11c.md` — v2 shard target shift. Post-frame gamestate leaks answers to the button head; fixed by shifting targets forward by 1 frame in the shard itself.
@@ -582,6 +793,58 @@ This is Eric Gu's original HAL codebase. Key files:
     higher val loss because the model can no longer cheat via action→button
     memorization. A val loss of ~1.0 on v2 shards may correspond to better
     gameplay than 0.74 on old shards.
+
+12a. **RoPE presets are deprecated (2026-04-18).** The `mimic-rope*`
+    family — `mimic-rope`, `mimic-rope-lt`, `mimic-rope-lf`,
+    `mimic-rope-deep`, `mimic-rope-xxx` aliases — underperforms the
+    relpos baseline. Default to `--model mimic`. `fox-20260415-rope-25k.pt`
+    is kept for audit only. Do not start new production runs on a RoPE
+    preset unless you're specifically testing RoPE and know what
+    you're looking at. The bug is in the positional-encoding path
+    itself, not the training recipe.
+
+12b. **`--mimic-minimal-features` silently degrades loss (fixed
+    2026-04-19, flag repurposed).** Prior to 2026-04-19,
+    `MimicFlatEncoder.__init__` accepted the
+    `mimic_minimal_features` kwarg and discarded it; the forward pass
+    sliced the numeric tensor based on shape (`sn.shape[-1] > 7`), so
+    every run used the 9-scalar-per-player minimal gamestate
+    regardless of the flag. As of 2026-04-19 the encoder honors the
+    flag: minimal path is bit-identical to pre-fix behavior (for
+    back-compat with old checkpoints), full path (flag omitted)
+    exposes 27 scalars per player (22 numeric + 5 flags). The
+    full-features path is the new default and is worth 1.5-3.5%
+    val-loss reduction at no wall-clock cost. **Drop
+    `--mimic-minimal-features` from all new training recipes** unless
+    deliberately reproducing a pre-fix baseline. Old checkpoints
+    trained with the flag still load unchanged — the flag flows
+    through the pickled config.
+
+12c. **Inference must produce the full 22-col numeric + 5-flag tensor
+    (fixed 2026-04-20).** `tools/inference_utils.py:build_frame` /
+    `build_frame_p2` / `build_mock_frame` used to produce a 7-col
+    numeric + 5-flag tensor matching the pre-fix minimal encoder's
+    expectations. When `--mimic-minimal-features` was dropped as
+    the new default, `MimicFlatEncoder(mimic_minimal_features=False)`
+    started raising `ValueError: requires 22-col self_numeric shards`
+    at inference time for any fullfeat checkpoint. Fixed by:
+    (1) extending `MIMIC_NUM` → `MIMIC_NUM_FULL` (22 columns in exact
+    shard order — see `mimic/features.py:numeric_state` for the
+    schema), (2) reading speeds / hitlag / hitstun / invuln_left /
+    ECB via libmelee's `PlayerState.speed_*`, `.hitlag_left`,
+    `.hitstun_frames_left`, `.invulnerability_left`, and
+    `.ecb_{bottom,left,right,top}` attrs, (3) normalizing extras by
+    z-score using `norm_stats.json` mean/std (mirrors
+    `slp_to_shards.py:549-554`), (4) loading `norm_stats.json` in
+    `load_inference_context`. **This works for BOTH minimal and
+    fullfeat checkpoints** because the minimal encoder path slices
+    the 22-col input to 6 cols internally. Old checkpoints still
+    play correctly; new fullfeat checkpoints now play too. If
+    `norm_stats.json` is missing from a data dir (shouldn't happen
+    with any properly-staged char), extras pass through as 0.0 and
+    minimal checkpoints still work (the encoder slices the zeros
+    away); fullfeat checkpoints will see zeroed-out features and
+    perform worse.
 
 13. **Discord bot portability: keep paths relative in `.env`.** The Discord
     bot's `.env` uses relative paths (`./emulator/...`, `./melee.iso`,

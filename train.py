@@ -520,7 +520,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               n_stick_clusters=None, n_shoulder_bins=None,
               n_heads_override=None, hal_mode=False, lean_features=False,
               hal_minimal_features=False,
-              hal_controller_encoding=False, n_controller_combos=5):
+              hal_controller_encoding=False, n_controller_combos=5,
+              use_input_gate=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -561,6 +562,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["n_stick_clusters"] = n_stick_clusters
     if n_shoulder_bins is not None:
         overrides["n_shoulder_bins"] = n_shoulder_bins
+    if use_input_gate:
+        overrides["use_input_gate"] = True
     seq_len = overrides.pop("max_seq_len", SEQUENCE_LENGTH)
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
@@ -634,7 +637,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           controller_offset: bool = False,
           hal_controller_encoding: bool = False,
           character_filter: int = None,
-          random_perspective: bool = False):
+          random_perspective: bool = False,
+          input_gate_l1: float = 0.0):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -829,7 +833,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            lean_features=lean_features,
                            hal_minimal_features=hal_minimal_features,
                            hal_controller_encoding=hal_controller_encoding,
-                           n_controller_combos=_n_combos)
+                           n_controller_combos=_n_combos,
+                           use_input_gate=(input_gate_l1 > 0))
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={val_interval}  "
@@ -1057,6 +1062,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             loss_vec = torch.stack(task_losses)
             micro_loss = (loss_weights * loss_vec).sum() / grad_accum_steps
 
+            # L1 penalty on encoder input gate (learned feature importance).
+            # Divide by grad_accum_steps so the effective penalty matches the
+            # configured lambda regardless of accumulation.
+            if input_gate_l1 > 0:
+                micro_loss = micro_loss + (input_gate_l1 / grad_accum_steps) * \
+                             _raw_model.encoder.gate_l1_penalty()
+
             if not torch.isfinite(micro_loss):
                 skip_step = True
                 skip_ct += 1
@@ -1106,8 +1118,15 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 avg_log = {f"avg/{k}": _run_sums[k] / _run_ct for k in _AVG_KEYS}
                 avg_log["perf/step_per_sec"]    = sps
                 avg_log["perf/samples_per_sec"] = sps * BATCH_SIZE * world_size * grad_accum_steps
+                avg_log["train/lr"] = optimiser.param_groups[0]["lr"]
                 if _si_schedule:
                     avg_log["curriculum/si_drop_prob"] = _raw_model.encoder.si_drop_prob
+                if input_gate_l1 > 0 and hasattr(_raw_model.encoder, "input_gate_logits"):
+                    g = torch.sigmoid(_raw_model.encoder.input_gate_logits).detach()
+                    avg_log["gate/mean"]       = g.mean().item()
+                    avg_log["gate/min"]        = g.min().item()
+                    avg_log["gate/max"]        = g.max().item()
+                    avg_log["gate/frac_below_0.1"] = (g < 0.1).float().mean().item()
                 wandb.log(avg_log, step=step)
                 _run_sums = {k: 0.0 for k in _AVG_KEYS}
                 _run_ct = 0
@@ -1326,6 +1345,28 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if math.isfinite(best_val_loss):
         _log(f"Best val_loss={best_val_loss:.4f} @ step {best_val_loss_step}. "
              f"Use --cosine-decay-steps {best_val_loss_step} for next run on this data.")
+
+    # Dump input-gate importance ranking if gate was enabled (main rank only).
+    if input_gate_l1 > 0 and _is_main and hasattr(_raw_model.encoder, "input_gate_logits"):
+        import json
+        report = _raw_model.encoder.gate_report()
+        gate_path = f"checkpoints/{run_name}_gate_report.json"
+        with open(gate_path, "w") as f:
+            json.dump(
+                {"input_gate_l1": input_gate_l1,
+                 "step": step,
+                 "ranked_ascending": [[n, float(v)] for n, v in report]},
+                f, indent=2,
+            )
+        _log(f"Wrote input-gate report → {gate_path}")
+        # Print the 15 most pruned + 10 most kept for quick eyeball.
+        _log("Lowest (most pruned) gates:")
+        for n, v in report[:15]:
+            _log(f"  {v:6.3f}  {n}")
+        _log("Highest (most kept) gates:")
+        for n, v in report[-10:]:
+            _log(f"  {v:6.3f}  {n}")
+
     wandb.finish()
     if is_distributed:
         dist.destroy_process_group()
@@ -1357,6 +1398,11 @@ if __name__ == "__main__":
                         help="Wandb group for related runs (e.g. 'sweep-v1')")
     parser.add_argument("--num-layers", type=int, default=None,
                         help="Override number of transformer layers")
+    parser.add_argument("--input-gate-l1", type=float, default=0.0,
+                        help="L1 penalty on per-input-column sigmoid gate in "
+                             "the encoder's projection. >0 enables the gate; "
+                             "trained gate values = feature importance. "
+                             "Typical values: 1e-3 to 1e-2.")
     parser.add_argument("--seq-len",    type=int, default=None,
                         help="Override sequence length (default: 60)")
     parser.add_argument("--reaction-delay", type=int, default=None,
@@ -1533,4 +1579,5 @@ if __name__ == "__main__":
         hal_controller_encoding=args.mimic_controller_encoding,
         character_filter=args.character_filter,
         random_perspective=args.random_perspective,
+        input_gate_l1=args.input_gate_l1,
     )

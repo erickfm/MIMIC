@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -718,6 +718,7 @@ class MimicFlatEncoder(nn.Module):
         mimic_controller_encoding: bool = True,
         n_controller_combos: int = 5,
         no_self_inputs: bool = False,
+        use_input_gate: bool = False,
         # Legacy aliases
         hal_minimal_features: bool = None,
         hal_controller_encoding: bool = None,
@@ -732,6 +733,7 @@ class MimicFlatEncoder(nn.Module):
         self._ctrl_enc = mimic_controller_encoding
         # Legacy alias
         self._hal_ctrl_enc = self._ctrl_enc
+        self._minimal = mimic_minimal_features
         self.si_drop_prob: float = 0.0
 
         # Categorical embeddings (HAL sizes)
@@ -743,8 +745,13 @@ class MimicFlatEncoder(nn.Module):
         emb_dim = self.STAGE_EMB_DIM + 2 * self.CHAR_EMB_DIM + 2 * self.ACTION_EMB_DIM
         # = 4 + 24 + 64 = 92
 
-        # Gamestate: 9 features per player in HAL's order × 2
-        numeric_dim = 9 * 2  # = 18
+        # Gamestate dim per player × 2:
+        #   minimal: 6 numeric (pos_x/y, percent, stock, jumps_left, shield) + 3 flags
+        #            (on_ground, facing, invulnerable) = 9
+        #   full:    22 numeric (adds speeds/hitlag/hitstun/invuln_left/ECB) + 5 flags
+        #            (adds off_stage, moonwalkwarning) = 27
+        per_player = 9 if mimic_minimal_features else 27
+        numeric_dim = per_player * 2
 
         # Controller: one-hot vector (37 stick + 9 cstick + N combos + 3 shoulder)
         ctrl_dim = 0
@@ -752,10 +759,23 @@ class MimicFlatEncoder(nn.Module):
             ctrl_dim = 37 + 9 + n_controller_combos + 3
 
         self._input_dim = emb_dim + numeric_dim + ctrl_dim
+        self._n_controller_combos = n_controller_combos
 
         # Single projection (matching HAL's proj_down)
         self.proj = nn.Linear(self._input_dim, d_model)
         self.drop = nn.Dropout(dropout)
+
+        # Optional per-input-column sigmoid gate for feature importance.
+        # Init logits so sigmoid ≈ 0.88 (start near fully-on, let L1 decay).
+        self._use_input_gate = use_input_gate
+        if use_input_gate:
+            self.input_gate_logits = nn.Parameter(
+                torch.full((self._input_dim,), 2.0)
+            )
+        self._feature_names: List[str] = self._build_feature_names()
+        assert len(self._feature_names) == self._input_dim, (
+            f"feature_names len {len(self._feature_names)} != input_dim {self._input_dim}"
+        )
 
     def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
         # Stochastic self-input masking
@@ -782,32 +802,46 @@ class MimicFlatEncoder(nn.Module):
         self_action = self.action_emb(seq["self_action"])       # (B, T, 32)
         opp_action = self.action_emb(seq["opp_action"])         # (B, T, 32)
 
-        # Numeric gamestate: 9 features per player in HAL's exact order:
-        # percent, stock, facing, invulnerable, jumps_left, on_ground, shield, pos_x, pos_y
+        # Numeric gamestate. Shard stores 22 numeric + 5 flag cols per player
+        # (see mimic/features.py:numeric_state + flags for the full column list).
+        # HAL normalizes boolean flags: 0→-1, 1→+1 (normalize transform with min=0,max=1)
         sn = seq["self_numeric"]
         on = seq["opp_numeric"]
-        if sn.shape[-1] > 7:
-            # Full 22-column: select 6 (drop invuln_left at index 12)
-            _IDX = [0, 1, 2, 3, 4, 13]  # pos_x, pos_y, percent, stock, jumps_left, shield
-            sn = sn[..., _IDX]
-            on = on[..., _IDX]
-        elif sn.shape[-1] == 7:
-            # 7-column hal_minimal: drop invuln_left at index 5
-            _IDX = [0, 1, 2, 3, 4, 6]
-            sn = sn[..., _IDX]
-            on = on[..., _IDX]
-        # sn/on now have 6 values: [pos_x, pos_y, percent, stock, jumps_left, shield]
-        _FLAG_IDX = [0, 2, 3]  # on_ground, facing, invulnerable from 5-flag tensor
-        # HAL normalizes boolean flags: 0→-1, 1→+1 (normalize transform with min=0,max=1)
-        sf = seq["self_flags"][..., _FLAG_IDX].float() * 2.0 - 1.0
-        of = seq["opp_flags"][..., _FLAG_IDX].float() * 2.0 - 1.0
-        # Concat → [pos_x(0), pos_y(1), percent(2), stock(3), jumps_left(4),
-        #           shield(5), on_ground(6), facing(7), invulnerable(8)]
-        # Reorder to HAL: percent, stock, facing, invulnerable, jumps_left,
-        #                  on_ground, shield, pos_x, pos_y
-        _HAL_ORDER = [2, 3, 7, 8, 4, 6, 5, 0, 1]
-        self_num = torch.cat([sn, sf], dim=-1)[..., _HAL_ORDER]
-        opp_num = torch.cat([on, of], dim=-1)[..., _HAL_ORDER]
+        sf_all = seq["self_flags"].float() * 2.0 - 1.0
+        of_all = seq["opp_flags"].float() * 2.0 - 1.0
+
+        if self._minimal:
+            # HAL minimal: 6 numeric + 3 flags per player, reordered into HAL's
+            # exact concat order so minimal-trained checkpoints load unchanged.
+            if sn.shape[-1] > 7:
+                _IDX = [0, 1, 2, 3, 4, 13]  # pos_x, pos_y, percent, stock, jumps_left, shield
+                sn = sn[..., _IDX]
+                on = on[..., _IDX]
+            elif sn.shape[-1] == 7:
+                _IDX = [0, 1, 2, 3, 4, 6]   # legacy 7-col minimal shards (drop invuln_left)
+                sn = sn[..., _IDX]
+                on = on[..., _IDX]
+            _FLAG_IDX = [0, 2, 3]  # on_ground, facing, invulnerable
+            sf = sf_all[..., _FLAG_IDX]
+            of = of_all[..., _FLAG_IDX]
+            # Reorder to HAL: percent, stock, facing, invulnerable, jumps_left,
+            #                  on_ground, shield, pos_x, pos_y
+            _HAL_ORDER = [2, 3, 7, 8, 4, 6, 5, 0, 1]
+            self_num = torch.cat([sn, sf], dim=-1)[..., _HAL_ORDER]
+            opp_num = torch.cat([on, of], dim=-1)[..., _HAL_ORDER]
+        else:
+            # Full: all 22 numeric + 5 flags per player, no HAL reorder (a single
+            # learned Linear downstream makes the ordering functionally irrelevant).
+            if sn.shape[-1] != 22:
+                raise ValueError(
+                    f"MimicFlatEncoder(mimic_minimal_features=False) requires 22-col "
+                    f"self_numeric shards; got shape[-1]={sn.shape[-1]}. Either rebuild "
+                    f"shards with the full numeric state or pass --mimic-minimal-features."
+                )
+            self_num = torch.cat([sn, sf_all], dim=-1)  # (B, T, 27)
+            opp_num = torch.cat([on, of_all], dim=-1)
+
+        # (parts built below — gate applied after concat)
 
         parts = [stage, self_char, opp_char, self_action, opp_action,
                  self_num, opp_num]
@@ -818,7 +852,88 @@ class MimicFlatEncoder(nn.Module):
 
         # Concat everything → single projection
         combined = torch.cat(parts, dim=-1)     # (B, T, input_dim)
+        if self._use_input_gate:
+            gate = torch.sigmoid(self.input_gate_logits)  # (input_dim,)
+            combined = combined * gate
         return self.drop(self.proj(combined))    # (B, T, d_model)
+
+    # ------------------------------------------------------------------
+    # Input-gate helpers (no-ops when use_input_gate=False)
+    # ------------------------------------------------------------------
+    def gate_l1_penalty(self) -> torch.Tensor:
+        """Mean of sigmoid(gate_logits). Add to loss via  loss += lam * gate_l1_penalty().
+
+        Returns a 0-d tensor on the same device as gate_logits. Returns 0 when
+        the gate is disabled.
+        """
+        if not self._use_input_gate:
+            # Return a zero tensor that's safe to .backward() through.
+            return self.proj.weight.new_zeros(())
+        return torch.sigmoid(self.input_gate_logits).mean()
+
+    @torch.no_grad()
+    def gate_values(self) -> Optional[torch.Tensor]:
+        """Detached gate values for inspection, or None if gate disabled."""
+        if not self._use_input_gate:
+            return None
+        return torch.sigmoid(self.input_gate_logits).detach().cpu()
+
+    def feature_names(self) -> List[str]:
+        return list(self._feature_names)
+
+    def gate_report(self) -> List[Tuple[str, float]]:
+        """Ranked (name, gate_value) list, ascending — smallest values first
+        are the features the model has pruned most. Returns [] if gate disabled.
+        """
+        if not self._use_input_gate:
+            return []
+        vals = self.gate_values().tolist()
+        return sorted(zip(self._feature_names, vals), key=lambda x: x[1])
+
+    def _build_feature_names(self) -> List[str]:
+        """Names aligned with the concat order in forward(): stage_emb, self/opp
+        char_emb, self/opp action_emb, self/opp numeric+flags, self_controller.
+        """
+        names: List[str] = []
+        names.extend(f"stage_emb[{i}]" for i in range(self.STAGE_EMB_DIM))
+        names.extend(f"self_char_emb[{i}]" for i in range(self.CHAR_EMB_DIM))
+        names.extend(f"opp_char_emb[{i}]" for i in range(self.CHAR_EMB_DIM))
+        names.extend(f"self_action_emb[{i}]" for i in range(self.ACTION_EMB_DIM))
+        names.extend(f"opp_action_emb[{i}]" for i in range(self.ACTION_EMB_DIM))
+
+        if self._minimal:
+            # Names match the reordered 9-slot HAL layout from the minimal path
+            # (percent, stock, facing, invulnerable, jumps_left, on_ground, shield,
+            #  pos_x, pos_y) — see _HAL_ORDER in forward().
+            mini_ordered = ["percent", "stock", "facing", "invulnerable",
+                            "jumps_left", "on_ground", "shield_strength",
+                            "pos_x", "pos_y"]
+            names.extend(f"self_{n}" for n in mini_ordered)
+            names.extend(f"opp_{n}" for n in mini_ordered)
+        else:
+            # Full: all 22 numeric + 5 flags per player in native order.
+            num_cols = [
+                "pos_x", "pos_y", "percent", "stock", "jumps_left",
+                "speed_air_x_self", "speed_ground_x_self",
+                "speed_x_attack", "speed_y_attack", "speed_y_self",
+                "hitlag_left", "hitstun_left", "invuln_left",
+                "shield_strength",
+                "ecb_bottom_x", "ecb_bottom_y", "ecb_left_x", "ecb_left_y",
+                "ecb_right_x", "ecb_right_y", "ecb_top_x", "ecb_top_y",
+            ]
+            flag_cols = ["on_ground", "off_stage", "facing",
+                         "invulnerable", "moonwalkwarning"]
+            full = num_cols + flag_cols
+            names.extend(f"self_{n}" for n in full)
+            names.extend(f"opp_{n}" for n in full)
+
+        # Controller one-hot slots (when enabled and self is visible).
+        if self._hal_ctrl_enc and not self._no_self_inputs:
+            names.extend(f"ctrl_main[{i}]" for i in range(37))
+            names.extend(f"ctrl_cstick[{i}]" for i in range(9))
+            names.extend(f"ctrl_combo[{i}]" for i in range(self._n_controller_combos))
+            names.extend(f"ctrl_shoulder[{i}]" for i in range(3))
+        return names
 
 
 # ---------------------------------------------------------------------------
@@ -854,6 +969,7 @@ def build_encoder(
     mimic_minimal_features: bool = False,
     mimic_controller_encoding: bool = False,
     n_controller_combos: int = 5,
+    use_input_gate: bool = False,
     # Legacy aliases
     hal_minimal_features: bool = None,
     hal_controller_encoding: bool = None,
@@ -891,7 +1007,8 @@ def build_encoder(
     common = dict(d_model=d_model, d_intra=d_intra, dropout=dropout, scaled_emb=scaled_emb)
 
     if encoder_type in ("mimic_flat", "hal_flat"):
-        return cls(d_model=d_model, dropout=dropout, **vocab_kwargs)
+        return cls(d_model=d_model, dropout=dropout,
+                   use_input_gate=use_input_gate, **vocab_kwargs)
     elif encoder_type == "flat":
         return cls(**common, **vocab_kwargs)
     else:
