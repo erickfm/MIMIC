@@ -92,11 +92,19 @@ process_char() {
   log "[B/${C}] $(find "${slp_dir}" -maxdepth 1 -name '*.slp' | wc -l) .slp files"
 
   # ---- C. Metadata ----
+  # norm_stats.json is expensive (~30 min on 5000 .slp files) — only
+  # rebuild if missing. mimic_norm.json is cheap and depends on the
+  # current MIMIC_TRANSFORMS spec, so rebuild any time it's missing
+  # (independent of norm_stats) to pick up post-bootstrap transform
+  # additions like the 2026-04-20 tanh/linear_max/log_max extensions.
   if [[ ! -f "${data_dir}/norm_stats.json" ]]; then
     log "[C/${C}] building norm_stats (5000 files sample)"
     python3 "${REPO_ROOT}/tools/build_norm_stats.py" \
       --slp-dir "${slp_dir}" --out-dir "${data_dir}" --n-files 5000 \
       2>&1 | tee -a "${QLOG}" | tail -10
+  fi
+  if [[ ! -f "${data_dir}/mimic_norm.json" ]]; then
+    log "[C/${C}] (re)building mimic_norm.json from current MIMIC_TRANSFORMS"
     python3 "${REPO_ROOT}/tools/build_mimic_norm.py" \
       --norm-stats "${data_dir}/norm_stats.json" \
       --minmax    "${data_dir}/norm_minmax.json" \

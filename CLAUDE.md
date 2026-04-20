@@ -76,6 +76,40 @@ native shard order:
 Dropped 2026-04-20: `invuln_left` (column used to be numeric[12]) and
 all 8 ECB corners (used to be numeric[14-21]). See pitfall 12d for why.
 
+### Per-feature normalization (as of 2026-04-20)
+
+Defined by `tools/build_mimic_norm.py:MIMIC_TRANSFORMS` and applied by
+`mimic/features.py:mimic_normalize` / `mimic_normalize_array` at shard
+time; mirrored in `tools/inference_utils.py:XFORM` for live inference.
+
+| transform | formula | used for |
+|---|---|---|
+| `normalize` | `2(x-min)/(max-min) - 1` → [-1, +1] | percent, stock, jumps_left, facing, invulnerable, on_ground |
+| `standardize` | `(x - mean) / std` | pos_x, pos_y |
+| `invert_normalize` | `2(max-x)/(max-min) - 1` | shield_strength (so "shield broken" is +1) |
+| `tanh_scale` | `tanh(x / scale)` | 5 velocities (scale=5 for self, scale=10 for attack) |
+| `linear_max` | `x / max` | hitlag_left (max=20) |
+| `log_max` | `log1p(clamp(x,0,max)) / log1p(max)` | hitstun_left (max=120) |
+
+The bottom three were added 2026-04-20 to replace the earlier z-score
+fallback that `slp_to_shards.py` used for features not in `mimic_norm.json`.
+Motivation: velocities are signed heavy-tailed (sign is load-bearing, tail
+dominates std under the norm_stats std-floor, wasting dynamic range on
+typical-motion frames); hitlag/hitstun are zero-inflated heavy-tailed
+where z-score becomes near-identity and leaves the model with raw
+unnormalized counts. tanh preserves sign and saturates extremes; `x/max`
+is fine for hitlag's bounded 0-20 range where the exact frame count is
+secondary to the in-hitlag binary; `log_max` compresses the hitstun tail
+(60 vs 80 vs 100 are all "still combo'd") while keeping low-value
+resolution (distinguishes 0 / 5 / 15 crisply).
+
+Backward compat: old checkpoints' `mimic_norm.json` files predate these
+entries, so at inference the new XFORM entries are only active if the
+loaded char's mimic_norm has them — old chars fall back to the old
+z-score path automatically. Retraining with the new transforms requires
+regenerating `mimic_norm.json` (delete the file; shard pipeline
+rebuilds).
+
 The controller is a 56-dim one-hot: main_stick(37) + c_stick(9) +
 buttons(7) + shoulder(3).
 

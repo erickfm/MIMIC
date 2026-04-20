@@ -52,7 +52,10 @@ MIMIC_NUM_FULL = [
 # for anything that still imports MIMIC_NUM by name.
 MIMIC_NUM = MIMIC_NUM_FULL
 
-# Transform functions matching hal_norm.json
+# Transform functions matching mimic/features.py:mimic_normalize. See
+# tools/build_mimic_norm.py for the spec of the params each reads.
+import math as _math
+
 def _norm(val, s):
     return 2 * (val - s["min"]) / (s["max"] - s["min"]) - 1 if s["max"] != s["min"] else 0.0
 
@@ -62,14 +65,39 @@ def _inv(val, s):
 def _std(val, s):
     return (val - s["mean"]) / s["std"] if s["std"] != 0 else 0.0
 
-# Map of feature suffix → transform function for the 9 minimal features
-# covered by mimic_norm.json. Features NOT in this map (speeds, hitlag,
-# hitstun, invuln_left, ECB) are z-score standardized via norm_stats.json
-# at inference time — matching what slp_to_shards.py does when building
-# shards (see the "else" branch at slp_to_shards.py:549-554).
+def _tanh(val, s):
+    scale = s.get("scale", 0.0)
+    return _math.tanh(val / scale) if scale else 0.0
+
+def _linear_max(val, s):
+    mx = s.get("max", 0.0)
+    return val / mx if mx else 0.0
+
+def _log_max(val, s):
+    mx = s.get("max", 0.0)
+    if not mx:
+        return 0.0
+    clamped = max(0.0, min(val, mx))
+    return _math.log1p(clamped) / _math.log1p(mx)
+
+# Map of feature suffix → transform function. Must match exactly what
+# tools/build_mimic_norm.py writes into mimic_norm.json for each feature.
+# Anything NOT in this map + in hal_features still falls through to
+# z-score via norm_stats (handled in _player_numeric_full below).
 XFORM = {
-    "percent": _norm, "stock": _norm, "jumps_left": _norm,
-    "shield_strength": _inv, "pos_x": _std, "pos_y": _std,
+    "percent":              _norm,
+    "stock":                _norm,
+    "jumps_left":           _norm,
+    "shield_strength":      _inv,
+    "pos_x":                _std,
+    "pos_y":                _std,
+    "speed_air_x_self":     _tanh,
+    "speed_ground_x_self":  _tanh,
+    "speed_y_self":         _tanh,
+    "speed_x_attack":       _tanh,
+    "speed_y_attack":       _tanh,
+    "hitlag_left":          _linear_max,
+    "hitstun_left":         _log_max,
 }
 
 def _player_numeric_full(ps, hal_features, norm_stats):

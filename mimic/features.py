@@ -366,7 +366,17 @@ def load_mimic_norm(data_dir: Path) -> dict:
 
 
 def mimic_normalize(raw_value: float, params: dict) -> float:
-    """Apply MIMIC's normalization to a raw value."""
+    """Apply MIMIC's normalization to a raw value.
+
+    Transforms (added 2026-04-20 for velocities/hitlag/hitstun):
+      standardize   : (x - mean) / std                  — HAL legacy; bounded bell-ish features
+      normalize     : (x - min) / (max-min) * 2 - 1     — HAL legacy; bounded uniform-ish features
+      invert_normalize: (max - x) / (max-min) * 2 - 1   — HAL legacy; shield (inverted polarity)
+      tanh_scale    : tanh(x / scale)                   — signed heavy-tailed (velocities)
+      linear_max    : x / max                           — zero-inflated bounded (hitlag)
+      log_max       : log1p(clamp(x,0,max)) / log1p(max)— heavy-tailed nonneg (hitstun)
+    """
+    import math
     t = params["transform"]
     if t == "standardize":
         return (raw_value - params["mean"]) / params["std"] if params["std"] else 0.0
@@ -376,21 +386,47 @@ def mimic_normalize(raw_value: float, params: dict) -> float:
     elif t == "invert_normalize":
         rng = params["max"] - params["min"]
         return 2 * (params["max"] - raw_value) / rng - 1 if rng else 0.0
+    elif t == "tanh_scale":
+        scale = params.get("scale", 0.0)
+        return math.tanh(raw_value / scale) if scale else 0.0
+    elif t == "linear_max":
+        mx = params.get("max", 0.0)
+        return raw_value / mx if mx else 0.0
+    elif t == "log_max":
+        mx = params.get("max", 0.0)
+        if not mx:
+            return 0.0
+        clamped = max(0.0, min(raw_value, mx))
+        return math.log1p(clamped) / math.log1p(mx)
     return raw_value
 
 
 def mimic_normalize_array(values: np.ndarray, params: dict) -> np.ndarray:
-    """Vectorized MIMIC normalization for a 1D array."""
+    """Vectorized MIMIC normalization for a 1D array. See mimic_normalize for docs."""
     t = params["transform"]
-    mn, mx = float(params["min"]), float(params["max"])
-    rng = mx - mn
     if t == "standardize":
         std = float(params["std"])
         return (values - float(params["mean"])) / std if std else np.zeros_like(values)
     elif t == "normalize":
+        mn, mx = float(params["min"]), float(params["max"])
+        rng = mx - mn
         return 2 * (values - mn) / rng - 1 if rng else np.zeros_like(values)
     elif t == "invert_normalize":
+        mn, mx = float(params["min"]), float(params["max"])
+        rng = mx - mn
         return 2 * (mx - values) / rng - 1 if rng else np.zeros_like(values)
+    elif t == "tanh_scale":
+        scale = float(params.get("scale", 0.0))
+        return np.tanh(values / scale) if scale else np.zeros_like(values)
+    elif t == "linear_max":
+        mx = float(params.get("max", 0.0))
+        return values / mx if mx else np.zeros_like(values)
+    elif t == "log_max":
+        mx = float(params.get("max", 0.0))
+        if not mx:
+            return np.zeros_like(values)
+        clamped = np.clip(values, 0.0, mx)
+        return np.log1p(clamped) / np.log1p(mx)
     return values
 
 
