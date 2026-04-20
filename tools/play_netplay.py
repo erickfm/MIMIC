@@ -153,12 +153,15 @@ def emit_match_start(idx: int):
 
 def emit_match_result(result: str, replay_path: str = "",
                       bot_stocks: int = -1, opp_stocks: int = -1,
-                      bot_percent: float = 0.0, opp_percent: float = 0.0):
+                      bot_percent: float = 0.0, opp_percent: float = 0.0,
+                      stage: str = ""):
     """Per-match status line(s) for the Discord bot parser."""
     print(f"RESULT: {result}", flush=True)
     if bot_stocks >= 0 and opp_stocks >= 0:
         print(f"SCORE: bot={bot_stocks}stk/{bot_percent:.0f}% "
               f"opp={opp_stocks}stk/{opp_percent:.0f}%", flush=True)
+    if stage:
+        print(f"STAGE: {stage}", flush=True)
     if replay_path:
         print(f"REPLAY: {replay_path}", flush=True)
 
@@ -364,6 +367,7 @@ try:
         last_seen_opp_stock = None
         last_seen_me_percent = 0.0
         last_seen_opp_percent = 0.0
+        match_stage_name = ""
         match_final_result = "timeout"
         dc_detected = False
 
@@ -491,9 +495,16 @@ try:
                 match_started = True
                 match_start_time = now
                 me = gs.players[detected_port]
-                log.info("Match %d started. Bot is on port %d (char=%s costume=%d code=%s)",
+                # Capture the actual stage played (opponent picks in Direct
+                # Connect, not our --stage arg). Enum name → human-readable
+                # string on the bot side.
+                try:
+                    match_stage_name = gs.stage.name if gs.stage else ""
+                except Exception:
+                    match_stage_name = ""
+                log.info("Match %d started. Bot is on port %d (char=%s costume=%d code=%s stage=%s)",
                          match_idx, detected_port, BOT_CHAR.name, me.costume,
-                         getattr(me, "connectCode", "?"))
+                         getattr(me, "connectCode", "?"), match_stage_name)
                 # Fresh PlayerState drops any rolling context from a prior
                 # match — position/stage/stocks all reset on a new match,
                 # so carrying frames across would push the model OOD.
@@ -598,6 +609,7 @@ try:
             opp_stocks=last_seen_opp_stock if last_seen_opp_stock is not None else -1,
             bot_percent=last_seen_me_percent,
             opp_percent=last_seen_opp_percent,
+            stage=match_stage_name,
         )
 
         # Session-continue decisions.

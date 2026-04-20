@@ -700,13 +700,15 @@ async def run_session(req: MatchRequest, channel, ckpt_name: str) -> None:
                 "",
                 pending.get("score", ""),
                 ckpt_name,
+                stage=pending.get("stage", ""),
             )
         except Exception:
             log.exception("Failed to announce match result")
-        log.info("Match %s finished: result=%s score=%s replay=%s",
+        log.info("Match %s finished: result=%s score=%s stage=%s replay=%s",
                  pending.get("idx", "?"),
                  pending["result"],
                  pending.get("score", ""),
+                 pending.get("stage", ""),
                  pending.get("replay", ""))
         pending = {}
 
@@ -740,6 +742,8 @@ async def run_session(req: MatchRequest, channel, ckpt_name: str) -> None:
                         pending["result"] = text.split(":", 1)[1].strip()
                     elif text.startswith("SCORE:"):
                         pending["score"] = text.split(":", 1)[1].strip()
+                    elif text.startswith("STAGE:"):
+                        pending["stage"] = text.split(":", 1)[1].strip()
                     elif text.startswith("REPLAY:"):
                         pending["replay"] = text.split(":", 1)[1].strip()
                     elif text.startswith("SESSION_END:"):
@@ -808,8 +812,23 @@ async def run_session(req: MatchRequest, channel, ckpt_name: str) -> None:
                     proc.returncode, stderr_tail)
 
 
+def _pretty_stage(stage: str) -> str:
+    """melee.Stage enum name → human-readable label."""
+    return {
+        "FINAL_DESTINATION": "Final Destination",
+        "BATTLEFIELD":       "Battlefield",
+        "POKEMON_STADIUM":   "Pokémon Stadium",
+        "FOUNTAIN_OF_DREAMS": "Fountain of Dreams",
+        "YOSHIS_STORY":      "Yoshi's Story",
+        "DREAM_LAND_N64":    "Dream Land N64",
+        "RANDOM_STAGE":      "Random",
+        "NO_STAGE":          "",
+    }.get(stage, stage.replace("_", " ").title() if stage else "")
+
+
 async def announce_result(channel, req: MatchRequest, result: str, replay_path: str,
-                           err_tail: str, score: str = "", ckpt_name: str = ""):
+                           err_tail: str, score: str = "", ckpt_name: str = "",
+                           stage: str = ""):
     emoji_map = {
         "win":         "🏆",
         "loss":        "💀",
@@ -845,6 +864,9 @@ async def announce_result(channel, req: MatchRequest, result: str, replay_path: 
 
     msg_lines = [f"{emoji} {verb} — MIMIC as **{req.character}** vs {req.user_name}"]
     msg_lines.append(f"Opponent code: `{req.connect_code}`")
+    stage_label = _pretty_stage(stage)
+    if stage_label:
+        msg_lines.append(f"Stage: **{stage_label}**")
     if ckpt_name:
         # Promote to the consistent label (checkpoint + val + step count)
         # so match results match what !info and session-starting show.

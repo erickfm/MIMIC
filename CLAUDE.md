@@ -650,8 +650,9 @@ Stdout protocol emitted by `play_netplay.py`:
 MATCH_START: <1-based idx>     # emitted when IN_GAME is first reached
 RESULT: win|loss|draw|disconnect|no-opponent|timeout|failed
 SCORE: bot=Xstk/Y% opp=Xstk/Y%
+STAGE: <melee.Stage enum name>   # observed gs.stage, not the CLI preference
 REPLAY: /abs/path/Game_YYYYMMDDThhmmss.slp
-# (above four repeat per match)
+# (above five repeat per match)
 SESSION_END: max-matches|opponent-gone|opponent-timeout|stopped|error|signal|hard-timeout
 ```
 
@@ -661,6 +662,20 @@ recreated on each IN_GAME transition). `opponent_last_seen` and
 `opponent_ever_seen` deliberately persist across matches for DC
 detection. STOP polling uses `select.select([sys.stdin], [], [], 0)` —
 non-blocking, checked once per console step.
+
+**Multi-instance on one machine.** Running N independent MIMIC bots on
+the same box is feasible; limits are accounts + process isolation, not
+hardware. Each instance needs its own Slippi account (unique
+`connectCode` + `playKey` — Slippi rejects duplicate logins), own
+`SLIPPI_HOME` dir, own Discord bot token + `BOT_SLIPPI_CODE`, and own
+replay dir. Resource budget on a 24 GB GPU + 8-core CPU: ~3–5
+concurrent sessions before 60 fps frame deadlines tighten (20M-param
+bf16 model is ~200 MB VRAM, ~2 ms/frame inference; Dolphin on Vulkan
+is ~50–70% of one core). Simplest deployment: run N copies of the bot
+with distinct `.env` files — zero code change. Nicer deployment: one
+Discord front-end routing to a worker pool of N slots; requires
+replacing `match_worker` with a parallel pool and turning
+`current_proc` into a per-slot dict — ~100 lines.
 
 **Inference (shared):**
 - `tools/inference_utils.py` — Shared inference pipeline: `load_mimic_model`, `load_inference_context`, `build_frame`, `build_frame_p2`, `PlayerState`, `decode_and_press`. **This is where the L-button fix (2026-04-13) lives.** Any new inference entry point should import from here, not reimplement.
