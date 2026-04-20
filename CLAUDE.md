@@ -665,7 +665,26 @@ since wandb doesn't store the `.pt`.
 
 **Inference (online, Slippi netplay):**
 - `tools/play_netplay.py` — Joins a Slippi Online Direct Connect lobby. Uses `MenuHelper.menu_helper_simple(connect_code=...)`, detects bot's port via the `connectCode` field on `PlayerState` (handles dittos and palette swaps). **Persistent-session mode** (see below): plays up to `--max-matches N` back-to-back matches in one Dolphin process, emitting a per-match stdout block (`MATCH_START:`, `RESULT:`, `SCORE:`, `REPLAY:`) and a single `SESSION_END:` on exit. Default `--max-matches 1` preserves the old one-shot CLI behavior; the Discord bot passes `-1` for unlimited.
-- `tools/discord_bot.py` — Discord front-end (prefix commands: `!play`, `!queue`, `!cancel`, `!info`). Single-session FIFO queue via `asyncio.Queue`. Spawns `play_netplay.py` once per user and streams its stdout: each `MATCH_START` → `▶️ Match N starting` post, each `RESULT/SCORE/REPLAY` triplet → result announcement + replay upload. Uploads the saved replay back to the channel. Config via `.env` (see `.env.example`). Per-character checkpoint labels render consistently (run name + `val`, step count pulled from each char's HF `metadata.json`) across `!info`, session-starting, and match-result messages via `_ckpt_label_for(char)`.
+- `tools/discord_bot.py` — Discord front-end (prefix commands: `!play`, `!queue`, `!cancel`, `!info`, `!reload`, plus one `!<character>` shortcut per loaded character/alias). Single-session FIFO queue via `asyncio.Queue`. Spawns `play_netplay.py` once per user and streams its stdout: each `MATCH_START` → `▶️ Match N starting` post, each `RESULT/SCORE/REPLAY` triplet → result announcement + replay upload. Uploads the saved replay back to the channel. Config via `.env` (see `.env.example`). Per-character checkpoint labels render consistently (run name + `val`, step count pulled from each char's HF `metadata.json`) across `!info`, session-starting, and match-result messages via `_ckpt_label_for(char)`.
+
+**`!<character>` shortcut (2026-04-20).** `!fox`, `!marth`, `!falcon`,
+etc. are registered dynamically via `_register_char_shortcuts()` — one
+command per key in `CHAR_ALIASES` (character keys + hardcoded aliases
+`falcon`/`cpt`/`cf`), skipping the reserved set
+(`play`/`queue`/`cancel`/`info`/`reload`/`help`). The shortcut extracts
+a `TAG#NUMBER` substring from `ctx.author.display_name` via
+`_DISPLAY_NAME_CODE_RE` (case-insensitive, takes the first match) and
+invokes `cmd_play` with it. Shortcuts are rebuilt on `!reload` so a
+newly-uploaded character is immediately callable without a bot
+restart. If the caller's display name has no code the shortcut replies
+with a redirect to the long-form `!play`.
+
+**`!reload` diff (2026-04-20).** `cmd_reload` compares a fingerprint
+tuple `(path, run_name, global_step, val_loss)` instead of just the
+local path, because a retrain reuses `hf_checkpoints/{char}/model.pt` —
+only the `metadata.json` fields actually change. Without the
+fingerprint, re-uploading a new checkpoint for an existing character
+would silently report "no changes."
 
 **Persistent-session model (2026-04-16).** Each Discord `!play` spawns
 one `play_netplay.py` that keeps Dolphin alive across multiple matches
