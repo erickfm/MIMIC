@@ -830,21 +830,34 @@ This is Eric Gu's original HAL codebase. Key files:
     at inference time for any fullfeat checkpoint. Fixed by:
     (1) extending `MIMIC_NUM` → `MIMIC_NUM_FULL` (22 columns in exact
     shard order — see `mimic/features.py:numeric_state` for the
-    schema), (2) reading speeds / hitlag / hitstun / invuln_left /
-    ECB via libmelee's `PlayerState.speed_*`, `.hitlag_left`,
-    `.hitstun_frames_left`, `.invulnerability_left`, and
-    `.ecb_{bottom,left,right,top}` attrs, (3) normalizing extras by
-    z-score using `norm_stats.json` mean/std (mirrors
-    `slp_to_shards.py:549-554`), (4) loading `norm_stats.json` in
-    `load_inference_context`. **This works for BOTH minimal and
-    fullfeat checkpoints** because the minimal encoder path slices
-    the 22-col input to 6 cols internally. Old checkpoints still
-    play correctly; new fullfeat checkpoints now play too. If
-    `norm_stats.json` is missing from a data dir (shouldn't happen
-    with any properly-staged char), extras pass through as 0.0 and
-    minimal checkpoints still work (the encoder slices the zeros
-    away); fullfeat checkpoints will see zeroed-out features and
-    perform worse.
+    schema), (2) reading speeds / hitlag / hitstun via libmelee's
+    `PlayerState.speed_*`, `.hitlag_left`, `.hitstun_frames_left`,
+    (3) normalizing extras by z-score using `norm_stats.json` mean/std
+    (mirrors `slp_to_shards.py:549-554`), (4) loading `norm_stats.json`
+    in `load_inference_context`. **This works for BOTH minimal and
+    fullfeat checkpoints** because the minimal encoder path slices the
+    22-col input to 6 cols internally.
+
+12d. **Train/infer parity: 9 numeric fields are always zero in shards
+    (fixed 2026-04-20).** `libmelee`'s Slippi-replay parse does NOT
+    populate `ps.invulnerability_left` or the ECB corners
+    (`ps.ecb_bottom`, `.ecb_left`, `.ecb_right`, `.ecb_top`) — they
+    always read as 0 from a `.slp`. But the **same attributes return
+    real values on a live console**. `slp_to_shards.py` writes these
+    zeros straight into the shard, so training sees zero-valued
+    columns; if inference naively reads the live values, the model
+    gets nonzero inputs it was never trained on. Verified directly
+    from a `data/luigi_v2/train_shard_000.pt` shard: all 2.5M frames
+    have `invuln_left` and all 8 ECB cols exactly 0.0.
+    `inference_utils._SHARD_ZERO_FEATURES` hard-zeros these at
+    inference to preserve parity. Orthogonal cross-check: the
+    L1-input-gate report from 2026-04-19 independently pruned all
+    these fields to the sparsity floor — because, from the model's
+    perspective, they only ever carried their constant zero.
+    The rest of the 22-col schema (position, percent, stock,
+    jumps_left, speeds, hitlag, hitstun, shield_strength) IS
+    populated normally by the `.slp` parse and matches train/infer
+    without additional handling.
 
 13. **Discord bot portability: keep paths relative in `.env`.** The Discord
     bot's `.env` uses relative paths (`./emulator/...`, `./melee.iso`,

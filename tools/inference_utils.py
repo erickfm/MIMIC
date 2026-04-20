@@ -74,6 +74,24 @@ XFORM = {
     "shield_strength": _inv, "pos_x": _std, "pos_y": _std,
 }
 
+# libmelee's Slippi-replay parse does NOT populate these fields — they
+# read as 0 during shard builds even though the same attribute returns
+# real values on a LIVE console. The model was trained on zero-valued
+# columns for these, so at live inference we must also send zero to
+# preserve train/inference consistency. Verified 2026-04-20 by
+# inspecting a shard: all values exactly 0.0 across 2.5M frames.
+#
+# Cross-check: the L1-gate feature-importance report (puff, 2026-04-19)
+# independently pruned every one of these features to the sparsity floor
+# — that's what happens when a column's only signal is its constant zero.
+_SHARD_ZERO_FEATURES = frozenset({
+    "invuln_left",
+    "ecb_bottom_x", "ecb_bottom_y",
+    "ecb_left_x",   "ecb_left_y",
+    "ecb_right_x",  "ecb_right_y",
+    "ecb_top_x",    "ecb_top_y",
+})
+
 
 def _player_numeric_full(ps, hal_features, norm_stats):
     """Produce the 22-col normalized numeric vector for a PlayerState.
@@ -119,7 +137,10 @@ def _player_numeric_full(ps, hal_features, norm_stats):
 
     out = []
     for f in MIMIC_NUM_FULL:
-        if f in hal_features and f in XFORM:
+        if f in _SHARD_ZERO_FEATURES:
+            # Training-time shards have zeros for these; match exactly.
+            out.append(0.0)
+        elif f in hal_features and f in XFORM:
             # Minimal-feature path: use mimic_norm.json transform
             out.append(XFORM[f](raw[f], hal_features[f]))
         else:
@@ -376,9 +397,13 @@ def build_mock_frame(ctx):
     # Numerics: normalize raw value 1.0 through each feature's transform.
     # For features in mimic_norm: use its transform. For extras: z-score
     # via norm_stats (falling back to 0.0 when stats missing).
+    # invuln_left + ECB are always 0 in shards (see _SHARD_ZERO_FEATURES),
+    # so mock sends 0 for those regardless of the raw=1.0 convention.
     mock_nums = []
     for f in MIMIC_NUM_FULL:
-        if f in hal_features and f in XFORM:
+        if f in _SHARD_ZERO_FEATURES:
+            mock_nums.append(0.0)
+        elif f in hal_features and f in XFORM:
             mock_nums.append(XFORM[f](1.0, hal_features[f]))
         else:
             stats = norm_stats.get(f"self_{f}")
