@@ -96,20 +96,23 @@ _SHARD_ZERO_FEATURES = frozenset({
 def _player_numeric_full(ps, hal_features, norm_stats):
     """Produce the 22-col normalized numeric vector for a PlayerState.
 
-    For features present in mimic_norm.json (hal_features), apply the
-    transform it specifies. For the remaining 13 features (speeds,
-    hitlag, hitstun, invuln_left, ECB corners), apply z-score
-    standardization using norm_stats.json — same normalization the
-    shard builder performs on those columns.
+    Storage schema stays at 22 cols for backward compat with existing
+    fullfeat checkpoints. But 9 of those (invuln_left + all 8 ECB
+    corners) are permanently zero — they're read as 0 from .slp by
+    libmelee and invuln_left is a never-populated PlayerState field
+    library-wide (see CLAUDE.md pitfall 12d). We don't bother reading
+    or normalizing them; just emit zero straight into the column.
 
     hal_features: dict keyed by suffix (e.g. "pos_x"), values have
         {min,max,mean,std,transform}.
     norm_stats:   dict keyed by COLUMN (e.g. "self_pos_x"), values are
         [mean, std] pairs — as saved by build_norm_stats.py. We use
-        self_* keys since player features mirror on P1 vs P2.
+        self_* keys since self and opp stats are bit-identical
+        (verified 2026-04-20).
     """
-    # Raw libmelee reads — must match slp_to_shards.py's write logic
-    # (see tools/slp_to_shards.py:227-262 for the ECB/speed/hitlag path).
+    # Raw libmelee reads — ONLY for features actually populated by the
+    # .slp parse. See tools/slp_to_shards.py:227-262 for the live-write
+    # path; the fields listed here are exactly the non-dead subset.
     raw = {
         "pos_x":              float(ps.position.x),
         "pos_y":              float(ps.position.y),
@@ -123,36 +126,21 @@ def _player_numeric_full(ps, hal_features, norm_stats):
         "speed_y_self":       float(ps.speed_y_self),
         "hitlag_left":        float(ps.hitlag_left),
         "hitstun_left":       float(ps.hitstun_frames_left),
-        "invuln_left":        float(ps.invulnerability_left),
         "shield_strength":    float(ps.shield_strength),
-        "ecb_bottom_x":       float(ps.ecb_bottom[0]),
-        "ecb_bottom_y":       float(ps.ecb_bottom[1]),
-        "ecb_left_x":         float(ps.ecb_left[0]),
-        "ecb_left_y":         float(ps.ecb_left[1]),
-        "ecb_right_x":        float(ps.ecb_right[0]),
-        "ecb_right_y":        float(ps.ecb_right[1]),
-        "ecb_top_x":          float(ps.ecb_top[0]),
-        "ecb_top_y":          float(ps.ecb_top[1]),
     }
 
     out = []
     for f in MIMIC_NUM_FULL:
         if f in _SHARD_ZERO_FEATURES:
-            # Training-time shards have zeros for these; match exactly.
+            # Dead features — not read, not normalized, emitted as 0.
             out.append(0.0)
         elif f in hal_features and f in XFORM:
             # Minimal-feature path: use mimic_norm.json transform
             out.append(XFORM[f](raw[f], hal_features[f]))
         else:
             # Extra features: z-score standardize via norm_stats
-            # (key is "self_<f>"; stats are player-symmetric so we use
-            # self_* regardless of ego/opp role).
             stats = norm_stats.get(f"self_{f}")
             if stats is None:
-                # No stats available — pass through 0.0 (will happen
-                # if this is a legacy-minimal metadata dir that never
-                # saved extended stats; minimal-features model will
-                # slice these away anyway).
                 out.append(0.0)
             else:
                 mean, std = stats[0], stats[1]
