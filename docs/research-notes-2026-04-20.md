@@ -218,16 +218,36 @@ New baselines as they land:
 | fox | `fox-20260420-baseline` | 0.7144 | 0.7081 | **+0.9%** | 32768 | full run, no watchdog |
 | falco | `falco-20260420-baseline` | 0.7487 | 0.7448 | **+0.5%** | 31392 | near-end stop |
 | marth | `marth-20260420-baseline` | **0.6664** | 0.6746 | **−1.22%** ✓ | 31065 | |
-| sheik | `sheik-20260420-baseline` | **0.6566** | 0.6611 | **−0.68%** ✓ | 26160 | early finish, likely watchdog |
-| cptfalcon | `cptfalcon-20260420-baseline` | (training) | 0.7356 | — | — | |
-| luigi | (queued) | | | | | |
-| puff | (queued) | | ~0.6641 | | | peach-pattern comparison only |
-| ice_climbers | (queued) | | ~0.6817 | | | |
+| sheik | `sheik-20260420-baseline` | **0.6566** | 0.6611 | **−0.68%** ✓ | 26160 | watchdog |
+| cptfalcon | `cptfalcon-20260420-baseline` | 0.7368 | 0.7356 | **+0.16%** | — | watchdog (flat) |
+| luigi | `luigi-20260420-baseline` | **0.7460** | ~1.00 | **−25%** ✓ | — | watchdog; huge drop, small dataset (2290 games) |
+| puff | skipped | | ~0.6641 | — | — | script `--include` bug — no master tars downloaded; stale dataset card won't retrain this cycle |
+| ice_climbers | skipped | | ~0.6817 | — | — | same script bug as puff |
 
-### What the first four results seem to say
+### Queue bug for puff + ice_climbers (not re-run this cycle)
 
-The pattern so far — two mild regressions (fox +0.9%, falco +0.5%) and
-two real improvements (marth −1.22%, sheik −0.68%) — is counter to
+`tools/retrain_all_baseline.sh` used `--include "shards/${HF_BUCKET}_master-*"`
+for the raw-data download step. The actual path on HF is
+`${HF_BUCKET}/${HF_BUCKET}_master-*` — no `shards/` prefix — so
+`hf download` silently no-op'd for every char. The first 6 chars
+still succeeded because they had pre-extracted `.slp` files on disk
+from a prior queue run; the script's `find -name '*.slp'` picked
+those up after the no-op download. Puff and ice_climbers had no
+pre-existing `.slp`, so step A's empty-tars guard bailed.
+
+Fix for next cycle: `--include "${HF_BUCKET}/${HF_BUCKET}_master-*_a*.tar.gz"`
+(and adjust the post-download glob accordingly). Not applied this
+cycle — user called the queue done after luigi. Puff and ice_climbers
+keep their existing pre-schema-drop HF checkpoints (`puff-20260419-fullfeat-gate01`
+on the 22-col schema, `ice_climbers` on the xxl run — **incompatible
+with the current 13-col inference code**, see pitfall 12d).
+
+### What the six results seem to say
+
+Three mild regressions-or-flat (fox +0.9%, falco +0.5%, cptfalcon
++0.16%), two real improvements (marth −1.22%, sheik −0.68%), one
+huge improvement (luigi −25%, but off a badly overfit earlier
+baseline so not directly comparable). The pattern is counter to
 the plan's prediction of uniform 1-3% improvement across chars. A few
 hypotheses, in decreasing order of probability:
 
@@ -258,10 +278,13 @@ hypotheses, in decreasing order of probability:
    retraining peach under the new schema (which is the plan's
    follow-on item).
 
-Three results outstanding (cptfalcon, luigi, puff, ice_climbers). If
-the remaining results track the pattern of the first four,
-interpretation stays mixed — we've made the pipeline cleaner and more
-correct, but the val-loss gain isn't a slam-dunk.
+Puff and ice_climbers didn't retrain this cycle due to the script bug
+documented above. Net: we've made the pipeline cleaner and more
+correct, but the val-loss gain isn't a slam-dunk. The only real
+datapoint where new clearly beat old is luigi, and that's the one
+char where the "old baseline" was itself known to be overfit — so
+even the one big win is hard to attribute to the schema/transform
+change specifically.
 
 ### What's definitely better regardless of val-loss
 
