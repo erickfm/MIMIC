@@ -201,6 +201,7 @@ cython_debug/
 wandb/
 checkpoints/
 data/
+hf_checkpoints/
 logs/
 *_log*.txt
 emulator/
@@ -208,6 +209,7 @@ melee.iso
 melee.zip
 mimic_best_checkpoints.zip
 replays/
+replays_online/
 .claude/
 _hf_staging/
 # Slippi account credentials — contains playKey, never commit

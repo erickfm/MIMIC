@@ -1,0 +1,22 @@
+{
+  "ckpt": "/root/MIMIC/checkpoints/fox-rlvr-lcancel-v1_step000500.pt",
+  "device": "cuda",
+  "eval_set_path": "/root/MIMIC/data/rlvr/eval_v0.1.parquet",
+  "eval_set_version": "v0.1",
+  "generated_at": "2026-04-21T02:56:02.045028+00:00",
+  "n_per_prompt": 1,
+  "per_task": {
+    "l_cancel_opportunity": {
+      "ci_95_high": 0.990502,
+      "ci_95_low": 0.966148,
+      "n": 500,
+      "pass_rate": 0.982,
+      "successes": 491
+    }
+  },
+  "runtime_sec": 13.61,
+  "schema_version": "v0.1",
+  "seed": 0,
+  "task_registry_hash": "3aacc15b728e22c5bd3883355e357770e4ff26bb63cce23aa17e1f5b265f888b",
+  "temperature": 0.0
+}
