@@ -566,7 +566,11 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["use_input_gate"] = True
     seq_len = overrides.pop("max_seq_len", SEQUENCE_LENGTH)
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
-    model = FramePredictor(cfg).to(DEVICE)
+    if cfg.wm_mode:
+        from mimic.world_model import WorldModel
+        model = WorldModel(cfg).to(DEVICE)
+    else:
+        model = FramePredictor(cfg).to(DEVICE)
     if compile_model:
         model = torch.compile(model)
     return model, cfg

@@ -82,6 +82,9 @@ class ModelConfig:
     mimic_minimal_features: bool    = False  # drop ECB/speeds/hitlag from numeric
     mimic_controller_encoding: bool = False  # one-hot controller feedback (stick clusters + button combos)
     n_controller_combos: int        = 5       # number of button combo classes (from controller_combos.json)
+    # World-model mode: predicts state[t+1] instead of controller[t+1].
+    # When True, get_model() builds a WorldModel (see mimic/world_model.py).
+    wm_mode: bool                   = False
 
     # Legacy hal_* fields — kept for checkpoint backwards compatibility.
     # __post_init__ migrates them onto the mimic_* fields above. Always
@@ -125,6 +128,14 @@ MODEL_PRESETS = {
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
+    # World-model preset: same backbone as `mimic`, but wm_mode routes
+    # construction to WorldModel (state[t+1] prediction) instead of
+    # FramePredictor (controller prediction). See mimic/world_model.py.
+    "mimic-wm":     dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
+                         encoder_type="mimic_flat",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9, wm_mode=True),
     "mimic-learned":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=180, pos_enc="learned",
                          num_stages=6, num_characters=27, num_actions=396,

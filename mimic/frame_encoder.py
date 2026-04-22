@@ -719,6 +719,14 @@ class MimicFlatEncoder(nn.Module):
         n_controller_combos: int = 5,
         no_self_inputs: bool = False,
         use_input_gate: bool = False,
+        # World-model conditioning: when > 0, forward() additionally reads
+        # `next_self_controller` (56), `next_opp_buttons` (12),
+        # `next_opp_analog` (4), `next_opp_c_dir` (int → num_c_dirs one-hot)
+        # and concatenates them to the per-frame input. `next_ctrl_dim` must
+        # equal 56 + 12 + 4 + num_c_dirs so the input linear projects the
+        # right shape.
+        next_ctrl_dim: int = 0,
+        num_c_dirs: int = 9,
         # Legacy aliases
         hal_minimal_features: bool = None,
         hal_controller_encoding: bool = None,
@@ -759,7 +767,19 @@ class MimicFlatEncoder(nn.Module):
         if mimic_controller_encoding and not no_self_inputs:
             ctrl_dim = 37 + 9 + n_controller_combos + 3
 
-        self._input_dim = emb_dim + numeric_dim + ctrl_dim
+        # World-model next-frame conditioning (adds to input_dim when >0)
+        self._next_ctrl_dim = next_ctrl_dim
+        self._num_c_dirs = num_c_dirs
+        if next_ctrl_dim:
+            expected = ctrl_dim + 12 + 4 + num_c_dirs
+            if next_ctrl_dim != expected:
+                raise ValueError(
+                    f"next_ctrl_dim={next_ctrl_dim} does not match the expected "
+                    f"layout: self_controller({ctrl_dim}) + opp_buttons(12) + "
+                    f"opp_analog(4) + opp_c_dir({num_c_dirs}) = {expected}."
+                )
+
+        self._input_dim = emb_dim + numeric_dim + ctrl_dim + next_ctrl_dim
         self._n_controller_combos = n_controller_combos
 
         # Single projection (matching HAL's proj_down)
@@ -858,6 +878,21 @@ class MimicFlatEncoder(nn.Module):
         if self._hal_ctrl_enc and not self._no_self_inputs and "self_controller" in seq:
             parts.append(seq["self_controller"])
 
+        # World-model conditioning: next-frame controllers for both players.
+        # These are what was pressed between state[i] and state[i+1] (the
+        # post-frame gamestate the model is predicting).
+        if self._next_ctrl_dim:
+            parts.append(seq["next_self_controller"])          # (B, T, 56)
+            parts.append(seq["next_opp_buttons"])               # (B, T, 12)
+            parts.append(seq["next_opp_analog"])                # (B, T, 4)
+            opp_cdir = seq["next_opp_c_dir"]                    # (B, T) int
+            cdir_oh = torch.zeros(
+                *opp_cdir.shape, self._num_c_dirs,
+                dtype=parts[0].dtype, device=opp_cdir.device,
+            )
+            cdir_oh.scatter_(-1, opp_cdir.long().unsqueeze(-1).clamp_max(self._num_c_dirs - 1), 1.0)
+            parts.append(cdir_oh)
+
         # Concat everything → single projection
         combined = torch.cat(parts, dim=-1)     # (B, T, input_dim)
         if self._use_input_gate:
@@ -940,6 +975,15 @@ class MimicFlatEncoder(nn.Module):
             names.extend(f"ctrl_cstick[{i}]" for i in range(9))
             names.extend(f"ctrl_combo[{i}]" for i in range(self._n_controller_combos))
             names.extend(f"ctrl_shoulder[{i}]" for i in range(3))
+        # World-model next-frame conditioning
+        if self._next_ctrl_dim:
+            names.extend(f"next_ctrl_main[{i}]" for i in range(37))
+            names.extend(f"next_ctrl_cstick[{i}]" for i in range(9))
+            names.extend(f"next_ctrl_combo[{i}]" for i in range(self._n_controller_combos))
+            names.extend(f"next_ctrl_shoulder[{i}]" for i in range(3))
+            names.extend(f"next_opp_btn[{i}]" for i in range(12))
+            names.extend(f"next_opp_analog[{i}]" for i in range(4))
+            names.extend(f"next_opp_cdir[{i}]" for i in range(self._num_c_dirs))
         return names
 
 
@@ -977,6 +1021,7 @@ def build_encoder(
     mimic_controller_encoding: bool = False,
     n_controller_combos: int = 5,
     use_input_gate: bool = False,
+    next_ctrl_dim: int = 0,
     # Legacy aliases
     hal_minimal_features: bool = None,
     hal_controller_encoding: bool = None,
@@ -1015,7 +1060,8 @@ def build_encoder(
 
     if encoder_type in ("mimic_flat", "hal_flat"):
         return cls(d_model=d_model, dropout=dropout,
-                   use_input_gate=use_input_gate, **vocab_kwargs)
+                   use_input_gate=use_input_gate,
+                   next_ctrl_dim=next_ctrl_dim, **vocab_kwargs)
     elif encoder_type == "flat":
         return cls(**common, **vocab_kwargs)
     else:
