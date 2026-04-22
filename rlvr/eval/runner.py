@@ -167,6 +167,7 @@ def run_eval(
     }
 
     if out_path is not None:
+        out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(report, indent=2, sort_keys=True))
     return report

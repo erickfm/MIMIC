@@ -1,0 +1,22 @@
+{
+  "ckpt": "<in-memory>",
+  "device": "cuda",
+  "eval_set_path": "/root/MIMIC/data/rlvr/eval_v0.1.parquet",
+  "eval_set_version": "v0.1",
+  "generated_at": "2026-04-22T03:08:00.496349+00:00",
+  "n_per_prompt": 1,
+  "per_task": {
+    "l_cancel_opportunity": {
+      "ci_95_high": 0.308484,
+      "ci_95_low": 0.231053,
+      "n": 500,
+      "pass_rate": 0.268,
+      "successes": 134
+    }
+  },
+  "runtime_sec": 14.01,
+  "schema_version": "v0.1",
+  "seed": 0,
+  "task_registry_hash": "32a71c73654b628e1f58a34db78124aee7d927c5b9ff1d2be8d7606bfddad59c",
+  "temperature": 0.0
+}

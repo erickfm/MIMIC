@@ -157,13 +157,7 @@ def train(
 
             if checkpoint_every > 0 and update % checkpoint_every == 0:
                 ck = checkpoint_dir / f"{run_name}_update{update:04d}.pt"
-                ck.parent.mkdir(parents=True, exist_ok=True)
-                torch.save({
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "update": update,
-                    "task_id": task_id,
-                }, ck)
+                _save_ckpt(ck, model, optimizer, cfg_snapshot, update, task_id)
                 log.info("saved %s", ck)
     finally:
         actor.stop()
@@ -171,11 +165,22 @@ def train(
             wandb_run.finish()
 
     final = checkpoint_dir / f"{run_name}_final.pt"
+    _save_ckpt(final, model, optimizer, cfg_snapshot, max_updates, task_id)
+    log.info("done. final: %s  total_elapsed=%.1fs", final, time.time() - t0)
+
+
+def _save_ckpt(path, model, optimizer, cfg_snapshot, update, task_id):
+    """Save in the format `tools.inference_utils.load_mimic_model` expects:
+    `config` must be a dict whose keys cover ModelConfig fields. Without
+    it the loader falls into the legacy HAL bare-state-dict path."""
+    path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "config": cfg_snapshot,
+        "update": update,
         "task_id": task_id,
-    }, final)
-    log.info("done. final: %s  total_elapsed=%.1fs", final, time.time() - t0)
+    }, path)
 
 
 def main():

@@ -315,18 +315,101 @@ empirical rule is: match the known-working inference configs.
   → STAGE_SELECT → IN_GAME in ~10s.
 - Episode detection fires: a 60s Fox-vs-Fox (CPU level 9) match on FD
   produced 17 aerial→landing episodes in live detection.
-- Match-end enrichment hook wired; not yet exercised (smoke runs were
-  stopped mid-match).
-- Full training loop not yet executed — next session's work.
+- Match-end enrichment wired and verified on L-cancel.
 
-### Open items for next session
+### Online L-cancel run (30 updates, 1h52m wallclock)
 
-- Run first full online L-cancel training pass, compare final pass
-  rate vs offline RLVR's 98.2%. Expectation: at least parity, possibly
-  better (episode-level credit vs single-frame credit).
-- Shield-escape online: same exercise.
-- Savestate seeding (Phase 3) — only if realtime throughput is the
-  bottleneck. 17 episodes/minute on single actor = ~20 min to collect
-  a 300-episode update batch; should be OK for short training runs.
-- Parallel actors (Phase 4) — out of scope until single-actor is
-  learning.
+Ran the full online L-cancel training — 30 PPO updates, ~32 episodes/
+update (flushed at match boundaries), total 1356 episodes. Engine-
+confirmed L-cancel rate (the rate of `post.l_cancel == 1` on eligible
+landings) per update:
+
+| phase | engine-confirmed L-cancel rate |
+|-------|-------------------------------|
+| update 1 (BC weights, before backward) | 88% (50/57) |
+| updates 1-5 avg | ~91% |
+| updates 25-30 avg | ~94% |
+| update 30 (final) | 94% (33/35) |
+
+**~50% reduction in missed L-cancels** (12% miss → 6% miss). KL stayed
+in [0.02, 0.12] throughout. 109/115 weight tensors moved (Δ ≈ 106).
+
+### Offline vs online: the metrics measure different things
+
+The offline RLVR L-cancel result reported earlier in this note — BC
+26.8% → RLVR 98.2% — is measured against the **offset=−4 press check**,
+which the offline verifier itself defines. That's a strict per-frame
+proxy, not the actual skill. Evaluating the offline-trained checkpoint
+at all 7 window offsets:
+
+| offset | BC pass | online-RLVR pass |
+|--------|---------|------------------|
+| −7 | 6.5%  | 6.5%  |
+| −6 | 9.5%  | 9.5%  |
+| −5 | 17.0% | 16.0% |
+| −4 | 28.0% | 28.0% |
+| −3 | 48.0% | 48.0% |
+| −2 | 72.5% | 73.0% |
+| −1 | 88.0% | 88.0% |
+
+BC's per-offset distribution is already monotonically increasing toward
+landing — BC presses later in the window. Online RL preserved that
+distribution; per-offset behavior at greedy temperature is
+essentially unchanged because the per-head argmax winners didn't flip.
+What DID move is the in-game engine-success rate (88% → 94%), because
+the compound probability of "press *somewhere* in [-7, -1]" went up
+slightly.
+
+**The right comparison for the skill** is the engine-confirmed rate.
+By that measure, offline RLVR's "98% pass rate" is misleading — it
+means "the offline policy presses at offset=−4 on 98% of eval prompts,"
+not "the policy L-cancels 98% of the time." The engine-success rate
+for the offline-RLVR checkpoint was never measured (would take a few
+live matches). Backfill TODO.
+
+### Online shield-escape: premature stop, valuable negative result
+
+Launched online shield-escape with the same actor (Fox vs CPU Fox
+level 9 on FD). Ran for ~17 minutes of game time and collected **zero
+episodes**: pressured-shield situations (shield dropped by ≥8 and
+currently <30/60) almost never happen in natural Fox-vs-Fox-CPU9 play.
+Master Fox avoids pressured shield at ~the same rate as in the replay
+corpus (~0.2 events / 5 min), and both players being Fox doesn't help.
+
+**Implication**: online shield-escape with the current live-episode-
+detection design is infeasible at single-actor throughput. Needs
+savestate seeding (Phase 3) — save ~50 "just got hit in shield, 20
+strength" states from the replay corpus, load one per episode, run for
+~30 frames, measure outcome. ~60-90× throughput win for this skill.
+
+### Three levers to accelerate online RL (if/when needed)
+
+- **A — `enable_ffw=True`** in libmelee Console. Dolphin's native fast-
+  forward mode. Potentially 5-10× for the whole pipeline, with a 1-line
+  change. Untested on this Ishiiruka build; CLAUDE.md notes
+  ENABLE_HEADLESS is broken (#209) but FFW is a different flag. **Try
+  next.**
+- **B — savestate across match boundaries.** F2/F1 to skip the ~15s
+  menu-nav overhead per match. Needs xdotool driver. ~25% gain.
+- **C — scenario-seeded mini-episodes.** Per-skill savestate library.
+  30-60 frame mini-episodes instead of 60-90s full matches.
+  **60-90× gain**; mandatory for rare-event tasks like shield-escape.
+
+### Takeaways for the next session
+
+- Online L-cancel result is real and the infrastructure validates end-
+  to-end, but the skill was the wrong target for proving online RL's
+  value proposition — BC saturates the engine metric at 88%, leaving
+  only ~12 points of headroom. Better targets would exercise multi-
+  frame credit assignment and long-horizon credit: combo punishes,
+  edgeguards, tech chases. Those are what online was *for*.
+- Shield-escape online is feasible but requires savestate seeding.
+- Backfill: measure engine-confirmed L-cancel rate on the offline-RLVR
+  checkpoint to settle "did the metrics correlate or diverge."
+- World-model MIMIC extension — predict next-frame state alongside
+  next-frame actions — is a separate research project. Would replace
+  Dolphin with a fast GPU-batched simulator and enable true parallel
+  RLVR rollouts. Scope: ~1 week for v0 (next-state predictor + drift
+  measurement), ~1 week more for RLVR integration, bigger scope for
+  full usability. Biggest risks: compounding error at long horizons,
+  opponent modeling, rare-event coverage. Worth doing.
