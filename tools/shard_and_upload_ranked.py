@@ -5,7 +5,7 @@ Extracts a .7z/.zip archive of ranked .slp replays, parses each header with
 peppi_py to get both player characters, groups replays into (CHAR, rank_pair)
 buckets (ZELDA/SHEIK -> ZELDA_SHEIK, POPO/NANA -> ICE_CLIMBERS, each replay
 routed into both players' buckets), tars each bucket, and uploads to
-shards/{CHAR}_{combo}_a{N}.tar.gz. Writes and uploads metadata_a{N}.json.
+{CHAR}/{CHAR}_{combo}_a{N}.tar.gz. Writes and uploads metadata_a{N}.json.
 Skips buckets whose path already exists on HF — cheap resume.
 
 Usage:
@@ -232,7 +232,7 @@ def main():
         print(f"Filtered to {len(bucket_items)} buckets via --only-chars={sorted(only_chars)}")
     for idx, ((char, rank), files) in enumerate(bucket_items, 1):
         tar_name = f"{char}_{rank}_a{args.archive_id}.tar.gz"
-        path_in_repo = f"shards/{tar_name}"
+        path_in_repo = f"{char}/{tar_name}"
         print(f"[{idx}/{len(bucket_items)}] {tar_name}: {len(files)} files", flush=True)
         if args.refresh_before_upload:
             already = already_uploaded(api)
@@ -255,7 +255,7 @@ def main():
         print("Skipping metadata upload (--skip-metadata-upload)")
     else:
         print(f"Uploading metadata_a{args.archive_id}.json")
-        upload_file(api, meta_path, f"shards/metadata_a{args.archive_id}.json")
+        upload_file(api, meta_path, f"metadata/metadata_a{args.archive_id}.json")
 
     if not args.skip_cleanup and only_chars is None:
         print(f"Removing {extract_dir}")

@@ -394,7 +394,7 @@ Two sources of raw replays. Ranked is canonical for new training.
 
 - **`erickfm/melee-ranked-replays`** (canonical). Ranked Slippi
   replays stored as `.tar.gz` per (character, rank_pair, archive):
-  `shards/{CHAR}_{rank_pair}_a{N}.tar.gz`. Rank pairs are
+  `{CHAR}/{CHAR}_{rank_pair}_a{N}.tar.gz`. Rank pairs are
   `master-master`, `master-diamond`, `master-platinum`, `diamond-*`,
   `platinum-*`. Higher-rank token first (M>D>P). Per-char
   master-tier training pulls all three `master-*` pairs
@@ -419,8 +419,9 @@ fixed orderings `diamond-diamond`, `diamond-platinum`,
 HF layout:
 
 ```
-shards/
+{CHAR}/
   {CHAR}_{rank_pair}_a{N}.tar.gz    # one per (character, rank_pair, archive)
+metadata/
   metadata_a{N}.json                # flat list, one entry per replay in archive N
 ```
 
@@ -460,7 +461,7 @@ Phases:
    `{filename, p1, p2, rank, archive}` entries per replay, schema
    matching the existing `metadata_a3.json` on HF.
 5. **Tar + upload** — for each bucket in sorted order, check
-   `api.list_repo_files()` and skip if `shards/{name}` already exists;
+   `api.list_repo_files()` and skip if `{CHAR}/{name}` already exists;
    otherwise `tarfile.open(..., "w:gz", compresslevel=6)`, upload via
    `api.upload_file(...)` with 5-attempt exponential backoff
    (`wait = min(300, 2^attempt * 10)`), delete the local tar. Metadata
@@ -510,11 +511,11 @@ C=fox; HF_BUCKET=FOX; IDX=1   # adjust per char
 
 # 1. Raw .slp — all three master-* pairs
 hf download erickfm/melee-ranked-replays --repo-type dataset \
-  --include "shards/${HF_BUCKET}_master-master_a*.tar.gz" \
-  --include "shards/${HF_BUCKET}_master-diamond_a*.tar.gz" \
-  --include "shards/${HF_BUCKET}_master-platinum_a*.tar.gz" \
+  --include "${HF_BUCKET}/${HF_BUCKET}_master-master_a*.tar.gz" \
+  --include "${HF_BUCKET}/${HF_BUCKET}_master-diamond_a*.tar.gz" \
+  --include "${HF_BUCKET}/${HF_BUCKET}_master-platinum_a*.tar.gz" \
   --local-dir data/${C}_ranked_slp/_tars
-for t in data/${C}_ranked_slp/_tars/shards/*.tar.gz; do
+for t in data/${C}_ranked_slp/_tars/${HF_BUCKET}/*.tar.gz; do
   tar -xzf "$t" -C data/${C}_ranked_slp/
 done
 
