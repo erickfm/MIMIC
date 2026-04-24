@@ -27,11 +27,22 @@ import torch.nn as nn
 
 
 class WorldModelHeads(nn.Module):
-    """Six per-column heads predicting state[t+1].
+    """Per-column heads predicting state[t+1].
 
     All heads take the shared transformer output `h` of shape (B, T, d_model)
     and return per-frame predictions. No autoregressive chain — predictions
     are conditionally independent given `h`.
+
+    Heads:
+      - action (396-way CE)            × 2 players
+      - numeric (n_numeric, MSE/Huber) × 2 players
+      - flags (n_flags, BCEwithLogits) × 2 players
+      - action_elapsed (scalar, MSE)   × 2 players, enabled via
+        predict_action_elapsed=True. The shard stores this as a
+        frames-since-action-change counter; we predict its value at t+1.
+        Action CE alone has nothing to learn on intra-animation frames
+        (most frames), so the elapsed head gives a softer continuous
+        signal for "how close are we to the next transition?".
     """
 
     def __init__(
@@ -40,11 +51,19 @@ class WorldModelHeads(nn.Module):
         num_actions: int,
         n_numeric: int = 13,
         n_flags: int = 5,
+        predict_action_elapsed: bool = True,
+        action_elapsed_scale: float = 30.0,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
         self.n_numeric = n_numeric
         self.n_flags = n_flags
+        self.predict_action_elapsed = predict_action_elapsed
+        # We scale the raw counter by action_elapsed_scale so the
+        # regression target sits in a similar magnitude as the other
+        # Huber-loss targets. 30 ≈ half a second of frames, roughly the
+        # median animation length.
+        self.action_elapsed_scale = action_elapsed_scale
 
         def _head(in_dim: int, out_dim: int) -> nn.Sequential:
             h = in_dim // 2
@@ -59,16 +78,20 @@ class WorldModelHeads(nn.Module):
         self.self_action_head = _head(d_model, num_actions)
         self.opp_action_head = _head(d_model, num_actions)
 
-        # Numeric regression (13 per player, normalized space)
+        # Numeric regression (normalized space)
         self.self_numeric_head = _head(d_model, n_numeric)
         self.opp_numeric_head = _head(d_model, n_numeric)
 
-        # Binary flags (5 per player, BCE with logits)
+        # Binary flags (BCE with logits)
         self.self_flags_head = _head(d_model, n_flags)
         self.opp_flags_head = _head(d_model, n_flags)
 
+        if predict_action_elapsed:
+            self.self_action_elapsed_head = _head(d_model, 1)
+            self.opp_action_elapsed_head = _head(d_model, 1)
+
     def forward(self, h: torch.Tensor) -> Dict[str, torch.Tensor]:
-        return dict(
+        out = dict(
             self_action_logits=self.self_action_head(h),
             opp_action_logits=self.opp_action_head(h),
             self_numeric_pred=self.self_numeric_head(h),
@@ -76,6 +99,15 @@ class WorldModelHeads(nn.Module):
             self_flags_logits=self.self_flags_head(h),
             opp_flags_logits=self.opp_flags_head(h),
         )
+        if self.predict_action_elapsed:
+            # Squeeze the trailing singleton dim for each elapsed head.
+            out["self_action_elapsed_pred"] = (
+                self.self_action_elapsed_head(h).squeeze(-1)
+            )
+            out["opp_action_elapsed_pred"] = (
+                self.opp_action_elapsed_head(h).squeeze(-1)
+            )
+        return out
 
 
 class WorldModel(nn.Module):

@@ -29,7 +29,9 @@ from pathlib import Path
 from typing import Dict
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 
 # Project imports
@@ -38,6 +40,33 @@ from mimic.model import ModelConfig, MODEL_PRESETS
 from mimic.world_model import WorldModel
 from mimic.wm_dataset import WorldModelDataset
 from mimic.wm_losses import WMLossWeights, compute_wm_loss, compute_wm_metrics
+
+
+# -----------------------------------------------------------------------------
+# DDP helpers (mirror train.py's pattern so torchrun --nproc_per_node=N works).
+# -----------------------------------------------------------------------------
+def _ddp_setup() -> tuple[int, int, int, bool]:
+    """Initialize process group from torchrun env vars.
+
+    Returns (rank, world_size, local_rank, is_distributed). When launched
+    without torchrun, returns (0, 1, 0, False) and does not init the
+    process group.
+    """
+    if "RANK" not in os.environ:
+        return 0, 1, 0, False
+    rank = int(os.environ["RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    local_rank = int(os.environ.get("LOCAL_RANK", rank))
+    backend = "nccl" if torch.cuda.is_available() else "gloo"
+    dist.init_process_group(backend=backend)
+    if torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+    return rank, world_size, local_rank, True
+
+
+def _ddp_cleanup(is_distributed: bool) -> None:
+    if is_distributed and dist.is_initialized():
+        dist.destroy_process_group()
 
 
 # -----------------------------------------------------------------------------
@@ -75,6 +104,14 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--w-action", type=float, default=1.0)
     ap.add_argument("--w-numeric", type=float, default=1.0)
     ap.add_argument("--w-flags", type=float, default=0.5)
+    ap.add_argument("--numeric-loss", default="huber", choices=["huber", "mse"],
+                    help="Numeric regression loss. Huber (SmoothL1) handles "
+                         "the heavy tails on z-scored velocity cols better.")
+    ap.add_argument("--huber-delta", type=float, default=1.0)
+    ap.add_argument("--w-action-elapsed", type=float, default=0.25,
+                    help="Weight on action_elapsed regression (per side).")
+    ap.add_argument("--no-action-elapsed", action="store_true",
+                    help="Disable the action_elapsed head + target.")
     # W&B
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="mimic-wm")
@@ -86,7 +123,22 @@ def parse_args() -> argparse.Namespace:
 # Model + dataset construction
 # -----------------------------------------------------------------------------
 def build_model(model_preset: str, seq_len: int,
-                n_controller_combos: int) -> tuple[WorldModel, ModelConfig]:
+                n_controller_combos: int,
+                shard_n_numeric: int,
+                shard_n_flags: int,
+                predict_action_elapsed: bool = True,
+                ) -> tuple[WorldModel, ModelConfig, dict]:
+    """Build the WM. Schema kwargs let us train on both shard layouts:
+
+    - 13-col fullfeat (post-2026-04-20 schema drop): pass n_numeric=13,
+      n_flags=5. Encoder uses the full path.
+    - 22-col legacy (pre-2026-04-20): pass n_numeric=22, n_flags=5. Encoder
+      uses the minimal path (reduces to 9 internally), heads predict the
+      full 22+5 shard columns so targets and preds align.
+
+    Returns (model, cfg, head_dims) where head_dims={"n_numeric","n_flags"}
+    is what the loss should target after slicing.
+    """
     overrides = dict(MODEL_PRESETS[model_preset])
     if not overrides.get("wm_mode", False):
         raise ValueError(
@@ -96,13 +148,35 @@ def build_model(model_preset: str, seq_len: int,
     overrides.pop("max_seq_len", None)
     overrides["mimic_mode"] = True
     overrides["mimic_controller_encoding"] = True
-    overrides["mimic_minimal_features"] = False
+    # Encoder path: full (13-col) or minimal (22/13/7-col, reduces to 9).
+    use_minimal = shard_n_numeric != 13
+    overrides["mimic_minimal_features"] = use_minimal
     overrides["n_controller_combos"] = n_controller_combos
     overrides["no_self_inputs"] = False
     overrides["no_opp_inputs"] = True
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
+
+    # Heads predict the shard's native column layout so MSE/BCE line up
+    # with the raw targets from wm_dataset. When use_minimal=True and the
+    # shard is 22-col, we still predict all 22 + 5 (not 6 + 3) — simpler,
+    # and the tail cols the encoder ignores are easy signal for the head.
+    head_n_numeric = shard_n_numeric
+    head_n_flags = shard_n_flags
+    # Temporarily clobber the heads by constructing a WorldModel then
+    # swapping in correctly-sized heads. We can't pass these through
+    # ModelConfig without adding fields, and WorldModelHeads accepts the
+    # dims directly. Same d_model / num_actions from cfg.
     model = WorldModel(cfg)
-    return model, cfg
+    from mimic.world_model import WorldModelHeads
+    model.heads = WorldModelHeads(
+        d_model=cfg.d_model,
+        num_actions=cfg.num_actions,
+        n_numeric=head_n_numeric,
+        n_flags=head_n_flags,
+        predict_action_elapsed=predict_action_elapsed,
+    )
+    return model, cfg, {"n_numeric": head_n_numeric, "n_flags": head_n_flags,
+                         "predict_action_elapsed": predict_action_elapsed}
 
 
 def collate(batch):
@@ -167,39 +241,70 @@ def main() -> None:
     args = parse_args()
     torch.manual_seed(args.seed)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"device={device}  amp={'off' if args.no_amp else 'bf16'}  "
-          f"compile={args.compile}")
+    # --- DDP bring-up
+    rank, world_size, local_rank, is_distributed = _ddp_setup()
+    is_main = rank == 0
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+
+    def log(msg: str) -> None:
+        if is_main:
+            print(msg, flush=True)
+
+    log(f"device={device}  rank={rank}/{world_size}  "
+        f"amp={'off' if args.no_amp else 'bf16'}  compile={args.compile}")
 
     # --- Load controller_combos from data dir to size the model correctly.
     combos_path = Path(args.data_dir) / "controller_combos.json"
     with open(combos_path) as fh:
         combo_map = json.load(fh)
-    # JSON stores either a list of combos or a {name: [...]} dict — handle both.
     if isinstance(combo_map, dict) and "combos" in combo_map:
         n_combos = len(combo_map["combos"])
     elif isinstance(combo_map, dict):
-        n_combos = len(combo_map)
+        n_combos = combo_map.get("n_combos", len(combo_map))
     else:
         n_combos = len(combo_map)
-    print(f"n_controller_combos={n_combos}")
+    log(f"n_controller_combos={n_combos}")
 
-    model, cfg = build_model(args.model, args.seq_len, n_combos)
+    # Probe one shard to surface the schema and route encoder/heads.
+    _probe_ds = WorldModelDataset(
+        args.data_dir, sequence_length=args.seq_len, split="train",
+        character_filter=args.character_filter, distributed=False,
+        windows_per_game=1,
+    )
+    shard_n_numeric = _probe_ds.n_numeric
+    shard_n_flags = _probe_ds.n_flags
+    log(f"shard schema: n_numeric={shard_n_numeric}  n_flags={shard_n_flags}  "
+        f"→ encoder minimal={shard_n_numeric != 13}")
+
+    model, cfg, head_dims = build_model(
+        args.model, args.seq_len, n_combos,
+        shard_n_numeric=shard_n_numeric,
+        shard_n_flags=shard_n_flags,
+        predict_action_elapsed=not args.no_action_elapsed,
+    )
     model = model.to(device)
     if args.compile:
         model = torch.compile(model)
+    if is_distributed:
+        model = DDP(model, device_ids=[local_rank] if torch.cuda.is_available() else None,
+                    find_unused_parameters=False)
     params = sum(p.numel() for p in model.parameters())
-    print(f"WorldModel params: {params / 1e6:.2f}M  "
-          f"(d_model={cfg.d_model}, layers={cfg.num_layers}, heads={cfg.nhead})")
+    log(f"WorldModel params: {params / 1e6:.2f}M  "
+        f"(d_model={cfg.d_model}, layers={cfg.num_layers}, heads={cfg.nhead})")
 
-    # --- Datasets
+    # --- Datasets (rank-aware)
     train_ds = WorldModelDataset(
         args.data_dir, sequence_length=args.seq_len, split="train",
-        character_filter=args.character_filter, distributed=False,
+        character_filter=args.character_filter,
+        rank=rank, world_size=world_size, distributed=is_distributed,
     )
     val_ds = WorldModelDataset(
         args.data_dir, sequence_length=args.seq_len, split="val",
-        character_filter=args.character_filter, distributed=False,
+        character_filter=args.character_filter,
+        rank=rank, world_size=world_size, distributed=is_distributed,
         windows_per_game=10,
     )
     train_dl = DataLoader(
@@ -214,11 +319,15 @@ def main() -> None:
         collate_fn=collate,
     )
 
-    # --- Optimizer + LR schedule
-    effective_batch = args.batch_size * args.grad_accum_steps
+    # --- Optimizer + LR schedule.
+    # Effective batch = local_batch × world_size × grad_accum, matching the
+    # BC train.py formula. Do NOT divide-by-world-size elsewhere.
+    effective_batch = args.batch_size * world_size * args.grad_accum_steps
     total_steps = args.max_samples // effective_batch
-    print(f"effective batch size: {effective_batch}  total_steps: {total_steps}")
+    log(f"effective batch size: {effective_batch}  total_steps: {total_steps}")
 
+    # Unwrap DDP for optimizer parameter collection — AdamW doesn't care,
+    # but this keeps state dicts clean.
     opt = torch.optim.AdamW(
         model.parameters(), lr=args.lr, betas=(0.9, 0.95),
         weight_decay=args.weight_decay,
@@ -232,20 +341,26 @@ def main() -> None:
         action_self=args.w_action, action_opp=args.w_action,
         numeric_self=args.w_numeric, numeric_opp=args.w_numeric,
         flags_self=args.w_flags, flags_opp=args.w_flags,
+        action_elapsed_self=args.w_action_elapsed,
+        action_elapsed_opp=args.w_action_elapsed,
+        numeric_loss=args.numeric_loss, huber_delta=args.huber_delta,
     )
 
-    # --- W&B
+    # --- W&B (rank-0 only)
     wandb_run = None
-    if args.wandb:
+    if args.wandb and is_main:
         import wandb
         wandb_run = wandb.init(
             project=args.wandb_project, name=args.run_name,
             tags=args.wandb_tags or [],
-            config={**vars(args), "total_steps": total_steps, "params_M": params / 1e6},
+            config={**vars(args), "total_steps": total_steps, "params_M": params / 1e6,
+                    "world_size": world_size, "effective_batch": effective_batch,
+                    "shard_n_numeric": shard_n_numeric, "shard_n_flags": shard_n_flags},
         )
 
     # --- Train loop
-    Path(args.ckpt_dir).mkdir(parents=True, exist_ok=True)
+    if is_main:
+        Path(args.ckpt_dir).mkdir(parents=True, exist_ok=True)
     best_val = float("inf")
     best_path = Path(args.ckpt_dir) / f"{args.run_name}_best.pt"
 
@@ -291,46 +406,80 @@ def main() -> None:
         step += 1
 
         if step % 50 == 0:
-            dt = time.time() - t0
-            sps = (step * effective_batch) / dt
-            lr = opt.param_groups[0]["lr"]
-            print(f"step {step}/{total_steps}  total {loss_log['total']:.4f}  "
-                  f"act_s {loss_log['action_self']:.3f}  act_o {loss_log['action_opp']:.3f}  "
-                  f"num_s {loss_log['numeric_self']:.3f}  num_o {loss_log['numeric_opp']:.3f}  "
-                  f"flg_s {loss_log['flags_self']:.3f}  flg_o {loss_log['flags_opp']:.3f}  "
-                  f"lr {lr:.2e}  {sps:.0f} sam/s")
-            if wandb_run is not None:
-                wandb_run.log({
-                    "train/step": step,
-                    "train/lr": lr,
-                    "train/samples_per_sec": sps,
-                    **{f"train/{k}": v for k, v in loss_log.items()},
-                })
+            # All-reduce loss for accurate global reporting
+            if is_distributed:
+                loss_log = _reduce_scalars(loss_log, world_size)
+            if is_main:
+                dt = time.time() - t0
+                sps = (step * effective_batch) / dt
+                lr = opt.param_groups[0]["lr"]
+                extras = ""
+                if "action_elapsed_self" in loss_log:
+                    extras = (
+                        f"  elp_s {loss_log['action_elapsed_self']:.3f}"
+                        f"  elp_o {loss_log['action_elapsed_opp']:.3f}"
+                    )
+                print(f"step {step}/{total_steps}  total {loss_log['total']:.4f}  "
+                      f"act_s {loss_log['action_self']:.3f}  act_o {loss_log['action_opp']:.3f}  "
+                      f"num_s {loss_log['numeric_self']:.3f}  num_o {loss_log['numeric_opp']:.3f}  "
+                      f"flg_s {loss_log['flags_self']:.3f}  flg_o {loss_log['flags_opp']:.3f}"
+                      f"{extras}  lr {lr:.2e}  {sps:.0f} sam/s", flush=True)
+                if wandb_run is not None:
+                    wandb_run.log({
+                        "train/step": step,
+                        "train/lr": lr,
+                        "train/samples_per_sec": sps,
+                        **{f"train/{k}": v for k, v in loss_log.items()},
+                    })
 
         if step % args.val_every == 0:
-            print(f"running val @ step {step}...")
+            log(f"running val @ step {step}...")
             val = run_val(model, val_dl, device, weights)
-            print("  " + "  ".join(f"{k}={v:.4f}" for k, v in val.items()))
-            if wandb_run is not None:
-                wandb_run.log({"step": step, **val})
-            vl = val.get("val_loss", float("inf"))
-            if vl < best_val:
-                best_val = vl
-                _save_ckpt(best_path, model, opt, sched, cfg, step, val)
-                print(f"  new best val_loss={vl:.4f}, saved {best_path}")
+            if is_distributed:
+                val = _reduce_scalars(val, world_size)
+            if is_main:
+                print("  " + "  ".join(f"{k}={v:.4f}" for k, v in val.items()), flush=True)
+                if wandb_run is not None:
+                    wandb_run.log({"step": step, **val})
+                vl = val.get("val_loss", float("inf"))
+                if vl < best_val:
+                    best_val = vl
+                    _save_ckpt(best_path, model, opt, sched, cfg, step, val)
+                    print(f"  new best val_loss={vl:.4f}, saved {best_path}",
+                          flush=True)
 
-        if step % args.save_every == 0:
+        if step % args.save_every == 0 and is_main:
             path = Path(args.ckpt_dir) / f"{args.run_name}_step{step}.pt"
             _save_ckpt(path, model, opt, sched, cfg, step, {})
-            print(f"  checkpoint: {path}")
+            print(f"  checkpoint: {path}", flush=True)
 
-    print(f"done. best val_loss={best_val:.4f}  best path={best_path}")
+    log(f"done. best val_loss={best_val:.4f}  best path={best_path}")
     if wandb_run is not None:
         wandb_run.finish()
+    _ddp_cleanup(is_distributed)
+
+
+def _reduce_scalars(d: Dict[str, float], world_size: int) -> Dict[str, float]:
+    """All-reduce-mean a dict of Python floats across ranks."""
+    if not d:
+        return d
+    keys = list(d.keys())
+    vals = torch.tensor([float(d[k]) for k in keys],
+                        device="cuda" if torch.cuda.is_available() else "cpu")
+    dist.all_reduce(vals, op=dist.ReduceOp.SUM)
+    vals /= world_size
+    return {k: vals[i].item() for i, k in enumerate(keys)}
+
+
+def _unwrap(model):
+    """Peel off DDP / torch.compile wrappers to get the bare WorldModel."""
+    m = model.module if hasattr(model, "module") else model
+    m = m._orig_mod if hasattr(m, "_orig_mod") else m
+    return m
 
 
 def _save_ckpt(path, model, opt, sched, cfg, step, val):
-    sd = model.state_dict() if not hasattr(model, "_orig_mod") else model._orig_mod.state_dict()
+    sd = _unwrap(model).state_dict()
     torch.save({
         "global_step": step,
         "model_state_dict": sd,

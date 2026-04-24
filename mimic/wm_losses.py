@@ -25,6 +25,18 @@ class WMLossWeights:
     numeric_opp: float = 1.0
     flags_self: float = 0.5
     flags_opp: float = 0.5
+    # Action-elapsed scalar regression (frames-since-action-change at t+1).
+    # Softer signal than raw action CE — has non-trivial gradient on the
+    # many intra-animation frames where the action didn't change. Scaled
+    # by 1/action_elapsed_scale before loss to match Huber's range.
+    action_elapsed_self: float = 0.25
+    action_elapsed_opp: float = 0.25
+    action_elapsed_scale: float = 30.0
+    # "huber" (default) or "mse" for numeric cols. Huber is much better
+    # behaved on the velocity/hitlag/hitstun cols, which can have huge
+    # z-scored tails on legacy shards where those stats are near-zero.
+    numeric_loss: str = "huber"
+    huber_delta: float = 1.0
 
 
 def compute_wm_loss(
@@ -56,17 +68,39 @@ def compute_wm_loss(
             logits.reshape(B * T, C), tgt.reshape(B * T)
         )
 
-    # MSE on numeric columns (mean-reduced over all dims).
+    # Numeric regression. Default Huber (SmoothL1) — MSE blows up on
+    # the poorly-normalized velocity/hitlag/hitstun cols.
     for side in ("self", "opp"):
         pred = preds[f"{side}_numeric_pred"]
         tgt = targets[f"{side}_numeric"].float()
-        out[f"numeric_{side}"] = F.mse_loss(pred, tgt)
+        if w.numeric_loss == "mse":
+            out[f"numeric_{side}"] = F.mse_loss(pred, tgt)
+        else:
+            out[f"numeric_{side}"] = F.smooth_l1_loss(
+                pred, tgt, beta=w.huber_delta
+            )
 
     # BCE-with-logits on flags.
     for side in ("self", "opp"):
         logits = preds[f"{side}_flags_logits"]
         tgt = targets[f"{side}_flags"].float()
         out[f"flags_{side}"] = F.binary_cross_entropy_with_logits(logits, tgt)
+
+    # Action-elapsed regression (optional — only when the head is present
+    # AND the shard provides the target). Target is scaled by
+    # 1/action_elapsed_scale so the loss magnitude sits alongside the
+    # Huber numeric loss (~1 nominal).
+    has_elapsed = (
+        "self_action_elapsed_pred" in preds
+        and "self_action_elapsed" in targets
+    )
+    if has_elapsed:
+        for side in ("self", "opp"):
+            pred = preds[f"{side}_action_elapsed_pred"]
+            tgt = targets[f"{side}_action_elapsed"].float() / w.action_elapsed_scale
+            out[f"action_elapsed_{side}"] = F.smooth_l1_loss(
+                pred, tgt, beta=w.huber_delta
+            )
 
     out["total"] = (
         w.action_self * out["action_self"]
@@ -76,6 +110,12 @@ def compute_wm_loss(
         + w.flags_self * out["flags_self"]
         + w.flags_opp * out["flags_opp"]
     )
+    if has_elapsed:
+        out["total"] = (
+            out["total"]
+            + w.action_elapsed_self * out["action_elapsed_self"]
+            + w.action_elapsed_opp * out["action_elapsed_opp"]
+        )
     return out
 
 
@@ -120,5 +160,15 @@ def compute_wm_metrics(
         tgt_flg = targets[f"{side}_flags"].float()
         flag_pred = (flag_logits > 0).float()
         metrics[f"flags_{side}_acc"] = (flag_pred == tgt_flg).float().mean().item()
+
+        # Action-elapsed MAE in raw frames (pred is in scaled space, so
+        # multiply by the default scale to report a human-readable number).
+        elapsed_key = f"{side}_action_elapsed_pred"
+        if elapsed_key in preds and f"{side}_action_elapsed" in targets:
+            pred = preds[elapsed_key] * 30.0
+            tgt = targets[f"{side}_action_elapsed"].float()
+            metrics[f"action_elapsed_{side}_mae"] = (
+                (pred - tgt).abs().mean().item()
+            )
 
     return metrics

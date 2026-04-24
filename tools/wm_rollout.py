@@ -77,10 +77,29 @@ def load_model(ckpt_path: Path) -> Tuple[WorldModel, ModelConfig, torch.device]:
     cfg = ModelConfig(**{k: v for k, v in cfg_dict.items()
                          if k in ModelConfig.__dataclass_fields__})
     cfg.wm_mode = True
-    model = WorldModel(cfg).to(device)
+
     sd = ckpt["model_state_dict"]
-    # Strip torch.compile's _orig_mod prefix if present.
-    sd = {k.removeprefix("_orig_mod."): v for k, v in sd.items()}
+    # Strip DDP / torch.compile wrapper prefixes if present.
+    sd = {k.removeprefix("_orig_mod.").removeprefix("module."): v
+          for k, v in sd.items()}
+
+    model = WorldModel(cfg).to(device)
+    # Re-size heads to match the checkpoint's saved head dims. WM runs on
+    # both 13/22-col shards (full vs minimal encoder path) and the heads'
+    # output width matches the shard's column count — rebuild to match.
+    n_numeric = int(sd["heads.self_numeric_head.3.weight"].shape[0])
+    n_flags = int(sd["heads.self_flags_head.3.weight"].shape[0])
+    default_n_numeric = model.heads.n_numeric
+    default_n_flags = model.heads.n_flags
+    if (n_numeric, n_flags) != (default_n_numeric, default_n_flags):
+        from mimic.world_model import WorldModelHeads
+        model.heads = WorldModelHeads(
+            d_model=cfg.d_model,
+            num_actions=cfg.num_actions,
+            n_numeric=n_numeric,
+            n_flags=n_flags,
+        ).to(device)
+
     model.load_state_dict(sd, strict=True)
     model.eval()
     return model, cfg, device

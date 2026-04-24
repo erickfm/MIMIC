@@ -48,6 +48,8 @@ _STATE_KEYS = (
     # Opponent raw controller (not in MimicFlatEncoder's state input,
     # but needed for next_ctrl conditioning):
     "opp_buttons", "opp_analog", "opp_c_dir",
+    # Action-elapsed counters (t+1 used as regression target, never input).
+    "self_action_elapsed", "opp_action_elapsed",
 )
 
 
@@ -83,18 +85,45 @@ class WorldModelDataset(IterableDataset):
             self.norm_stats = json.load(fh)
 
         manifest_path = self.data_dir / "tensor_manifest.json"
-        if not manifest_path.exists():
-            raise RuntimeError(
-                f"{manifest_path} not found. WM dataset needs per-game shards; "
-                f"build with tools/slp_to_shards.py."
+        if manifest_path.exists():
+            with open(manifest_path) as fh:
+                manifest = json.load(fh)
+        else:
+            # No manifest — auto-split: last ~5% of train_shard_*.pt held out
+            # for val.  Keeps the WM pipeline usable on shard dirs that were
+            # built before the manifest format existed.
+            train_shards = sorted(
+                p.name for p in self.data_dir.glob("train_shard_*.pt")
             )
-        with open(manifest_path) as fh:
-            manifest = json.load(fh)
+            if not train_shards:
+                raise RuntimeError(
+                    f"{manifest_path} missing and no train_shard_*.pt found in "
+                    f"{self.data_dir}. WM dataset needs per-game shards "
+                    f"(build with tools/slp_to_shards.py) or at minimum a "
+                    f"flat directory of shard files."
+                )
+            n_val = max(1, int(len(train_shards) * 0.05))
+            manifest = {
+                "train_shards": train_shards[:-n_val],
+                "val_shards": train_shards[-n_val:],
+                # Games-per-shard estimate is used only for __len__ reporting.
+                "n_train_games": (len(train_shards) - n_val) * 50,
+                "n_val_games": n_val * 50,
+            }
+
         key = "val_shards" if split == "val" else "train_shards"
         self.files = [self.data_dir / n for n in manifest[key]]
         nkey = "n_val_games" if split == "val" else "n_train_games"
-        self.n_games = manifest[nkey]
+        self.n_games = manifest.get(nkey, len(self.files) * 50)
         self._total_windows = self.n_games * windows_per_game
+
+        # Probe the first shard to surface the numeric/flag widths and
+        # `action_elapsed` availability for the head construction to match.
+        _probe = torch.load(self.files[0], weights_only=True, mmap=True)
+        _states = _probe["states"]
+        self.n_numeric = int(_states["self_numeric"].shape[-1])
+        self.n_flags = int(_states["self_flags"].shape[-1])
+        self.has_action_elapsed = "self_action_elapsed" in _states
 
     def __len__(self) -> int:
         return self._total_windows
@@ -177,5 +206,7 @@ class WorldModelDataset(IterableDataset):
                     "opp_numeric": raw["opp_numeric"][1:W + 1],
                     "self_flags": raw["self_flags"][1:W + 1],
                     "opp_flags": raw["opp_flags"][1:W + 1],
+                    "self_action_elapsed": raw["self_action_elapsed"][1:W + 1],
+                    "opp_action_elapsed": raw["opp_action_elapsed"][1:W + 1],
                 }
                 yield state, next_ctrl, target
