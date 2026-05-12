@@ -14,14 +14,21 @@ and targets.
 Fields:
   state_dict keys (input to encoder):
     stage, self_character, opp_character, self_action, opp_action,
-    self_numeric, opp_numeric, self_flags, opp_flags, self_controller
+    self_numeric, opp_numeric, self_flags, opp_flags, self_controller,
+    opp_controller (56-dim, if baked — see add_opp_controller_to_shards.py)
   next_ctrl keys (encoder's next_ctrl_dim conditioning):
     next_self_controller (56), next_opp_buttons (12),
     next_opp_analog (4), next_opp_c_dir (int64)
   target_state keys (WM heads):
     self_action, opp_action (int64),
-    self_numeric, opp_numeric (float, 13 dim),
-    self_flags, opp_flags (float, 5 dim)
+    self_numeric, opp_numeric (float, 13 dim, normalized),
+    self_flags, opp_flags (float, 5 dim),
+    self_action_elapsed, opp_action_elapsed (float, normalized),
+  + integer-bucket targets (always emitted, cheap; loss uses them iff
+    discretize_counters=True on the model):
+    self_percent_int, self_stock_int, self_jumps_int,
+    self_hitlag_int, self_hitstun_int, self_elapsed_int   (int64)
+    (plus all opp_* counterparts)
 """
 
 from __future__ import annotations
@@ -45,8 +52,11 @@ _STATE_KEYS = (
     "self_numeric", "opp_numeric",
     "self_flags", "opp_flags",
     "self_controller",
-    # Opponent raw controller (not in MimicFlatEncoder's state input,
-    # but needed for next_ctrl conditioning):
+    # Opp controller: baked 56-dim one-hot (same layout as self_controller).
+    # Produced by tools/add_opp_controller_to_shards.py. Fed to the encoder
+    # symmetrically with self via `include_opp_controller=True`.
+    "opp_controller",
+    # Raw opp inputs — still needed to build next_ctrl conditioning.
     "opp_buttons", "opp_analog", "opp_c_dir",
     # Action-elapsed counters (t+1 used as regression target, never input).
     "self_action_elapsed", "opp_action_elapsed",
@@ -83,6 +93,29 @@ class WorldModelDataset(IterableDataset):
 
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats = json.load(fh)
+
+        # Transform params for de-normalizing discrete-target columns back
+        # to raw integers. `hal_norm.json` (or `mimic_norm.json`) holds the
+        # transform spec. For columns that aren't in that file, the shard
+        # pipeline falls back to z-score via norm_stats.json.
+        hal_norm_path = self.data_dir / "hal_norm.json"
+        if not hal_norm_path.exists():
+            hal_norm_path = self.data_dir / "mimic_norm.json"
+        if hal_norm_path.exists():
+            with open(hal_norm_path) as fh:
+                self.feat_norm = json.load(fh).get("features", {})
+        else:
+            self.feat_norm = {}
+
+        # Cap values for the discrete int targets (clamp before CE so rare
+        # out-of-range frames land in the top/overflow bin). Limits are:
+        # percent 0..236 (237 bins), stock 0..4 (5), jumps 0..6 (7),
+        # hitlag 0..20 (21), hitstun 0..60 (61 + 1 overflow = 62),
+        # elapsed 0..60 (61 + 1 overflow = 62). See compute_wm_loss.
+        self.DISC_BINS = {
+            "percent": 237, "stock": 5, "jumps": 7,
+            "hitlag": 21, "hitstun": 62, "elapsed": 62,
+        }
 
         manifest_path = self.data_dir / "tensor_manifest.json"
         if manifest_path.exists():
@@ -127,6 +160,48 @@ class WorldModelDataset(IterableDataset):
 
     def __len__(self) -> int:
         return self._total_windows
+
+    def _denorm_to_int(
+        self,
+        norm_vec: torch.Tensor,   # (W,) already-normalized values
+        suffix: str,              # "percent", "stock", ... (hal_norm key)
+        col_prefix: str,          # "self" or "opp"
+        max_bin: int,
+    ) -> torch.Tensor:
+        """Invert whichever normalization was applied at shard-build time
+        to recover the raw integer, then clamp to [0, max_bin]. Used for
+        CE targets on integer-counter columns.
+        """
+        params = self.feat_norm.get(suffix)
+        if params is None:
+            # Fall back to z-score from norm_stats. The key names follow a
+            # column-specific convention — action_elapsed is stored as
+            # "{side}_action_frame" in norm_stats, hitlag/hitstun as
+            # "{side}_{name}_left", everything else as "{side}_{name}".
+            if suffix in ("hitlag", "hitstun"):
+                key = f"{col_prefix}_{suffix}_left"
+            elif suffix == "action_elapsed":
+                key = f"{col_prefix}_action_frame"
+            else:
+                key = f"{col_prefix}_{suffix}"
+            stats = self.norm_stats.get(key)
+            if stats is None:
+                raise KeyError(f"no norm params for {suffix}/{key}")
+            mean, std = stats
+            raw = norm_vec * std + mean
+        else:
+            t = params["transform"]
+            if t == "standardize":
+                raw = norm_vec * params["std"] + params["mean"]
+            elif t == "normalize":
+                mn, mx = params["min"], params["max"]
+                raw = (norm_vec + 1.0) * 0.5 * (mx - mn) + mn
+            elif t == "invert_normalize":
+                mn, mx = params["min"], params["max"]
+                raw = mx - (norm_vec + 1.0) * 0.5 * (mx - mn)
+            else:
+                raw = norm_vec
+        return raw.round().long().clamp_(0, max_bin)
 
     def _shard_files(self, files):
         worker_info = get_worker_info()
@@ -190,6 +265,11 @@ class WorldModelDataset(IterableDataset):
                     "self_flags": raw["self_flags"][:W],
                     "opp_flags": raw["opp_flags"][:W],
                     "self_controller": raw["self_controller"][:W],
+                    # Opp 56-dim one-hot, symmetric with self_controller —
+                    # both are t-aligned with state[t] (the controllers that
+                    # produced state[t]). Encoder reads when
+                    # include_opp_controller=True.
+                    "opp_controller": raw["opp_controller"][:W],
                 }
                 # t+1 conditioning
                 next_ctrl = {
@@ -209,4 +289,25 @@ class WorldModelDataset(IterableDataset):
                     "self_action_elapsed": raw["self_action_elapsed"][1:W + 1],
                     "opp_action_elapsed": raw["opp_action_elapsed"][1:W + 1],
                 }
+                # Integer-bucket targets for discretize_counters — cheap to
+                # always emit; loss uses them only if the model is configured
+                # with discretize_counters=True. Column indices in
+                # self_numeric: percent=2, stock=3, jumps_left=4,
+                # hitlag_left=10, hitstun_left=11.
+                bins = self.DISC_BINS
+                for side in ("self", "opp"):
+                    num = target[f"{side}_numeric"]
+                    elapsed = target[f"{side}_action_elapsed"]
+                    target[f"{side}_percent_int"] = self._denorm_to_int(
+                        num[..., 2], "percent", side, bins["percent"] - 1)
+                    target[f"{side}_stock_int"] = self._denorm_to_int(
+                        num[..., 3], "stock", side, bins["stock"] - 1)
+                    target[f"{side}_jumps_int"] = self._denorm_to_int(
+                        num[..., 4], "jumps_left", side, bins["jumps"] - 1)
+                    target[f"{side}_hitlag_int"] = self._denorm_to_int(
+                        num[..., 10], "hitlag", side, bins["hitlag"] - 1)
+                    target[f"{side}_hitstun_int"] = self._denorm_to_int(
+                        num[..., 11], "hitstun", side, bins["hitstun"] - 1)
+                    target[f"{side}_elapsed_int"] = self._denorm_to_int(
+                        elapsed, "action_elapsed", side, bins["elapsed"] - 1)
                 yield state, next_ctrl, target

@@ -1,0 +1,46 @@
+{
+  "checkpoint": "checkpoints/fox-wm-20260424-discsym-baseline_step32000.pt",
+  "n_starts": 100,
+  "by_k": {
+    "1": {
+      "pos_err_mean": 0.1200345829129219,
+      "pos_err_median": 0.10561385750770569,
+      "action_self_eq_mean": 0.9800000190734863,
+      "action_self_eq_median": 1.0,
+      "action_opp_eq_mean": 0.9399999976158142,
+      "action_opp_eq_median": 1.0,
+      "flags_self_eq_mean": 0.9959999918937683,
+      "flags_self_eq_median": 1.0
+    },
+    "8": {
+      "pos_err_mean": 0.21370521187782288,
+      "pos_err_median": 0.17176304757595062,
+      "action_self_eq_mean": 0.8799999952316284,
+      "action_self_eq_median": 1.0,
+      "action_opp_eq_mean": 0.75,
+      "action_opp_eq_median": 1.0,
+      "flags_self_eq_mean": 0.9800000190734863,
+      "flags_self_eq_median": 1.0
+    },
+    "60": {
+      "pos_err_mean": 0.7288256287574768,
+      "pos_err_median": 0.6228826642036438,
+      "action_self_eq_mean": 0.5099999904632568,
+      "action_self_eq_median": 1.0,
+      "action_opp_eq_mean": 0.25999999046325684,
+      "action_opp_eq_median": 0.0,
+      "flags_self_eq_mean": 0.878000020980835,
+      "flags_self_eq_median": 1.0
+    },
+    "180": {
+      "pos_err_mean": 1.4704681634902954,
+      "pos_err_median": 0.9110503792762756,
+      "action_self_eq_mean": 0.27000001072883606,
+      "action_self_eq_median": 0.0,
+      "action_opp_eq_mean": 0.17000000178813934,
+      "action_opp_eq_median": 0.0,
+      "flags_self_eq_mean": 0.8040000200271606,
+      "flags_self_eq_median": 0.800000011920929
+    }
+  }
+}

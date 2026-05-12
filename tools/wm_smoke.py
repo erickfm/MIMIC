@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--seq-len", type=int, default=180)
     ap.add_argument("--batch-size", type=int, default=4)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--discretize-counters", action="store_true")
     return ap.parse_args()
 
 
@@ -64,6 +65,7 @@ def main() -> None:
     model, cfg, head_dims = build_model(
         args.model, args.seq_len, n_combos,
         shard_n_numeric=ds.n_numeric, shard_n_flags=ds.n_flags,
+        discretize_counters=args.discretize_counters,
     )
     model = model.to(device)
     params = sum(p.numel() for p in model.parameters())

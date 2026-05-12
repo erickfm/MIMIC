@@ -158,6 +158,68 @@ it costs ~0 val-loss (and in one measurement on puff actually helped
 slightly, likely via small implicit regularization). Leave
 `--input-gate-l1` unset (default 0) for standard production runs.
 
+### Opponent controller inputs: BC vs WM (deliberate asymmetry)
+
+**BC does NOT see `opp_controller`. WM does.** This is a deliberate
+design split, decided 2026-04-24 after walking through what each model
+actually does at deployment. Re-read before proposing to change.
+
+**Both models always have full opp *state*** — `opp_character`,
+`opp_action` (396-way animation enum), `opp_numeric` (pos_x/y,
+velocities, hitlag, hitstun, shield, percent, stock, jumps_left), and
+`opp_flags` (on_ground, off_stage, facing, invuln, moonwalkwarning).
+Neither model has ever hidden opp *state*; the question is only about
+opp *controller*.
+
+**Why BC stays blind to `opp_controller`:** BC is the **policy** — it
+runs in place of a human sitting at a GameCube setup. A human doesn't
+know the exact buttons the opponent is pressing; they *see* the screen
+and *infer* buttons from the animations they produce (grabs, hits,
+dashes). Every input a human gets from perception is already in BC's
+encoder (opp_action animation, opp_numeric position/velocity, opp_flags).
+Handing BC the raw opp controller bytes would give it a capability the
+human baseline doesn't have — a mild but real perceptual cheat —
+even though libmelee does technically expose opp's `controller_state`
+at inference (Slippi rollback netplay exchanges both players' inputs
+every frame, and `gamestate.players[opp].controller_state` is live).
+Matching human perceptual bandwidth is the principled choice for an
+imitation-learning policy. **HAL made the same call**
+(`hal/preprocess/input_configs.py:baseline_controller` takes only ego,
+never opp; ego is even lagged by −1 frame).
+
+**Why WM gets `opp_controller`:** WM is **not a player** — it's a
+forward-dynamics model standing in for the Melee engine. To advance
+`state[t] → state[t+1]` correctly, the engine itself needs both
+players' current-frame controllers; feeding the WM less is asking
+it to do a harder task (guess opp inputs from opp state changes). At
+deployment (model-based rollout / planning / simulated RL), the caller
+always supplies both players' controllers — either from a replay
+(teacher-forced eval), from a self-policy + opp-model combo (planning),
+or as variables the planner is optimizing over. No human-perception
+constraint applies because the WM is never the acting agent.
+
+**What's wired:**
+
+- BC: encoder reads `self_controller` only. `--opp-inputs` CLI flag is
+  dead for the production `mimic_flat` encoder (the flag code path
+  lives in the legacy `_BaseFrameEncoder` variants). **Do not wire opp
+  controller into MimicFlatEncoder for BC.**
+- WM: encoder reads `self_controller` and `opp_controller` symmetrically
+  (both 56-dim baked one-hot with the same cluster layout) plus the
+  next-frame conditioning (`next_self_controller`,
+  `next_opp_buttons/analog/c_dir`). See `mimic/frame_encoder.py`
+  `include_opp_controller` flag; `WorldModel` turns it on whenever
+  `cfg.no_opp_inputs=False` (the default for WM).
+- Shards: `tools/slp_to_shards.py` bakes `self_controller` only.
+  `tools/add_opp_controller_to_shards.py` post-processes existing shards
+  to add `opp_controller` in the same 56-dim format, using the raw
+  `opp_buttons/analog/c_dir` already in the shard. Idempotent, in-place.
+  Run it after any new `_v2` shard dir is built.
+
+**Do not** propose giving BC opp_controller as a "free improvement" —
+the counter-argument (privileged-info / human-perception-bandwidth) is
+the design intent, not an oversight.
+
 ## Stats files (HAL legacy)
 
 Two `stats.json` files exist in the HAL repo. Relevant when running
@@ -882,6 +944,19 @@ replacing `match_worker` with a parallel pool and turning
     `ValueError('Null video requires mainline or ExiAI Ishiiruka.')`
     and the `ENABLE_HEADLESS` cmake flag is broken on this fork
     anyway (project-slippi/Ishiiruka#209).
+
+18. **Always pass `step=step` to `wandb.log()`.** Without it, wandb
+    increments its own internal step counter by 1 per `.log()` call,
+    so the default x-axis bears no relation to training step and runs
+    that log at different cadences become incomparable. `tools/train_wm.py`
+    routes all wandb logging through `_wandb_log(run, payload, step=step)`
+    where `step` is required — do not bypass that helper. `train.py`
+    (BC) already passes `step=step` everywhere; if you add a new
+    `wandb.log` call site anywhere, include `step=step`. We had to
+    delete a 32k-step run (`w30tq1a6`, oppsym-baseline original)
+    on 2026-04-24 because of this exact mistake — the recovery is
+    backfill-from-stdout-log via `tools/wm_log_backfill.py`, but
+    that's a band-aid, not a fix.
 
 ## Research notes
 

@@ -85,6 +85,14 @@ class ModelConfig:
     # World-model mode: predicts state[t+1] instead of controller[t+1].
     # When True, get_model() builds a WorldModel (see mimic/world_model.py).
     wm_mode: bool                   = False
+    # WM only: discretize the integer-valued state targets (percent, stock,
+    # jumps_left, hitlag_left, hitstun_left, action_elapsed) into CE heads
+    # instead of Huber regression. Mirrors the discretization trick that
+    # worked so well for the BC controller heads — cleaner gradient on
+    # spiky/multimodal counter distributions. Leaves pos, velocity, shield
+    # on Huber (they're smooth continuous). Default off for back-compat
+    # with the first round of WM checkpoints.
+    discretize_counters: bool       = False
 
     # Legacy hal_* fields — kept for checkpoint backwards compatibility.
     # __post_init__ migrates them onto the mimic_* fields above. Always
@@ -134,6 +142,14 @@ MODEL_PRESETS = {
     "mimic-wm":     dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
                          encoder_type="mimic_flat",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9, wm_mode=True),
+    # Larger WM backbone (~46M params) for capacity-vs-multitask experiments.
+    # Same recipe as `mimic-xl` (d_model=768, 12 heads, SwiGLU, relpos) but
+    # with wm_mode + mimic_flat encoder for the WM input pipeline.
+    "mimic-wm-xl":  dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
+                         dropout=0.1, max_seq_len=180, pos_enc="relpos",
+                         encoder_type="mimic_flat", use_swiglu=True,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9, wm_mode=True),
     "mimic-learned":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,

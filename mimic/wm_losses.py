@@ -32,6 +32,14 @@ class WMLossWeights:
     action_elapsed_self: float = 0.25
     action_elapsed_opp: float = 0.25
     action_elapsed_scale: float = 30.0
+    # Discretized-counter CE weights (only used when the model has
+    # discretize_counters=True and the loss receives the matching int
+    # targets). Each applies to both self and opp symmetrically.
+    percent_w: float = 0.5
+    stock_w: float = 0.5
+    jumps_w: float = 0.3
+    hitlag_w: float = 0.3
+    hitstun_w: float = 0.3
     # "huber" (default) or "mse" for numeric cols. Huber is much better
     # behaved on the velocity/hitlag/hitstun cols, which can have huge
     # z-scored tails on legacy shards where those stats are near-zero.
@@ -69,10 +77,19 @@ def compute_wm_loss(
         )
 
     # Numeric regression. Default Huber (SmoothL1) — MSE blows up on
-    # the poorly-normalized velocity/hitlag/hitstun cols.
+    # the poorly-normalized velocity/hitlag/hitstun cols. When
+    # discretize_counters is active (detected by the presence of percent
+    # CE logits in preds AND the pred head's shrunken output width),
+    # the 13-col target gets sliced down to the 8 continuous cols only.
+    discretize_on = "self_percent_logits" in preds
     for side in ("self", "opp"):
         pred = preds[f"{side}_numeric_pred"]
         tgt = targets[f"{side}_numeric"].float()
+        if discretize_on and tgt.shape[-1] != pred.shape[-1]:
+            # 13-col shard target → select the 8 continuous columns:
+            # pos_x(0), pos_y(1), 5 speeds(5..9), shield(12).
+            CONT_COLS = [0, 1, 5, 6, 7, 8, 9, 12]
+            tgt = tgt[..., CONT_COLS]
         if w.numeric_loss == "mse":
             out[f"numeric_{side}"] = F.mse_loss(pred, tgt)
         else:
@@ -116,6 +133,33 @@ def compute_wm_loss(
             + w.action_elapsed_self * out["action_elapsed_self"]
             + w.action_elapsed_opp * out["action_elapsed_opp"]
         )
+
+    # Discretized counter CE heads (percent, stock, jumps, hitlag, hitstun,
+    # elapsed-when-discretized). Only compute when both the head and the
+    # int target tensors are present. Weights are per-side symmetric.
+    if discretize_on:
+        COUNTER_WEIGHTS = {
+            "percent": w.percent_w,
+            "stock": w.stock_w,
+            "jumps": w.jumps_w,
+            "hitlag": w.hitlag_w,
+            "hitstun": w.hitstun_w,
+            "elapsed": w.action_elapsed_self,  # reuse elapsed weight
+        }
+        for side in ("self", "opp"):
+            for name, wt in COUNTER_WEIGHTS.items():
+                logits = preds[f"{side}_{name}_logits"]
+                tgt_key = f"{side}_{name}_int"
+                if tgt_key not in targets:
+                    continue
+                tgt = targets[tgt_key].long()
+                B, T, C = logits.shape
+                ce = F.cross_entropy(
+                    logits.reshape(B * T, C), tgt.reshape(B * T)
+                )
+                out[f"{name}_{side}"] = ce
+                out["total"] = out["total"] + wt * ce
+
     return out
 
 
@@ -154,6 +198,11 @@ def compute_wm_metrics(
 
         pred_num = preds[f"{side}_numeric_pred"]
         tgt_num = targets[f"{side}_numeric"].float()
+        if tgt_num.shape[-1] != pred_num.shape[-1]:
+            # discretize_counters active — target is still full 13 cols, pred
+            # has 8 continuous cols only. Slice target to match.
+            CONT_COLS = [0, 1, 5, 6, 7, 8, 9, 12]
+            tgt_num = tgt_num[..., CONT_COLS]
         metrics[f"numeric_{side}_mse"] = F.mse_loss(pred_num, tgt_num).item()
 
         flag_logits = preds[f"{side}_flags_logits"]
@@ -170,5 +219,14 @@ def compute_wm_metrics(
             metrics[f"action_elapsed_{side}_mae"] = (
                 (pred - tgt).abs().mean().item()
             )
+
+        # Discretized counter accuracies (when heads are present)
+        for name in ("percent", "stock", "jumps", "hitlag", "hitstun", "elapsed"):
+            lk = f"{side}_{name}_logits"
+            tk = f"{side}_{name}_int"
+            if lk in preds and tk in targets:
+                pred_idx = preds[lk].argmax(dim=-1)
+                tgt = targets[tk].long()
+                metrics[f"{name}_{side}_acc"] = (pred_idx == tgt).float().mean().item()
 
     return metrics

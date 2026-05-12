@@ -45,6 +45,15 @@ class WorldModelHeads(nn.Module):
         signal for "how close are we to the next transition?".
     """
 
+    # Column indices inside the 13-col `self_numeric` that become CE heads
+    # when discretize_counters=True. The rest stay on Huber regression.
+    DISC_NUMERIC_COLS = (2, 3, 4, 10, 11)  # percent, stock, jumps, hitlag, hitstun
+    CONTINUOUS_NUMERIC_COLS = (0, 1, 5, 6, 7, 8, 9, 12)  # pos_x, pos_y, 5 speeds, shield
+    DISC_BIN_SIZES = {  # must match wm_dataset.DISC_BINS
+        "percent": 237, "stock": 5, "jumps": 7,
+        "hitlag": 21, "hitstun": 62, "elapsed": 62,
+    }
+
     def __init__(
         self,
         d_model: int,
@@ -53,16 +62,16 @@ class WorldModelHeads(nn.Module):
         n_flags: int = 5,
         predict_action_elapsed: bool = True,
         action_elapsed_scale: float = 30.0,
+        discretize_counters: bool = False,
     ) -> None:
         super().__init__()
         self.num_actions = num_actions
         self.n_numeric = n_numeric
         self.n_flags = n_flags
         self.predict_action_elapsed = predict_action_elapsed
-        # We scale the raw counter by action_elapsed_scale so the
-        # regression target sits in a similar magnitude as the other
-        # Huber-loss targets. 30 ≈ half a second of frames, roughly the
-        # median animation length.
+        self.discretize_counters = discretize_counters
+        # Scale the raw counter so regression target sits in Huber range.
+        # Unused when discretize_counters=True (elapsed moves to CE).
         self.action_elapsed_scale = action_elapsed_scale
 
         def _head(in_dim: int, out_dim: int) -> nn.Sequential:
@@ -78,17 +87,40 @@ class WorldModelHeads(nn.Module):
         self.self_action_head = _head(d_model, num_actions)
         self.opp_action_head = _head(d_model, num_actions)
 
-        # Numeric regression (normalized space)
-        self.self_numeric_head = _head(d_model, n_numeric)
-        self.opp_numeric_head = _head(d_model, n_numeric)
+        # Numeric regression (normalized space). When discretize_counters=True
+        # the integer-counter columns move to dedicated CE heads (below), so
+        # the numeric head shrinks to just the continuous cols.
+        if discretize_counters:
+            assert n_numeric == 13, (
+                "discretize_counters assumes the 13-col schema "
+                "(percent/stock/jumps/hitlag/hitstun at fixed indices)."
+            )
+            numeric_out = len(self.CONTINUOUS_NUMERIC_COLS)  # 8
+        else:
+            numeric_out = n_numeric
+        self.numeric_out = numeric_out
+        self.self_numeric_head = _head(d_model, numeric_out)
+        self.opp_numeric_head = _head(d_model, numeric_out)
 
         # Binary flags (BCE with logits)
         self.self_flags_head = _head(d_model, n_flags)
         self.opp_flags_head = _head(d_model, n_flags)
 
-        if predict_action_elapsed:
+        if predict_action_elapsed and not discretize_counters:
+            # Scalar Huber regression (old behavior).
             self.self_action_elapsed_head = _head(d_model, 1)
             self.opp_action_elapsed_head = _head(d_model, 1)
+
+        if discretize_counters:
+            # CE heads for each discretized counter column + action_elapsed.
+            bins = self.DISC_BIN_SIZES
+            for side in ("self", "opp"):
+                self.add_module(f"{side}_percent_head", _head(d_model, bins["percent"]))
+                self.add_module(f"{side}_stock_head",   _head(d_model, bins["stock"]))
+                self.add_module(f"{side}_jumps_head",   _head(d_model, bins["jumps"]))
+                self.add_module(f"{side}_hitlag_head",  _head(d_model, bins["hitlag"]))
+                self.add_module(f"{side}_hitstun_head", _head(d_model, bins["hitstun"]))
+                self.add_module(f"{side}_elapsed_head", _head(d_model, bins["elapsed"]))
 
     def forward(self, h: torch.Tensor) -> Dict[str, torch.Tensor]:
         out = dict(
@@ -99,14 +131,17 @@ class WorldModelHeads(nn.Module):
             self_flags_logits=self.self_flags_head(h),
             opp_flags_logits=self.opp_flags_head(h),
         )
-        if self.predict_action_elapsed:
-            # Squeeze the trailing singleton dim for each elapsed head.
+        if self.predict_action_elapsed and not self.discretize_counters:
             out["self_action_elapsed_pred"] = (
                 self.self_action_elapsed_head(h).squeeze(-1)
             )
             out["opp_action_elapsed_pred"] = (
                 self.opp_action_elapsed_head(h).squeeze(-1)
             )
+        if self.discretize_counters:
+            for side in ("self", "opp"):
+                for name in ("percent", "stock", "jumps", "hitlag", "hitstun", "elapsed"):
+                    out[f"{side}_{name}_logits"] = getattr(self, f"{side}_{name}_head")(h)
         return out
 
 
@@ -137,6 +172,13 @@ class WorldModel(nn.Module):
         ctrl_dim = 37 + 9 + cfg.n_controller_combos + 3
         next_ctrl_dim = ctrl_dim + 12 + 4 + cfg.num_c_dirs
 
+        # Opponent current-frame controller: symmetric with self_controller
+        # (56-dim baked one-hot). Gated on cfg.no_opp_inputs — when False, the
+        # WM sees both players' current-frame controllers, matching what
+        # Melee's engine has access to when it computes state[t+1]. Requires
+        # shards with `opp_controller` baked in (add_opp_controller_to_shards).
+        include_opp_controller = not cfg.no_opp_inputs
+
         self.encoder = encoder or build_encoder(
             encoder_type=cfg.encoder_type,
             d_model=cfg.d_model,
@@ -161,6 +203,7 @@ class WorldModel(nn.Module):
             n_controller_combos=cfg.n_controller_combos,
             use_input_gate=cfg.use_input_gate,
             next_ctrl_dim=next_ctrl_dim,
+            include_opp_controller=include_opp_controller,
         )
 
         if cfg.pos_enc == "learned":
@@ -192,6 +235,7 @@ class WorldModel(nn.Module):
             num_actions=cfg.num_actions,
             n_numeric=13 if not cfg.mimic_minimal_features else 6,
             n_flags=5 if not cfg.mimic_minimal_features else 3,
+            discretize_counters=getattr(cfg, "discretize_counters", False),
         )
 
         # Reuse FramePredictor's weight init (attention + FFN residual scaling).

@@ -45,6 +45,10 @@ STATE_INPUT_KEYS = (
     "self_flags", "opp_flags",
     "self_controller",
 )
+# Shards on which we've run tools/add_opp_controller_to_shards.py also have
+# `opp_controller`. If the checkpoint's encoder was trained with
+# include_opp_controller=True, we need to feed it in; otherwise we skip.
+OPP_CTRL_KEY = "opp_controller"
 NEXT_CTRL_KEYS_SHARD = (
     "self_controller",  # → next_self_controller
     "opp_buttons",       # → next_opp_buttons
@@ -66,6 +70,13 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--output", default=None,
                     help="JSON output path (default: reports/wm_rollout_*.json).")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--tf-counters", default="",
+                    help="Comma-separated list of discrete counters to "
+                         "TEACHER-FORCE during rollout (use GT instead of "
+                         "predicted argmax). Diagnostic only — choices: "
+                         "percent, stock, jumps, hitlag, hitstun. Pass "
+                         "'all' to teacher-force every counter, or "
+                         "'hitlag,hitstun' to test the high-stretch ones.")
     return ap.parse_args()
 
 
@@ -87,17 +98,25 @@ def load_model(ckpt_path: Path) -> Tuple[WorldModel, ModelConfig, torch.device]:
     # Re-size heads to match the checkpoint's saved head dims. WM runs on
     # both 13/22-col shards (full vs minimal encoder path) and the heads'
     # output width matches the shard's column count — rebuild to match.
+    # Also detect discretize_counters from key presence in the state dict.
     n_numeric = int(sd["heads.self_numeric_head.3.weight"].shape[0])
     n_flags = int(sd["heads.self_flags_head.3.weight"].shape[0])
+    has_disc = "heads.self_percent_head.3.weight" in sd
     default_n_numeric = model.heads.n_numeric
     default_n_flags = model.heads.n_flags
-    if (n_numeric, n_flags) != (default_n_numeric, default_n_flags):
+    default_disc = bool(getattr(model.heads, "discretize_counters", False))
+    if (n_numeric, n_flags, has_disc) != (default_n_numeric, default_n_flags, default_disc):
         from mimic.world_model import WorldModelHeads
+        # When discretize_counters=True the encoder's numeric head holds 8
+        # continuous cols; n_numeric here was inferred from the saved head
+        # so it'll already be 8 in that case. Pass discretize_counters
+        # through and the constructor recreates the matching CE heads.
         model.heads = WorldModelHeads(
             d_model=cfg.d_model,
             num_actions=cfg.num_actions,
-            n_numeric=n_numeric,
+            n_numeric=13,  # logical (full schema); ignored when discretize
             n_flags=n_flags,
+            discretize_counters=has_disc,
         ).to(device)
 
     model.load_state_dict(sd, strict=True)
@@ -150,6 +169,61 @@ def push_window(window: Dict[str, torch.Tensor], new_frame: Dict[str, torch.Tens
         buf[-1] = new_frame[k]
 
 
+# Per-column transform params for re-normalizing discrete-counter predictions
+# back into the shard's normalized space. Pulled at module init time from
+# the data dir; populated by `set_renorm_params` in main(). Keys are the
+# column names exactly as they appear in the loss/dataset code.
+_RENORM: Dict[str, Tuple[str, Dict[str, float]]] = {}
+
+
+def set_renorm_params(data_dir: Path) -> None:
+    """Load hal_norm + norm_stats so rollout can renormalize discretized
+    counter predictions back to the model's input space."""
+    global _RENORM
+    feats: Dict = {}
+    for fn in ("hal_norm.json", "mimic_norm.json"):
+        p = data_dir / fn
+        if p.exists():
+            import json
+            with open(p) as fh:
+                feats = json.load(fh).get("features", {})
+            break
+    import json
+    with open(data_dir / "norm_stats.json") as fh:
+        norm_stats = json.load(fh)
+
+    # Counter cols and which stats key they use.
+    plan = {
+        "percent":   ("hal", "percent"),
+        "stock":     ("hal", "stock"),
+        "jumps":     ("hal", "jumps_left"),
+        "hitlag":    ("zscore", "self_hitlag_left"),
+        "hitstun":   ("zscore", "self_hitstun_left"),
+        "elapsed":   ("zscore", "self_action_frame"),
+    }
+    out: Dict[str, Tuple[str, Dict[str, float]]] = {}
+    for k, (kind, stat_key) in plan.items():
+        if kind == "hal" and stat_key in feats:
+            out[k] = ("normalize", feats[stat_key])
+        else:
+            mean, std = norm_stats[stat_key]
+            out[k] = ("standardize", {"mean": mean, "std": std})
+    _RENORM = out
+
+
+def _renorm_int_to_norm(name: str, raw: float) -> float:
+    """Invert: int → normalized space, matching how the shard was built."""
+    if name not in _RENORM:
+        return 0.0
+    kind, params = _RENORM[name]
+    if kind == "normalize":
+        mn, mx = params["min"], params["max"]
+        return 2.0 * (raw - mn) / (mx - mn) - 1.0
+    elif kind == "standardize":
+        return (raw - params["mean"]) / max(params["std"], 1e-8)
+    return 0.0
+
+
 @torch.no_grad()
 def rollout_one(
     model: WorldModel,
@@ -158,6 +232,7 @@ def rollout_one(
     ctx: int,
     horizons: List[int],
     device: torch.device,
+    tf_counters: tuple = (),
 ) -> Dict[int, Dict[str, float]]:
     """Run one rollout from `start` for max(horizons) steps.
 
@@ -171,7 +246,11 @@ def rollout_one(
     window: Dict[str, torch.Tensor] = {}
     t0 = start
     t1 = start + ctx   # end-exclusive: [t0, t1) = ctx frames of real history
-    for k in STATE_INPUT_KEYS:
+    want_opp_ctrl = getattr(model.encoder, "_include_opp_ctrl", False)
+    keys = list(STATE_INPUT_KEYS)
+    if want_opp_ctrl and OPP_CTRL_KEY in states:
+        keys.append(OPP_CTRL_KEY)
+    for k in keys:
         window[k] = states[k][t0:t1].clone().to(device)
 
     # Rolling rollout. At step i (1-indexed), we predict state[t1 + i - 1 → t1 + i].
@@ -206,6 +285,42 @@ def rollout_one(
         pred_self_flags = (pred_last["self_flags_logits"] > 0).float()
         pred_opp_flags = (pred_last["opp_flags_logits"] > 0).float()
 
+        # Discretize-counters path: numeric_pred has only 8 continuous cols
+        # (pos_x, pos_y, 5 speeds, shield). Reconstruct the full 13-col
+        # normalized vector by argmax + renorm of each counter head.
+        # Note: argmax gives hard discrete steps (matches training input
+        # distribution exactly — model saw norm=-0.011 OR norm=17.66 for
+        # hitlag, never in between); but mispredictions cause big
+        # discontinuous jumps at rollout that the action transformer
+        # didn't see paired with the GT state context. Expected-value
+        # feedback was tested and gave equivalent / slightly worse
+        # numbers (continuous intermediate values are out-of-distribution
+        # in a different way). Real fix is rollout-exposure training
+        # (DAgger / scheduled sampling) — that's a future experiment.
+        is_disc = "self_percent_logits" in pred_last
+        if is_disc:
+            CONT_COLS = [0, 1, 5, 6, 7, 8, 9, 12]
+            _COUNTER_COL = {"percent": 2, "stock": 3, "jumps": 4,
+                            "hitlag": 10, "hitstun": 11}
+            for side, pred_num in (("self", pred_self_num), ("opp", pred_opp_num)):
+                full = torch.zeros(13, dtype=pred_num.dtype, device=pred_num.device)
+                for i, ci in enumerate(CONT_COLS):
+                    full[ci] = pred_num[i]
+                for name, col in _COUNTER_COL.items():
+                    if name in tf_counters:
+                        # Diagnostic: use GT value for this counter instead
+                        # of the model's prediction. Cleanly isolates whether
+                        # this counter's prediction-feedback is the source of
+                        # rollout drift.
+                        full[col] = states[f"{side}_numeric"][tgt_idx, col].to(device)
+                    else:
+                        raw = pred_last[f"{side}_{name}_logits"].argmax().item()
+                        full[col] = _renorm_int_to_norm(name, float(raw))
+                if side == "self":
+                    pred_self_num = full
+                else:
+                    pred_opp_num = full
+
         # Fabricate the new frame to roll into the window (using predicted state
         # but keeping static fields and the next-frame self_controller as real).
         new_frame = {
@@ -222,6 +337,10 @@ def rollout_one(
             # that's the controller that produced the state we just predicted.
             "self_controller": next_self_ctrl,
         }
+        if want_opp_ctrl:
+            # Same semantics for opp — the opp_controller at this window
+            # position is the one that produced the state at this position.
+            new_frame["opp_controller"] = states[OPP_CTRL_KEY][tgt_idx].to(device)
         push_window(window, new_frame)
 
         if step in horizon_set:
@@ -260,6 +379,8 @@ def main() -> None:
 
     print(f"loading {ckpt_path}")
     model, cfg, device = load_model(ckpt_path)
+    # Cache renorm params for the discretized-counter feedback path.
+    set_renorm_params(data_dir)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  cfg: d_model={cfg.d_model}, layers={cfg.num_layers}, "
           f"params={n_params / 1e6:.1f}M")
@@ -272,9 +393,17 @@ def main() -> None:
     for i, (path, g_start, off) in enumerate(picks):
         shard = torch.load(path, weights_only=True, mmap=True)
         states = shard["states"]
+        # Parse --tf-counters CLI flag once.
+        if args.tf_counters == "all":
+            tf_counters = ("percent", "stock", "jumps", "hitlag", "hitstun")
+        elif args.tf_counters:
+            tf_counters = tuple(s.strip() for s in args.tf_counters.split(","))
+        else:
+            tf_counters = ()
         frame_stats = rollout_one(
             model, states, start=g_start + off,
             ctx=args.context_len, horizons=ks, device=device,
+            tf_counters=tf_counters,
         )
         for k, d in frame_stats.items():
             for name, val in d.items():

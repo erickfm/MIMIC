@@ -726,6 +726,13 @@ class MimicFlatEncoder(nn.Module):
         # equal 56 + 12 + 4 + num_c_dirs so the input linear projects the
         # right shape.
         next_ctrl_dim: int = 0,
+        # World-model opponent current-frame controller: when True, forward()
+        # reads `opp_controller` (56-dim baked one-hot, same format as
+        # self_controller) and appends it symmetrically — gives the WM
+        # everything the Melee engine sees, both players' current inputs.
+        # Requires shards with a baked `opp_controller` tensor (see
+        # tools/add_opp_controller_to_shards.py).
+        include_opp_controller: bool = False,
         num_c_dirs: int = 9,
         # Legacy aliases
         hal_minimal_features: bool = None,
@@ -779,7 +786,11 @@ class MimicFlatEncoder(nn.Module):
                     f"opp_analog(4) + opp_c_dir({num_c_dirs}) = {expected}."
                 )
 
-        self._input_dim = emb_dim + numeric_dim + ctrl_dim + next_ctrl_dim
+        # Opponent current-frame controller: symmetric 56-dim (mirrors self).
+        self._include_opp_ctrl = include_opp_controller
+        opp_ctrl_dim = ctrl_dim if include_opp_controller else 0
+
+        self._input_dim = emb_dim + numeric_dim + ctrl_dim + opp_ctrl_dim + next_ctrl_dim
         self._n_controller_combos = n_controller_combos
 
         # Single projection (matching HAL's proj_down)
@@ -878,6 +889,12 @@ class MimicFlatEncoder(nn.Module):
         if self._hal_ctrl_enc and not self._no_self_inputs and "self_controller" in seq:
             parts.append(seq["self_controller"])
 
+        # World-model: opponent current-frame controller, symmetric with self.
+        # Concat order: ..., self_controller[t], opp_controller[t],
+        # next_self_controller[t+1], next_opp_buttons[t+1], ...
+        if self._include_opp_ctrl:
+            parts.append(seq["opp_controller"])       # (B, T, 56) — baked one-hot
+
         # World-model conditioning: next-frame controllers for both players.
         # These are what was pressed between state[i] and state[i+1] (the
         # post-frame gamestate the model is predicting).
@@ -975,6 +992,12 @@ class MimicFlatEncoder(nn.Module):
             names.extend(f"ctrl_cstick[{i}]" for i in range(9))
             names.extend(f"ctrl_combo[{i}]" for i in range(self._n_controller_combos))
             names.extend(f"ctrl_shoulder[{i}]" for i in range(3))
+        # World-model opponent current-frame controller (symmetric with self)
+        if self._include_opp_ctrl:
+            names.extend(f"opp_ctrl_main[{i}]" for i in range(37))
+            names.extend(f"opp_ctrl_cstick[{i}]" for i in range(9))
+            names.extend(f"opp_ctrl_combo[{i}]" for i in range(self._n_controller_combos))
+            names.extend(f"opp_ctrl_shoulder[{i}]" for i in range(3))
         # World-model next-frame conditioning
         if self._next_ctrl_dim:
             names.extend(f"next_ctrl_main[{i}]" for i in range(37))
@@ -1022,6 +1045,7 @@ def build_encoder(
     n_controller_combos: int = 5,
     use_input_gate: bool = False,
     next_ctrl_dim: int = 0,
+    include_opp_controller: bool = False,
     # Legacy aliases
     hal_minimal_features: bool = None,
     hal_controller_encoding: bool = None,
@@ -1061,7 +1085,9 @@ def build_encoder(
     if encoder_type in ("mimic_flat", "hal_flat"):
         return cls(d_model=d_model, dropout=dropout,
                    use_input_gate=use_input_gate,
-                   next_ctrl_dim=next_ctrl_dim, **vocab_kwargs)
+                   next_ctrl_dim=next_ctrl_dim,
+                   include_opp_controller=include_opp_controller,
+                   **vocab_kwargs)
     elif encoder_type == "flat":
         return cls(**common, **vocab_kwargs)
     else:

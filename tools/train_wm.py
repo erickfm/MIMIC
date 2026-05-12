@@ -69,6 +69,20 @@ def _ddp_cleanup(is_distributed: bool) -> None:
         dist.destroy_process_group()
 
 
+def _wandb_log(run, payload: Dict, *, step: int) -> None:
+    """All wandb logging in this file goes through here. The `step`
+    kwarg is positional-only-like — required, never default. Without
+    `step=step` on `wandb.log()`, wandb advances its internal step
+    counter by 1 per call and the resulting default-axis numbers
+    don't match the real training step, breaking cross-run comparison.
+    Don't bypass this helper. (See deletion of run w30tq1a6 on
+    2026-04-24 for what happens if you do.)
+    """
+    if run is None:
+        return
+    run.log(payload, step=step)
+
+
 # -----------------------------------------------------------------------------
 # CLI
 # -----------------------------------------------------------------------------
@@ -112,6 +126,10 @@ def parse_args() -> argparse.Namespace:
                     help="Weight on action_elapsed regression (per side).")
     ap.add_argument("--no-action-elapsed", action="store_true",
                     help="Disable the action_elapsed head + target.")
+    ap.add_argument("--discretize-counters", action="store_true",
+                    help="Move percent/stock/jumps/hitlag/hitstun/elapsed to CE "
+                         "heads instead of Huber regression. See "
+                         "WorldModelHeads.DISC_NUMERIC_COLS for details.")
     # W&B
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--wandb-project", default="mimic-wm")
@@ -127,6 +145,7 @@ def build_model(model_preset: str, seq_len: int,
                 shard_n_numeric: int,
                 shard_n_flags: int,
                 predict_action_elapsed: bool = True,
+                discretize_counters: bool = False,
                 ) -> tuple[WorldModel, ModelConfig, dict]:
     """Build the WM. Schema kwargs let us train on both shard layouts:
 
@@ -153,7 +172,12 @@ def build_model(model_preset: str, seq_len: int,
     overrides["mimic_minimal_features"] = use_minimal
     overrides["n_controller_combos"] = n_controller_combos
     overrides["no_self_inputs"] = False
-    overrides["no_opp_inputs"] = True
+    # WM gets both players' current-frame controllers — this is what the Melee
+    # engine sees when it advances the frame. `no_opp_inputs=True` is a BC
+    # holdover (BC had a leak risk when predicting self controller from opp
+    # controller); for state prediction there's no such leak.
+    overrides["no_opp_inputs"] = False
+    overrides["discretize_counters"] = discretize_counters
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
 
     # Heads predict the shard's native column layout so MSE/BCE line up
@@ -174,9 +198,11 @@ def build_model(model_preset: str, seq_len: int,
         n_numeric=head_n_numeric,
         n_flags=head_n_flags,
         predict_action_elapsed=predict_action_elapsed,
+        discretize_counters=discretize_counters,
     )
     return model, cfg, {"n_numeric": head_n_numeric, "n_flags": head_n_flags,
-                         "predict_action_elapsed": predict_action_elapsed}
+                        "predict_action_elapsed": predict_action_elapsed,
+                        "discretize_counters": discretize_counters}
 
 
 def collate(batch):
@@ -284,6 +310,7 @@ def main() -> None:
         shard_n_numeric=shard_n_numeric,
         shard_n_flags=shard_n_flags,
         predict_action_elapsed=not args.no_action_elapsed,
+        discretize_counters=args.discretize_counters,
     )
     model = model.to(device)
     if args.compile:
@@ -424,13 +451,12 @@ def main() -> None:
                       f"num_s {loss_log['numeric_self']:.3f}  num_o {loss_log['numeric_opp']:.3f}  "
                       f"flg_s {loss_log['flags_self']:.3f}  flg_o {loss_log['flags_opp']:.3f}"
                       f"{extras}  lr {lr:.2e}  {sps:.0f} sam/s", flush=True)
-                if wandb_run is not None:
-                    wandb_run.log({
-                        "train/step": step,
-                        "train/lr": lr,
-                        "train/samples_per_sec": sps,
-                        **{f"train/{k}": v for k, v in loss_log.items()},
-                    })
+                _wandb_log(wandb_run, {
+                    "train/step": step,
+                    "train/lr": lr,
+                    "train/samples_per_sec": sps,
+                    **{f"train/{k}": v for k, v in loss_log.items()},
+                }, step=step)
 
         if step % args.val_every == 0:
             log(f"running val @ step {step}...")
@@ -439,8 +465,7 @@ def main() -> None:
                 val = _reduce_scalars(val, world_size)
             if is_main:
                 print("  " + "  ".join(f"{k}={v:.4f}" for k, v in val.items()), flush=True)
-                if wandb_run is not None:
-                    wandb_run.log({"step": step, **val})
+                _wandb_log(wandb_run, {"step": step, **val}, step=step)
                 vl = val.get("val_loss", float("inf"))
                 if vl < best_val:
                     best_val = vl
