@@ -1,0 +1,146 @@
+{
+  "1": {
+    "name": "FOX",
+    "n_deaths": 5555,
+    "kill_pct_mean": 160.28754514549146,
+    "kill_pct_median": 168.3971405029297,
+    "kill_pct_p25": 133.13311767578125,
+    "kill_pct_p75": 193.21739196777344
+  },
+  "22": {
+    "name": "FALCO",
+    "n_deaths": 920,
+    "kill_pct_mean": 151.93931031538094,
+    "kill_pct_median": 165.0431671142578,
+    "kill_pct_p25": 126.9162483215332,
+    "kill_pct_p75": 188.38275146484375
+  },
+  "18": {
+    "name": "MARTH",
+    "n_deaths": 578,
+    "kill_pct_mean": 149.50202807423153,
+    "kill_pct_median": 157.06201171875,
+    "kill_pct_p25": 132.3364601135254,
+    "kill_pct_p75": 177.6660385131836
+  },
+  "15": {
+    "name": "JIGGLYPUFF",
+    "n_deaths": 489,
+    "kill_pct_mean": 134.2158886650101,
+    "kill_pct_median": 129.92465209960938,
+    "kill_pct_p25": 115.54840087890625,
+    "kill_pct_p75": 149.2045440673828
+  },
+  "3": {
+    "name": "DK",
+    "n_deaths": 353,
+    "kill_pct_mean": 185.2146258772939,
+    "kill_pct_median": 190.93643188476562,
+    "kill_pct_p25": 170.4051513671875,
+    "kill_pct_p75": 215.39645385742188
+  },
+  "7": {
+    "name": "SHEIK",
+    "n_deaths": 328,
+    "kill_pct_mean": 165.16870322169328,
+    "kill_pct_median": 168.9443130493164,
+    "kill_pct_p25": 149.00448608398438,
+    "kill_pct_p75": 190.1870460510254
+  },
+  "9": {
+    "name": "PEACH",
+    "n_deaths": 296,
+    "kill_pct_mean": 161.94028667662596,
+    "kill_pct_median": 160.98346710205078,
+    "kill_pct_p25": 143.51152420043945,
+    "kill_pct_p75": 183.60642623901367
+  },
+  "2": {
+    "name": "CPTFALCON",
+    "n_deaths": 284,
+    "kill_pct_mean": 166.29891665552702,
+    "kill_pct_median": 176.90211486816406,
+    "kill_pct_p25": 136.20349884033203,
+    "kill_pct_p75": 207.33161163330078
+  },
+  "13": {
+    "name": "SAMUS",
+    "n_deaths": 117,
+    "kill_pct_mean": 164.13062272520148,
+    "kill_pct_median": 171.04539489746094,
+    "kill_pct_p25": 143.63156127929688,
+    "kill_pct_p75": 193.91932678222656
+  },
+  "17": {
+    "name": "LUIGI",
+    "n_deaths": 114,
+    "kill_pct_mean": 159.6384404165703,
+    "kill_pct_median": 166.42548370361328,
+    "kill_pct_p25": 142.8531837463379,
+    "kill_pct_p75": 188.49549865722656
+  },
+  "8": {
+    "name": "NESS",
+    "n_deaths": 82,
+    "kill_pct_mean": 163.8814066444955,
+    "kill_pct_median": 168.44808197021484,
+    "kill_pct_p25": 150.67417526245117,
+    "kill_pct_p75": 187.644287109375
+  },
+  "25": {
+    "name": "GANONDORF",
+    "n_deaths": 67,
+    "kill_pct_mean": 174.96512546823985,
+    "kill_pct_median": 179.5721893310547,
+    "kill_pct_p25": 152.14383697509766,
+    "kill_pct_p75": 196.72040557861328
+  },
+  "10": {
+    "name": "POPO",
+    "n_deaths": 56,
+    "kill_pct_mean": 157.3873574393136,
+    "kill_pct_median": 161.2235565185547,
+    "kill_pct_p25": 138.12406158447266,
+    "kill_pct_p75": 179.8377456665039
+  },
+  "21": {
+    "name": "DOC",
+    "n_deaths": 55,
+    "kill_pct_mean": 168.49984019886364,
+    "kill_pct_median": 170.099609375,
+    "kill_pct_p25": 154.1300048828125,
+    "kill_pct_p75": 189.36492919921875
+  },
+  "12": {
+    "name": "PIKACHU",
+    "n_deaths": 43,
+    "kill_pct_mean": 156.91368794995685,
+    "kill_pct_median": 157.20751953125,
+    "kill_pct_p25": 142.64937591552734,
+    "kill_pct_p75": 177.7897186279297
+  },
+  "16": {
+    "name": "MEWTWO",
+    "n_deaths": 27,
+    "kill_pct_mean": 164.0997806125217,
+    "kill_pct_median": 165.39967346191406,
+    "kill_pct_p25": 139.75377655029297,
+    "kill_pct_p75": 195.70909881591797
+  },
+  "4": {
+    "name": "KIRBY",
+    "n_deaths": 21,
+    "kill_pct_mean": 124.07610407329742,
+    "kill_pct_median": 126.69435119628906,
+    "kill_pct_p25": 104.60614776611328,
+    "kill_pct_p75": 160.77247619628906
+  },
+  "20": {
+    "name": "YLINK",
+    "n_deaths": 21,
+    "kill_pct_mean": 159.80813961937315,
+    "kill_pct_median": 161.28176879882812,
+    "kill_pct_p25": 150.99429321289062,
+    "kill_pct_p75": 173.56268310546875
+  }
+}
