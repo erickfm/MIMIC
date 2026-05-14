@@ -573,9 +573,9 @@ INDEX_HTML = """<!doctype html>
       <span class="sep">·</span>
       <span class="mono">losses <span id="ftLosses">0</span></span>
       <span class="sep">·</span>
-      <span class="mono">windows <span id="ftWindows">0</span></span>
-      <span class="sep">·</span>
       <span class="mono">combos <span id="ftCombos">0</span></span>
+      <span class="sep">·</span>
+      <span class="mono">updates <span id="ftUpdates">0</span></span>
     </div>
   </div>
 
@@ -830,8 +830,8 @@ function render() {
   $('ftSession').textContent = fmtSession(now - state.session_start);
   $('ftWins').textContent = state.wins;
   $('ftLosses').textContent = state.losses;
-  $('ftWindows').textContent = state.windows_opened;
   $('ftCombos').textContent = state.windows_combo;
+  $('ftUpdates').textContent = state.update;
 }
 
 // Reward badge animation. Positions the badge at the right end of the

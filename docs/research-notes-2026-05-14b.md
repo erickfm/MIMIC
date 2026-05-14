@@ -293,10 +293,11 @@ is the natural next move.
 
 ## HUD micro-changes after the initial ship
 
-- Windows + combos counters added to the footer
-  (`windows X · combos Y`) — session totals so the user can see how
-  many opportunities the bot is opening vs how many it actually
-  closes successfully.
+- Combos + updates counters added to the footer
+  (`combos X · updates Y`). Earlier version had `windows X` but
+  that counts null-closed episodes (single_hit / sub_threshold)
+  which is noise; replaced with the PPO update count for a
+  meaningful training-progress signal alongside combos.
 - Recent-extensions list now shows each combo's **duration in
   seconds** (close_frame - open_frame, /60) instead of seconds-
   since-it-happened. "How long was the combo?" is more useful at
