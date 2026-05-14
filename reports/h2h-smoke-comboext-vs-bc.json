@@ -1,0 +1,52 @@
+{
+  "ckpt_a": "checkpoints/3way_20260514/3way-20260514-comboext_final.pt",
+  "ckpt_b": "hf_checkpoints/fox/model.pt",
+  "data_dir": "hf_checkpoints/fox",
+  "n_matches": 3,
+  "a_wins": 1,
+  "b_wins": 2,
+  "draws": 0,
+  "a_win_rate": 0.3333333333333333,
+  "avg_a_stocks": 1.0,
+  "avg_b_stocks": 2.0,
+  "avg_frames": 7227.666666666667,
+  "wall_seconds_total": 387.8,
+  "config": {
+    "bot_character": "FOX",
+    "stage": "FINAL_DESTINATION",
+    "temperature": 1.0,
+    "use_exi_inputs": false,
+    "enable_ffw": false,
+    "gfx_backend": "Vulkan",
+    "alternate_ports": true
+  },
+  "matches": [
+    {
+      "match_idx": 1,
+      "a_on_port": 1,
+      "result": "b_wins",
+      "a_stocks": 0,
+      "b_stocks": 3,
+      "frames": 5467,
+      "wall_seconds": 96.3
+    },
+    {
+      "match_idx": 2,
+      "a_on_port": 2,
+      "result": "b_wins",
+      "a_stocks": 0,
+      "b_stocks": 3,
+      "frames": 6712,
+      "wall_seconds": 117.2
+    },
+    {
+      "match_idx": 3,
+      "a_on_port": 1,
+      "result": "a_wins",
+      "a_stocks": 3,
+      "b_stocks": 0,
+      "frames": 9504,
+      "wall_seconds": 164.5
+    }
+  ]
+}
