@@ -148,7 +148,8 @@ def train(
         try:
             hud_proc = _sp.Popen(
                 [_sys.executable, "-m", "rlvr.eval.training_web.server",
-                 "--log", str(log_file), "--port", "8765"],
+                 "--log", str(log_file), "--port", "8765",
+                 "--max-updates", str(max_updates)],
                 env={**_os.environ,
                      "DISPLAY": _os.environ.get("DISPLAY", ":0")},
                 stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,

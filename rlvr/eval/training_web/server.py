@@ -940,11 +940,15 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", required=True, type=Path)
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--max-updates", type=int, default=50,
+                    help="Total PPO updates for this training run; "
+                         "used for the header progress bar.")
     ap.add_argument("--no-open", action="store_true",
                     help="Don't auto-open the browser.")
     args = ap.parse_args()
 
     state = HUDState()
+    state.max_updates = args.max_updates
     broker = EventBroker()
     tailer = LogTailer(args.log, state, broker)
     tailer.start()
