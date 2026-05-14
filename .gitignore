@@ -217,6 +217,13 @@ replays_ppo_smoke/
 replays_compare_realtime/
 replays_compare_ffw/
 replays_compare_ffw_poll/
+replays_3way/
+replays_smoke_lcancel_flush/
+replays_smoke_lcancel_retry/
+replays_winrate/
+replays_winrate_*/
+checkpoints/_smoke/
+logs/
 .claude/
 _hf_staging/
 # Slippi account credentials — contains playKey, never commit

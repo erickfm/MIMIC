@@ -438,7 +438,16 @@ class DolphinActor:
         self._pending = []
 
     def _find_latest_replay(self) -> None:
-        """Locate the .slp libmelee just saved for the finished match."""
+        """Locate the .slp libmelee just saved for the finished match.
+
+        libmelee closes the .slp on the same tick as the menu transition,
+        but the OS may not have fully flushed it to disk by the time
+        peppi tries to parse. We wait (up to ~2s) for the file size to
+        stabilize across two consecutive checks before declaring the
+        replay ready — without this the enrichment step hits
+        "I/O error: failed to fill whole buffer" and drops every
+        pending episode in the match (deadly for tasks like l_cancel
+        whose rewards are all post-match)."""
         replay_dir = self.cfg.replay_dir or os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
             "..", "..", "replays_online",
@@ -447,9 +456,23 @@ class DolphinActor:
         if not p.exists():
             return
         slps = sorted(p.rglob("*.slp"), key=lambda f: f.stat().st_mtime)
-        if slps:
-            self._last_replay_path = slps[-1]
-            log.info("match replay: %s", self._last_replay_path)
+        if not slps:
+            return
+        latest = slps[-1]
+        # Wait for size to stabilize.
+        import time as _t
+        last_size = -1
+        for _ in range(40):  # 40 * 50ms = 2s max
+            try:
+                cur = latest.stat().st_size
+            except OSError:
+                cur = -1
+            if cur > 0 and cur == last_size:
+                break
+            last_size = cur
+            _t.sleep(0.05)
+        self._last_replay_path = latest
+        log.info("match replay: %s (size=%d)", latest, last_size)
 
     def _finalize_match_episodes(self) -> List[Episode]:
         """Call task.enrich_with_replay on the buffered match episodes

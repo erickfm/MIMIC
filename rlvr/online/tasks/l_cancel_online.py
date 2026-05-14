@@ -121,10 +121,23 @@ class LCancelOnlineTask:
         ]
         if not pending:
             return episodes
-        try:
-            replay = Replay(Path(slp_path))
-        except Exception as e:
-            log.warning("couldn't parse %s for enrichment: %s", slp_path, e)
+        # libmelee closes the .slp on match-end transition, but the
+        # OS may still be flushing dirty pages when we try to parse.
+        # peppi surfaces this as "I/O error: failed to fill whole buffer".
+        # Retry a few times with backoff before giving up.
+        import time as _t
+        replay = None
+        last_err: Optional[Exception] = None
+        for attempt in range(6):  # ~ 0.05 + 0.1 + 0.2 + 0.4 + 0.8 + 1.6 = 3.15s max
+            try:
+                replay = Replay(Path(slp_path))
+                break
+            except Exception as e:
+                last_err = e
+                _t.sleep(0.05 * (2 ** attempt))
+        if replay is None:
+            log.warning("couldn't parse %s for enrichment after 6 retries: %s",
+                        slp_path, last_err)
             # Drop pending episodes we can't score.
             return [ep for i, ep in enumerate(episodes) if i not in pending]
 
