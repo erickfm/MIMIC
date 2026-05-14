@@ -293,11 +293,11 @@ is the natural next move.
 
 ## HUD micro-changes after the initial ship
 
-- Combos + updates counters added to the footer
-  (`combos X · updates Y`). Earlier version had `windows X` but
-  that counts null-closed episodes (single_hit / sub_threshold)
-  which is noise; replaced with the PPO update count for a
-  meaningful training-progress signal alongside combos.
+- Footer iterated through a few shapes. Final form:
+  `session · wins · losses · combos`. The "windows X" counter was
+  noise (includes null-closed single_hit/sub_threshold episodes);
+  briefly replaced with "updates X" but that just duplicated the
+  header progress bar, so dropped from the footer entirely.
 - Recent-extensions list now shows each combo's **duration in
   seconds** (close_frame - open_frame, /60) instead of seconds-
   since-it-happened. "How long was the combo?" is more useful at
