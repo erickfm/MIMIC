@@ -49,9 +49,9 @@ PYDEPS="torch numpy pandas pyarrow wandb tensordict huggingface_hub melee==0.45.
 pip install $PYDEPS --quiet 2>/dev/null \
   || pip install $PYDEPS --quiet --break-system-packages
 
-# ── 2. Dolphin emulator ────────────────────────────────────────────────────
+# ── 2. Dolphin emulator (online netplay build) ─────────────────────────────
 echo ""
-echo "── Setting up Dolphin emulator ──"
+echo "── Setting up Dolphin emulator (online play) ──"
 if [[ -x "$EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu" ]]; then
     echo "  Dolphin already extracted."
 else
@@ -63,6 +63,31 @@ else
     mkdir -p "$EMULATOR_DIR"
     tar xzf emulator.tar.gz -C "$EMULATOR_DIR" --strip-components=0
     echo "  Dolphin ready at $EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu"
+fi
+
+# ── 2b. Exi-AI Dolphin (FFW build for RLVR training) ──────────────────────
+# Separate binary from the online emulator: vladfi1/slippi-Ishiiruka
+# 'exi-ai-rebase' branch. Required by libmelee for use_exi_inputs +
+# enable_ffw (Console rejects netplay builds when these flags are set).
+# This build is NOT compatible with Slippi netplay — it's training only.
+EMULATOR_FFW_DIR="emulator_ffw"
+EMULATOR_FFW_URL="https://github.com/vladfi1/slippi-Ishiiruka/releases/download/exi-ai-0.2.0/Slippi_Online-x86_64-ExiAI.AppImage"
+echo ""
+echo "── Setting up Exi-AI Dolphin emulator (FFW for RLVR training) ──"
+if [[ -x "$EMULATOR_FFW_DIR/squashfs-root/usr/bin/dolphin-emu" ]]; then
+    echo "  Exi-AI Dolphin already extracted."
+else
+    mkdir -p "$EMULATOR_FFW_DIR"
+    if [[ ! -f "$EMULATOR_FFW_DIR/Slippi_Online-x86_64-ExiAI.AppImage" ]]; then
+        echo "  Downloading Exi-AI AppImage (~60 MB)..."
+        curl -sSL -o "$EMULATOR_FFW_DIR/Slippi_Online-x86_64-ExiAI.AppImage" \
+             "$EMULATOR_FFW_URL"
+        chmod +x "$EMULATOR_FFW_DIR/Slippi_Online-x86_64-ExiAI.AppImage"
+    fi
+    echo "  Extracting Exi-AI AppImage ..."
+    (cd "$EMULATOR_FFW_DIR" && ./Slippi_Online-x86_64-ExiAI.AppImage --appimage-extract >/dev/null)
+    rm -f "$EMULATOR_FFW_DIR/Slippi_Online-x86_64-ExiAI.AppImage"
+    echo "  Exi-AI Dolphin ready at $EMULATOR_FFW_DIR/squashfs-root/usr/bin/dolphin-emu"
 fi
 
 # Dolphin runtime libs — missing any of these makes the binary fail with

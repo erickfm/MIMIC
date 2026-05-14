@@ -33,6 +33,9 @@ def _build_task(task_id: str, self_port: int):
     if task_id == "shield_escape_online":
         from rlvr.online.tasks.shield_escape_online import ShieldEscapeOnlineTask
         return ShieldEscapeOnlineTask(self_port=self_port)
+    if task_id == "combo_extend_online":
+        from rlvr.online.tasks.combo_extend_online import ComboExtendOnlineTask
+        return ComboExtendOnlineTask(self_port=self_port)
     raise ValueError(f"unknown online task: {task_id}")
 
 
@@ -57,6 +60,8 @@ def train(
     stage: str = "FINAL_DESTINATION",
     cpu_level: int = 9,
     gfx_backend: str = "Vulkan",
+    use_exi_inputs: bool = False,
+    enable_ffw: bool = False,
     replay_dir: Optional[Path] = None,
     use_wandb: bool = False,
     seed: int = 0,
@@ -67,6 +72,16 @@ def train(
 
     model, cfg = load_mimic_model(str(base_ckpt), device)
     ref_model, _ = load_mimic_model(str(base_ckpt), device)
+    # Snapshot the model config for checkpoint saves. Stored as a dict
+    # so tools.inference_utils.load_mimic_model can reconstruct the
+    # ModelConfig without falling into the legacy HAL bare-state-dict
+    # branch.
+    from dataclasses import asdict
+    try:
+        model_cfg_snapshot = asdict(cfg)
+    except TypeError:
+        # Not a dataclass — store as the raw object.
+        model_cfg_snapshot = cfg
     for p in ref_model.parameters():
         p.requires_grad_(False)
     ref_model.eval()
@@ -84,6 +99,12 @@ def train(
         stage=stage,
         temperature=temperature,
         gfx_backend=gfx_backend,
+        # FFW: needs both use_exi_inputs and enable_ffw, plus the
+        # emulator_ffw/ Exi-AI build (not emulator/).
+        use_exi_inputs=use_exi_inputs,
+        enable_ffw=enable_ffw,
+        # Audio is noisy in headless FFW runs; disable when FFW is on.
+        disable_audio=enable_ffw,
         replay_dir=str(replay_dir) if replay_dir else None,
     )
     actor = DolphinActor(
@@ -157,7 +178,7 @@ def train(
 
             if checkpoint_every > 0 and update % checkpoint_every == 0:
                 ck = checkpoint_dir / f"{run_name}_update{update:04d}.pt"
-                _save_ckpt(ck, model, optimizer, cfg_snapshot, update, task_id)
+                _save_ckpt(ck, model, optimizer, model_cfg_snapshot, update, task_id)
                 log.info("saved %s", ck)
     finally:
         actor.stop()
@@ -165,11 +186,11 @@ def train(
             wandb_run.finish()
 
     final = checkpoint_dir / f"{run_name}_final.pt"
-    _save_ckpt(final, model, optimizer, cfg_snapshot, max_updates, task_id)
+    _save_ckpt(final, model, optimizer, model_cfg_snapshot, max_updates, task_id)
     log.info("done. final: %s  total_elapsed=%.1fs", final, time.time() - t0)
 
 
-def _save_ckpt(path, model, optimizer, cfg_snapshot, update, task_id):
+def _save_ckpt(path, model, optimizer, model_cfg_snapshot, update, task_id):
     """Save in the format `tools.inference_utils.load_mimic_model` expects:
     `config` must be a dict whose keys cover ModelConfig fields. Without
     it the loader falls into the legacy HAL bare-state-dict path."""
@@ -177,7 +198,7 @@ def _save_ckpt(path, model, optimizer, cfg_snapshot, update, task_id):
     torch.save({
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
-        "config": cfg_snapshot,
+        "config": model_cfg_snapshot,
         "update": update,
         "task_id": task_id,
     }, path)
@@ -190,7 +211,8 @@ def main():
     ap.add_argument("--dolphin-path", default="emulator/squashfs-root/usr/bin/dolphin-emu", type=Path)
     ap.add_argument("--iso-path", default="melee.iso", type=Path)
     ap.add_argument("--task", required=True,
-                    choices=["l_cancel_online", "shield_escape_online"])
+                    choices=["l_cancel_online", "shield_escape_online",
+                             "combo_extend_online"])
     ap.add_argument("--run-name", required=True)
     ap.add_argument("--episodes-per-update", type=int, default=32)
     ap.add_argument("--lr", type=float, default=1e-6)
@@ -204,7 +226,15 @@ def main():
     ap.add_argument("--stage", default="FINAL_DESTINATION")
     ap.add_argument("--cpu-level", type=int, default=9)
     ap.add_argument("--self-port", type=int, default=1)
-    ap.add_argument("--gfx-backend", default="Vulkan")
+    ap.add_argument("--gfx-backend", default="Vulkan",
+                    help="GPU backend. Use 'Null' for FFW headless training.")
+    ap.add_argument("--use-exi-inputs", action="store_true",
+                    help="Use EXI input injection (required for --enable-ffw). "
+                         "Needs the emulator_ffw/ Exi-AI build, not emulator/.")
+    ap.add_argument("--enable-ffw", action="store_true",
+                    help="Run Dolphin at unlimited speed (FFW). Requires "
+                         "--use-exi-inputs and the Exi-AI emulator at "
+                         "emulator_ffw/squashfs-root/usr/bin/dolphin-emu.")
     ap.add_argument("--replay-dir", type=Path, default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--wandb", action="store_true")
@@ -224,6 +254,8 @@ def main():
         cpu_character=args.cpu_character, stage=args.stage,
         cpu_level=args.cpu_level,
         gfx_backend=args.gfx_backend,
+        use_exi_inputs=args.use_exi_inputs,
+        enable_ffw=args.enable_ffw,
         replay_dir=args.replay_dir,
         use_wandb=args.wandb, seed=args.seed,
     )

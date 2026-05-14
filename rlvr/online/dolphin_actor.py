@@ -72,6 +72,23 @@ class ActorConfig:
     temperature: float = 1.0
     gfx_backend: str = ""               # "" inherits Dolphin default (works headless here)
     disable_audio: bool = False         # match tools/play_vs_cpu.py
+    # FFW-only: enable via the ExiAI Ishiiruka Dolphin fork at
+    # emulator_ffw/. Realtime mode (default) uses the regular online
+    # emulator at emulator/. Both can't be combined: ffw needs
+    # use_exi_inputs=True which requires the Exi-AI build.
+    use_exi_inputs: bool = False
+    enable_ffw: bool = False
+    # Pacing knobs. With FFW the dominant bottleneck on our pipeline
+    # becomes the Python step loop (~17 ms/frame) rather than Dolphin
+    # itself. Setting blocking_input=False unblocks Dolphin from
+    # waiting on our input each frame, and polling_mode=True lets
+    # console.step() return immediately when no new gamestate is ready.
+    # Together they let Dolphin emulate at its own pace; we read
+    # whatever's freshest. Comes at the cost of input lag — fine for
+    # episodic outcomes (combo extension, edgeguard) but bad for
+    # frame-perfect tasks (L-cancel).
+    blocking_input: bool = True
+    polling_mode: bool = False
     replay_dir: Optional[str] = None
     state_history_len: int = 256       # long enough for any task's episode
     max_episode_frames: int = 600      # safety: kill runaway episodes
@@ -275,10 +292,14 @@ class DolphinActor:
         self.console = melee.Console(
             path=self.cfg.dolphin_path, is_dolphin=True,
             tmp_home_directory=True, copy_home_directory=False,
-            blocking_input=True, online_delay=0,
+            blocking_input=self.cfg.blocking_input,
+            polling_mode=self.cfg.polling_mode,
+            online_delay=0,
             setup_gecko_codes=True, fullscreen=False,
             gfx_backend=self.cfg.gfx_backend,
-            disable_audio=self.cfg.disable_audio, use_exi_inputs=False, enable_ffw=False,
+            disable_audio=self.cfg.disable_audio,
+            use_exi_inputs=self.cfg.use_exi_inputs,
+            enable_ffw=self.cfg.enable_ffw,
             save_replays=True, replay_dir=replay_dir,
         )
         self.ego_ctrl = melee.Controller(

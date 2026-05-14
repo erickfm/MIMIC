@@ -205,12 +205,18 @@ hf_checkpoints/
 logs/
 *_log*.txt
 emulator/
+emulator_ffw/
 melee.iso
 melee.zip
 mimic_best_checkpoints.zip
 replays/
 replays_online/
 replays_online_shield/
+replays_online_smoke/
+replays_ppo_smoke/
+replays_compare_realtime/
+replays_compare_ffw/
+replays_compare_ffw_poll/
 .claude/
 _hf_staging/
 # Slippi account credentials — contains playKey, never commit
