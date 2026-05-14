@@ -62,6 +62,9 @@ def train(
     gfx_backend: str = "Vulkan",
     use_exi_inputs: bool = False,
     enable_ffw: bool = False,
+    opponent_ckpt: Optional[Path] = None,
+    opponent_data_dir: Optional[Path] = None,
+    opponent_temperature: float = 1.0,
     replay_dir: Optional[Path] = None,
     use_wandb: bool = False,
     seed: int = 0,
@@ -105,6 +108,9 @@ def train(
         enable_ffw=enable_ffw,
         # Audio is noisy in headless FFW runs; disable when FFW is on.
         disable_audio=enable_ffw,
+        opponent_ckpt=str(opponent_ckpt) if opponent_ckpt else None,
+        opponent_data_dir=str(opponent_data_dir) if opponent_data_dir else None,
+        opponent_temperature=opponent_temperature,
         replay_dir=str(replay_dir) if replay_dir else None,
     )
     actor = DolphinActor(
@@ -235,6 +241,15 @@ def main():
                     help="Run Dolphin at unlimited speed (FFW). Requires "
                          "--use-exi-inputs and the Exi-AI emulator at "
                          "emulator_ffw/squashfs-root/usr/bin/dolphin-emu.")
+    ap.add_argument("--opponent-ckpt", type=Path, default=None,
+                    help="Frozen bot opponent on the other port. Without "
+                         "this flag the opponent is CPU-9 (legacy).")
+    ap.add_argument("--opponent-data-dir", type=Path, default=None,
+                    help="Inference-context dir for the opponent. Defaults "
+                         "to --data-dir.")
+    ap.add_argument("--opponent-temperature", type=float, default=1.0,
+                    help="Sampling temperature for the opponent's policy. "
+                         "1.0 mirrors the trainee.")
     ap.add_argument("--replay-dir", type=Path, default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--wandb", action="store_true")
@@ -256,6 +271,9 @@ def main():
         gfx_backend=args.gfx_backend,
         use_exi_inputs=args.use_exi_inputs,
         enable_ffw=args.enable_ffw,
+        opponent_ckpt=args.opponent_ckpt,
+        opponent_data_dir=args.opponent_data_dir,
+        opponent_temperature=args.opponent_temperature,
         replay_dir=args.replay_dir,
         use_wandb=args.wandb, seed=args.seed,
     )

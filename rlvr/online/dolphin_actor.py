@@ -46,6 +46,7 @@ from rlvr.state.libmelee_adapter import _ps_from_libmelee
 from rlvr.state.gamestate import SCHEMA_VERSION, ControllerInput, GameState, PlayerState
 from tools.inference_utils import (
     build_frame,
+    build_frame_p2,
     load_inference_context,
     load_mimic_model,
 )
@@ -92,6 +93,14 @@ class ActorConfig:
     replay_dir: Optional[str] = None
     state_history_len: int = 256       # long enough for any task's episode
     max_episode_frames: int = 600      # safety: kill runaway episodes
+    # Bot-vs-bot training. When opponent_ckpt is None, the cpu_port is
+    # driven by cpu_level (legacy CPU-9 mode). When set, that .pt is
+    # loaded as a frozen second policy and pressed every frame. cpu_level
+    # is ignored in this case (the menu helper picks 0 for both ports).
+    # opponent_data_dir defaults to the trainee's data_dir if None.
+    opponent_ckpt: Optional[str] = None
+    opponent_data_dir: Optional[str] = None
+    opponent_temperature: float = 1.0   # same sampling as trainee by default
 
 
 class _PolicyRunner:
@@ -254,6 +263,44 @@ class DolphinActor:
         self.self_port = self_port
         self.policy = _PolicyRunner(model, model_seq_len, device, ctx)
 
+        # Optional frozen opponent policy. When configured, the cpu_port
+        # is driven by this model on every frame instead of by CPU-9.
+        self.opp_model = None
+        self.opp_ctx: Optional[dict] = None
+        self.opp_policy: Optional[_PolicyRunner] = None
+        self.opp_n_btn: Optional[int] = None
+        if cfg.opponent_ckpt:
+            opp_data_dir = cfg.opponent_data_dir or ""
+            log.info("loading frozen opponent: %s (data_dir=%s, T=%.2f)",
+                     cfg.opponent_ckpt, opp_data_dir or "<trainee's>",
+                     cfg.opponent_temperature)
+            self.opp_model, opp_cfg = load_mimic_model(
+                cfg.opponent_ckpt, device)
+            for p in self.opp_model.parameters():
+                p.requires_grad_(False)
+            self.opp_model.eval()
+            # Per-policy context with matching n_combos.
+            opp_ctx_base = (load_inference_context(opp_data_dir)
+                            if opp_data_dir else ctx)
+            from mimic.features import BTN7_N_CLASSES
+            opp_ctx = dict(opp_ctx_base)
+            n = opp_cfg.n_controller_combos
+            if n == BTN7_N_CLASSES:
+                opp_ctx["combo_map"] = {}
+                opp_ctx["n_combos"] = n
+            elif n == 5:
+                opp_ctx["combo_map"] = {
+                    (1, 0, 0, 0, 0): 0, (0, 1, 0, 0, 0): 1, (0, 0, 1, 0, 0): 2,
+                    (0, 0, 0, 1, 0): 3, (0, 0, 0, 0, 0): 4, (0, 0, 0, 0, 1): 4,
+                    (1, 0, 0, 0, 1): 0, (0, 1, 0, 0, 1): 1, (0, 0, 1, 0, 1): 2,
+                    (0, 0, 0, 1, 1): 3,
+                }
+                opp_ctx["n_combos"] = 5
+            self.opp_ctx = opp_ctx
+            self.opp_policy = _PolicyRunner(
+                self.opp_model, opp_cfg.max_seq_len, device, opp_ctx)
+            self.opp_n_btn = n
+
         # Streaming state history (libmelee GameStates as RLVR PlayerState
         # objects via the libmelee_adapter shim — enough for task logic).
         self._state_history: Deque[GameState] = deque(maxlen=cfg.state_history_len)
@@ -370,12 +417,14 @@ class DolphinActor:
                 self._in_game = False
                 self._close_open_episode_abortive()
                 self._find_latest_replay()
+            # If opponent is a bot, both ports are bot-driven (cpu_level=0).
+            opp_cpu_level = 0 if self.opp_policy is not None else self.cfg.cpu_level
             self._menu_ego.menu_helper_simple(
                 gs, self.ego_ctrl, self._bot_char, self._stage,
                 cpu_level=0, autostart=False)
             self._menu_cpu.menu_helper_simple(
                 gs, self.cpu_ctrl, self._cpu_char, self._stage,
-                cpu_level=self.cfg.cpu_level, autostart=True)
+                cpu_level=opp_cpu_level, autostart=True)
             self.ego_ctrl.flush()
             self.cpu_ctrl.flush()
             return
@@ -431,6 +480,28 @@ class DolphinActor:
         self.policy.prev_sent = _press_controller(
             self.ego_ctrl, m_i, s_i, c_i, b_i, n_btn
         )
+
+        # Opponent step (when configured): build the perspective-flipped
+        # frame, run the frozen opp policy, press the cpu_port. Selection
+        # of build_frame vs build_frame_p2 depends on which port the
+        # trainee is on — opp always sees from the OTHER port's POV.
+        if self.opp_policy is not None:
+            if self.self_port == 1:
+                opp_frame = build_frame_p2(gs, self.opp_policy.prev_sent,
+                                           self.opp_ctx)
+            else:
+                opp_frame = build_frame(gs, self.opp_policy.prev_sent,
+                                        self.opp_ctx)
+            if opp_frame is not None:
+                self.opp_policy.push_frame(opp_frame)
+                with torch.no_grad():
+                    opp_logits = self.opp_policy.forward_latest(self.opp_model)
+                (om_i, os_i, oc_i, ob_i), _ = _sample_four_heads(
+                    opp_logits, self.cfg.opponent_temperature
+                )
+                self.opp_policy.prev_sent = _press_controller(
+                    self.cpu_ctrl, om_i, os_i, oc_i, ob_i, self.opp_n_btn
+                )
 
     def _close_open_episode_abortive(self) -> None:
         """Discard any in-progress episode (menu-return, abort)."""
