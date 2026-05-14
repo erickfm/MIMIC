@@ -101,6 +101,11 @@ class ActorConfig:
     opponent_ckpt: Optional[str] = None
     opponent_data_dir: Optional[str] = None
     opponent_temperature: float = 1.0   # same sampling as trainee by default
+    # Costume indices (Fox: 0=default, 1=red, 2=black, 3=green). Used
+    # to visually distinguish trainee from frozen opponent when both
+    # play the same character. Default trainee=0 (white), opp=3 (green).
+    trainee_costume: int = 0
+    opponent_costume: int = 3
 
 
 class _PolicyRunner:
@@ -329,6 +334,11 @@ class DolphinActor:
         # Path of the most recently-closed replay (set by libmelee's
         # Console when it writes the .slp).
         self._last_replay_path: Optional[Path] = None
+        # Last in-game stocks (for emitting win/loss on match-end). The
+        # menu-transition frame doesn't have player stocks reliably, so
+        # we snapshot them every in-game frame and read them on close.
+        self._last_trainee_stocks: int = 0
+        self._last_opp_stocks: int = 0
 
     def start(self):
         replay_dir = self.cfg.replay_dir or os.path.join(
@@ -414,6 +424,16 @@ class DolphinActor:
         if gs.menu_state not in (melee.Menu.IN_GAME, melee.Menu.SUDDEN_DEATH):
             if self._in_game:
                 log.info("match ended, returning to menu")
+                # Emit win/loss based on the last in-game stocks we saw.
+                ts, os_ = self._last_trainee_stocks, self._last_opp_stocks
+                if ts > os_:
+                    result = "win"
+                elif os_ > ts:
+                    result = "loss"
+                else:
+                    result = "draw"
+                log.info("EVT_MATCH_END result=%s trainee_stocks=%d opp_stocks=%d",
+                         result, ts, os_)
                 self._in_game = False
                 self._close_open_episode_abortive()
                 self._find_latest_replay()
@@ -421,10 +441,12 @@ class DolphinActor:
             opp_cpu_level = 0 if self.opp_policy is not None else self.cfg.cpu_level
             self._menu_ego.menu_helper_simple(
                 gs, self.ego_ctrl, self._bot_char, self._stage,
-                cpu_level=0, autostart=False)
+                cpu_level=0, autostart=False,
+                costume=self.cfg.trainee_costume)
             self._menu_cpu.menu_helper_simple(
                 gs, self.cpu_ctrl, self._cpu_char, self._stage,
-                cpu_level=opp_cpu_level, autostart=True)
+                cpu_level=opp_cpu_level, autostart=True,
+                costume=self.cfg.opponent_costume)
             self.ego_ctrl.flush()
             self.cpu_ctrl.flush()
             return
@@ -432,21 +454,30 @@ class DolphinActor:
         self._in_game = True
         self.step_count += 1
 
+        # Snapshot current stocks for the eventual EVT_MATCH_END emission.
+        try:
+            cpu_port_for_stocks = 2 if self.self_port == 1 else 1
+            _t_ps = gs.players.get(self.self_port)
+            _o_ps = gs.players.get(cpu_port_for_stocks)
+            if _t_ps is not None:
+                self._last_trainee_stocks = int(_t_ps.stock)
+            if _o_ps is not None:
+                self._last_opp_stocks = int(_o_ps.stock)
+        except Exception:
+            pass
+
         # Build input frame + forward
         frame = build_frame(gs, self.policy.prev_sent, self.ctx)
         if frame is None:
             return
         self.policy.push_frame(frame)
 
-        # Two forwards: policy (for sampling + old logprob) and ref (no grad)
+        # Policy forward + sample is ALWAYS needed (Dolphin waits on us).
         with torch.no_grad():
             theta_logits = self.policy.forward_latest(self.model)
-            ref_logits = self.policy.forward_latest(self.ref_model)
-
         (m_i, s_i, c_i, b_i), lp_old = _sample_four_heads(
             theta_logits, self.cfg.temperature
         )
-        lp_ref = _logprob_of_indices(ref_logits, (m_i, s_i, c_i, b_i))
 
         # Track task state machine FIRST so should_start sees the latest frame.
         rlvr_gs = self._rlvr_gamestate(gs)
@@ -456,6 +487,36 @@ class DolphinActor:
             if self.task.should_start(self._state_history):
                 self._episode_open_idx = len(self._state_history) - 1
                 self._pending = []
+                # Per-episode "open" event for the live HUD.
+                # Schema: EVT_EP_OPEN frame=<g> start_pct=<f>
+                start_pct = ""
+                start_state = getattr(self.task,
+                                       "_episode_start_opp_state", None)
+                if start_state is not None:
+                    start_pct = f"{start_state[0]:.1f}"
+                log.info("EVT_EP_OPEN frame=%d start_pct=%s",
+                         int(gs.frame), start_pct)
+
+        # Live opp-percent tick for the HUD's live plot — every 6 game
+        # frames while a window is open. Schema:
+        #   EVT_EP_TICK frame=<g> opp_pct=<f>
+        if self._episode_open_idx is not None and (int(gs.frame) % 6) == 0:
+            opp = None
+            for port, ps in gs.players.items():
+                if int(port) != self.self_port:
+                    opp = ps
+                    break
+            if opp is not None:
+                log.info("EVT_EP_TICK frame=%d opp_pct=%.1f",
+                         int(gs.frame), float(opp.percent))
+
+        # Ref-model forward is now done at PPO-update time on the
+        # cached obs (frozen weights → deterministic logprob, doesn't
+        # need to be computed live). This saves ~5ms/frame during
+        # open windows where the actor would otherwise burn budget
+        # forwarding the ref. The FrameRecord still gets a placeholder
+        # for back-compat with old PPO code paths that read it.
+        lp_ref = lp_old
 
         # Snapshot the full T-frame context at this moment — required so
         # PPO can recompute logprobs with gradient on the exact input
@@ -607,6 +668,20 @@ class DolphinActor:
                     )
                     self._match_episodes.append(ep)
                     self.episode_count += 1
+                    # Per-episode log line for the live HUD watcher.
+                    # Schema: EVT_EP frame=<g> result=<r> reward=<f>
+                    # damage=<f> start_pct=<f> end_pct=<f> stocks_taken=<i>
+                    _r = metadata.get("result", "?")
+                    _dmg = metadata.get("damage", "")
+                    _sp = metadata.get("start_percent", "")
+                    _ep_ = metadata.get("end_percent", "")
+                    _st = metadata.get("stocks_taken", "")
+                    log.info("EVT_EP frame=%d result=%s reward=%.3f "
+                             "damage=%s start_pct=%s end_pct=%s "
+                             "stocks_taken=%s",
+                             ep.end_game_frame, _r,
+                             float(outcome.terminal_reward),
+                             _dmg, _sp, _ep_, _st)
                     self._pending = []
                     self._episode_open_idx = None
                     continue

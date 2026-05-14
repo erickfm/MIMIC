@@ -66,10 +66,24 @@ def train(
     opponent_data_dir: Optional[Path] = None,
     opponent_temperature: float = 1.0,
     replay_dir: Optional[Path] = None,
+    log_file: Optional[Path] = None,
     use_wandb: bool = False,
     seed: int = 0,
 ) -> None:
     from tools.inference_utils import load_inference_context, load_mimic_model
+
+    # If --log-file was passed, also tee Python logging to that file
+    # (in addition to whatever stdout/stderr the shell is doing). The
+    # HUD subprocess tails this file.
+    if log_file is not None:
+        log_file = Path(log_file)
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        _fh = logging.FileHandler(str(log_file), mode="w")
+        _fh.setLevel(logging.INFO)
+        _fh.setFormatter(logging.Formatter(
+            "%(asctime)s  [%(levelname)s]  %(message)s"))
+        logging.getLogger().addHandler(_fh)
+        log.info("logging to file: %s", log_file)
 
     torch.manual_seed(seed)
 
@@ -121,6 +135,32 @@ def train(
     )
     actor.start()
 
+    # Auto-launch the live web HUD if we're running with a visible
+    # Dolphin (gfx_backend != "Null"). The server hosts a single-page
+    # dashboard on http://localhost:<port> that the user (or OBS
+    # Browser Source) can view. Headless FFW training
+    # (gfx_backend="Null") skips it.
+    import os as _os
+    import subprocess as _sp
+    import sys as _sys
+    hud_proc = None
+    if gfx_backend != "Null" and log_file is not None:
+        try:
+            hud_proc = _sp.Popen(
+                [_sys.executable, "-m", "rlvr.eval.training_web.server",
+                 "--log", str(log_file), "--port", "8765"],
+                env={**_os.environ,
+                     "DISPLAY": _os.environ.get("DISPLAY", ":0")},
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            log.info("HUD web server launched (pid=%d). "
+                     "Open http://localhost:8765 — log=%s",
+                     hud_proc.pid, log_file)
+        except Exception as e:
+            log.warning("could not launch HUD: %s", e)
+    elif gfx_backend != "Null":
+        log.info("HUD skipped — pass --log-file <path> to enable.")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr)
     ppo_cfg = OnlinePPOConfig(clip_eps=clip_eps, kl_beta=kl_beta)
 
@@ -157,7 +197,8 @@ def train(
                 continue
 
             t_ppo = time.time()
-            metrics = ppo_update(model, valid, optimizer, ppo_cfg, device=device)
+            metrics = ppo_update(model, valid, optimizer, ppo_cfg,
+                                 device=device, ref_model=ref_model)
             t_ppo = time.time() - t_ppo
 
             log.info(
@@ -188,6 +229,15 @@ def train(
                 log.info("saved %s", ck)
     finally:
         actor.stop()
+        if hud_proc is not None:
+            try:
+                hud_proc.terminate()
+                hud_proc.wait(timeout=2)
+            except Exception:
+                try:
+                    hud_proc.kill()
+                except Exception:
+                    pass
         if wandb_run is not None:
             wandb_run.finish()
 
@@ -251,6 +301,9 @@ def main():
                     help="Sampling temperature for the opponent's policy. "
                          "1.0 mirrors the trainee.")
     ap.add_argument("--replay-dir", type=Path, default=None)
+    ap.add_argument("--log-file", type=Path, default=None,
+                    help="Tee Python logging to this file (in addition to "
+                         "stdout/stderr). Required for auto-HUD launch.")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
@@ -275,6 +328,7 @@ def main():
         opponent_data_dir=args.opponent_data_dir,
         opponent_temperature=args.opponent_temperature,
         replay_dir=args.replay_dir,
+        log_file=args.log_file,
         use_wandb=args.wandb, seed=args.seed,
     )
 

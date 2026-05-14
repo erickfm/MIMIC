@@ -45,7 +45,8 @@ GRABBED_ACTION = 223
 
 
 def _ps(port: int, *, action: int = NEUTRAL_ACTION, percent: float = 0.0,
-        stock: int = 4, hitstun: float = 0.0) -> PlayerState:
+        stock: int = 4, hitstun: float = 0.0,
+        action_frame: float = 1.0) -> PlayerState:
     """Make a minimal PlayerState with just the fields the task reads."""
     return PlayerState(
         character=1,  # Fox
@@ -62,6 +63,7 @@ def _ps(port: int, *, action: int = NEUTRAL_ACTION, percent: float = 0.0,
         on_ground=True, off_stage=False, facing=True,
         invulnerable=False, moonwalkwarning=False,
         action=action,
+        action_frame=action_frame,
         l_cancel=0,
         controller=ControllerInput.neutral(),
     )
@@ -84,6 +86,15 @@ def _history(frames):
 
 def _self_neutral(percent: float = 0.0, stock: int = 4) -> PlayerState:
     return _ps(port=1, action=NEUTRAL_ACTION, percent=percent, stock=stock)
+
+
+def _self_attack(action: int, percent: float = 0.0, stock: int = 4,
+                  action_frame: float = 1.0) -> PlayerState:
+    """Self in an attack animation. Tests use distinct `action` values
+    to simulate the bot performing different moves between hits, which
+    drives the move counter in the task."""
+    return _ps(port=1, action=action, percent=percent, stock=stock,
+               action_frame=action_frame)
 
 
 def _opp_neutral(percent: float = 0.0, stock: int = 4) -> PlayerState:
@@ -126,16 +137,30 @@ def test_should_start_fires_on_grab_entry():
     assert task.should_start(history) is True
 
 
-def test_should_start_fires_on_hitstun_only():
-    """Even if action is non-damage, hitstun_frames_left > 0 counts."""
+def test_should_start_fires_on_hitstun_with_damage():
+    """Hitstun + percent increase = legitimate hit, fires."""
     task = ComboExtendOnlineTask(self_port=1)
     history = _history([
         _gs(_self_neutral(), _opp_neutral(percent=0, stock=4)),
-        # action=NEUTRAL but hitstun > 0 → punish state.
+        # action=NEUTRAL but hitstun > 0 AND percent went up = real hit.
+        _gs(_self_neutral(),
+            _ps(port=2, action=NEUTRAL_ACTION, percent=8, hitstun=5.0)),
+    ])
+    assert task.should_start(history) is True
+
+
+def test_should_not_start_on_hitstun_without_damage():
+    """Damage-or-grab safeguard: even if opp enters a punish state
+    (e.g. hitstun bitflag set spuriously), if NO damage was dealt and
+    opp wasn't grabbed, don't open an episode. This filters shield
+    hits and any library-level hitstun-flag glitches."""
+    task = ComboExtendOnlineTask(self_port=1)
+    history = _history([
+        _gs(_self_neutral(), _opp_neutral(percent=0, stock=4)),
         _gs(_self_neutral(),
             _ps(port=2, action=NEUTRAL_ACTION, percent=0, hitstun=5.0)),
     ])
-    assert task.should_start(history) is True
+    assert task.should_start(history) is False
 
 
 def test_should_not_start_on_sustained_neutral():
@@ -233,70 +258,154 @@ def test_should_end_on_stock_loss():
 # --- compute_outcome tests -----------------------------------------------
 
 def test_outcome_damage_combo():
-    """30% damage dealt → reward = 30/80 ≈ 0.375."""
+    """Multi-MOVE combo dealing 30% damage → reward = 30/80 ≈ 0.375.
+    Uses distinct self.action between hits so the move counter
+    advances correctly (slippistats-style)."""
     task = ComboExtendOnlineTask(self_port=1)
-    frames = [
-        _gs(_self_neutral(), _opp_damaged(percent=20)),
-        _gs(_self_neutral(), _opp_neutral(percent=50)),
-    ]
-    history = _history(frames)
-    out = task.compute_outcome(history, episode_start_idx=0)
+    # Pre-hit neutral, then enter punish at 20%.
+    history = _history([_gs(_self_neutral(), _opp_neutral(percent=20))])
+    # Hit 1: bot uses action 100 (e.g., upsmash); opp goes 20 → 25.
+    history.append(_gs(_self_attack(100), _opp_damaged(percent=25)))
+    assert task.should_start(history) is True
+    episode_start_idx = len(history) - 1
+    # Hit 2: bot switches to action 101 (e.g., upair); opp at 35%.
+    history.append(_gs(_self_attack(101), _opp_damaged(percent=35)))
+    task.should_end(history, episode_start_idx)
+    # Hit 3: action 102; opp at 50%.
+    history.append(_gs(_self_attack(102), _opp_damaged(percent=50)))
+    task.should_end(history, episode_start_idx)
+    out = task.compute_outcome(history, episode_start_idx)
     assert out.terminal_reward == pytest.approx(30.0 / MAX_DAMAGE_REWARD)
     assert out.metadata["result"] == "combo"
     assert out.metadata["damage"] == pytest.approx(30.0)
+    assert out.metadata["n_moves"] >= 2
+
+
+def test_outcome_single_hit_zero():
+    """A single-MOVE punish (30% upsmash, no followup) — not a combo
+    by our definition. n_moves == 1 → 0 reward, classified single_hit.
+    This is the load-bearing semantic: 'extension' requires ≥2 moves."""
+    task = ComboExtendOnlineTask(self_port=1)
+    history = _history([_gs(_self_neutral(), _opp_neutral(percent=20))])
+    history.append(_gs(_self_attack(100), _opp_damaged(percent=50)))
+    assert task.should_start(history) is True
+    episode_start_idx = len(history) - 1
+    # Opp recovers, no second hit (bot stays in same action).
+    for _ in range(COMBO_END_GAP + 2):
+        history.append(_gs(_self_attack(100), _opp_neutral(percent=50)))
+        task.should_end(history, episode_start_idx)
+    out = task.compute_outcome(history, episode_start_idx)
+    assert out.terminal_reward == 0.0
+    assert out.metadata["result"] == "single_hit"
+    assert out.metadata["n_moves"] == 1
+
+
+def test_outcome_multihit_same_move_is_single_hit():
+    """Slippistats-style: a single multi-hit move (e.g., Fox dair
+    drill) where the bot stays in the SAME action_state across many
+    percent increases counts as ONE move → single_hit / 0 reward.
+    This is the dair-spam reward-hack guard."""
+    task = ComboExtendOnlineTask(self_port=1)
+    DAIR_ACTION = 67  # any non-DAMAGE action, treated as 'one move'
+    history = _history([_gs(_self_neutral(), _opp_neutral(percent=0))])
+    # Drill: bot stays in same action while opp percent ticks up.
+    history.append(_gs(_self_attack(DAIR_ACTION, action_frame=5),
+                       _opp_damaged(percent=2)))
+    assert task.should_start(history) is True
+    episode_start_idx = len(history) - 1
+    for i in range(2, 8):  # 6 more drill hits
+        history.append(_gs(_self_attack(DAIR_ACTION, action_frame=5 + i),
+                           _opp_damaged(percent=2 * i)))
+        task.should_end(history, episode_start_idx)
+    out = task.compute_outcome(history, episode_start_idx)
+    # Despite 7 percent increases, the bot was in ONE action state →
+    # one move → single_hit, 0 reward.
+    assert out.terminal_reward == 0.0
+    assert out.metadata["result"] == "single_hit"
+    assert out.metadata["n_moves"] == 1
 
 
 def test_outcome_sub_threshold_zero():
-    """< MIN_DAMAGE_REWARD damage → 0 (no signal for tap-hits)."""
+    """Multi-move but total damage < MIN_DAMAGE_REWARD → sub_threshold."""
     task = ComboExtendOnlineTask(self_port=1)
-    frames = [
-        _gs(_self_neutral(), _opp_damaged(percent=20)),
-        _gs(_self_neutral(), _opp_neutral(percent=22)),  # only 2% damage
-    ]
-    history = _history(frames)
-    out = task.compute_outcome(history, episode_start_idx=0)
+    history = _history([_gs(_self_neutral(), _opp_neutral(percent=20))])
+    history.append(_gs(_self_attack(100), _opp_damaged(percent=21)))
+    assert task.should_start(history) is True
+    episode_start_idx = len(history) - 1
+    history.append(_gs(_self_attack(101), _opp_damaged(percent=22)))
+    task.should_end(history, episode_start_idx)
+    history.append(_gs(_self_attack(102), _opp_damaged(percent=23)))
+    task.should_end(history, episode_start_idx)
+    out = task.compute_outcome(history, episode_start_idx)
     assert out.terminal_reward == 0.0
     assert out.metadata["result"] == "sub_threshold"
 
 
-def test_outcome_stock_taken_kill_confirm():
-    """Opp lost a stock → STOCK_TAKEN_REWARD (kill confirm)."""
+def test_outcome_combo_kill_uses_peak_percent():
+    """A combo that ends in a stock loss is scored on peak damage
+    delivered, not on a flat stock-taken bonus. The peak is tracked
+    by should_end; we drive it here via the state machine."""
     task = ComboExtendOnlineTask(self_port=1)
-    frames = [
-        _gs(_self_neutral(), _opp_damaged(percent=80, stock=4)),
-        # Stock decreased mid-combo. Percent reset on respawn (could
-        # be 0 here in real data; doesn't matter, we check stock).
-        _gs(_self_neutral(), _opp_neutral(percent=0, stock=3)),
-    ]
-    history = _history(frames)
-    out = task.compute_outcome(history, episode_start_idx=0)
-    assert out.terminal_reward == STOCK_TAKEN_REWARD
-    assert out.metadata["result"] == "stock_taken"
-    assert out.metadata["stocks_taken"] == 1
+    history = _history([_gs(_self_neutral(), _opp_neutral(percent=80, stock=4))])
+    history.append(_gs(_self_attack(100), _opp_damaged(percent=90, stock=4)))
+    assert task.should_start(history) is True
+    episode_start_idx = len(history) - 1
+
+    # Drive the combo up to 130% with distinct moves.
+    for i, pct in enumerate((100, 110, 120, 130)):
+        history.append(_gs(_self_attack(101 + i), _opp_damaged(percent=pct, stock=4)))
+        assert task.should_end(history, episode_start_idx) is False
+
+    # Opp dies, stock decrements → episode ends immediately.
+    history.append(_gs(_self_attack(105), _opp_neutral(percent=0, stock=3)))
+    assert task.should_end(history, episode_start_idx) is True
+
+    out = task.compute_outcome(history, episode_start_idx)
+    # Peak was 130, start was 80 → damage = 50 → reward = 50/80
+    assert out.terminal_reward == pytest.approx(50.0 / MAX_DAMAGE_REWARD)
+    assert out.metadata["result"] == "combo_kill"
+    assert out.metadata["stock_was_taken"] is True
+
+
+def test_outcome_pure_sd_no_episode_opens():
+    """Opp self-destructs without us hitting them. With the
+    damage-or-grab safeguard, no episode opens in the first place:
+    opp entering DAMAGE state with zero percent change isn't a
+    legitimate trigger."""
+    task = ComboExtendOnlineTask(self_port=1)
+    history = _history([_gs(_self_neutral(), _opp_neutral(percent=0, stock=4))])
+    history.append(_gs(_self_neutral(), _opp_damaged(percent=0, stock=4)))
+    # Crucially: should_start returns False because percent didn't
+    # increase and opp wasn't grabbed.
+    assert task.should_start(history) is False
 
 
 def test_outcome_clipped_at_max():
-    """100% damage dealt should clip to MAX_DAMAGE_REWARD/MAX = 1.0."""
+    """120% damage from a multi-move combo clips to MAX/MAX = 1.0."""
     task = ComboExtendOnlineTask(self_port=1)
-    frames = [
-        _gs(_self_neutral(), _opp_damaged(percent=20)),
-        _gs(_self_neutral(), _opp_neutral(percent=140)),  # 120% dealt
-    ]
-    history = _history(frames)
-    out = task.compute_outcome(history, episode_start_idx=0)
+    history = _history([_gs(_self_neutral(), _opp_neutral(percent=20))])
+    history.append(_gs(_self_attack(100), _opp_damaged(percent=70)))
+    assert task.should_start(history) is True
+    episode_start_idx = len(history) - 1
+    history.append(_gs(_self_attack(101), _opp_damaged(percent=110)))
+    task.should_end(history, episode_start_idx)
+    history.append(_gs(_self_attack(102), _opp_damaged(percent=140)))
+    task.should_end(history, episode_start_idx)
+    out = task.compute_outcome(history, episode_start_idx)
     assert out.terminal_reward == pytest.approx(1.0)
 
 
 def test_outcome_threshold_boundary():
-    """Exactly MIN_DAMAGE_REWARD damage rewards (>= MIN, not > MIN)."""
+    """Exactly MIN_DAMAGE_REWARD damage across 2+ moves rewards
+    damage/MAX (boundary is inclusive)."""
     task = ComboExtendOnlineTask(self_port=1)
-    frames = [
-        _gs(_self_neutral(), _opp_damaged(percent=20)),
-        _gs(_self_neutral(), _opp_neutral(percent=20 + MIN_DAMAGE_REWARD)),
-    ]
-    history = _history(frames)
-    out = task.compute_outcome(history, episode_start_idx=0)
-    # At exactly threshold, the >= check should fire and we reward damage/MAX.
+    history = _history([_gs(_self_neutral(), _opp_neutral(percent=20))])
+    history.append(_gs(_self_attack(100), _opp_damaged(percent=22)))
+    assert task.should_start(history) is True
+    episode_start_idx = len(history) - 1
+    history.append(_gs(_self_attack(101), _opp_damaged(percent=20 + MIN_DAMAGE_REWARD)))
+    task.should_end(history, episode_start_idx)
+    out = task.compute_outcome(history, episode_start_idx)
     assert out.terminal_reward == pytest.approx(MIN_DAMAGE_REWARD / MAX_DAMAGE_REWARD)
 
 
@@ -317,28 +426,29 @@ def test_full_combo_lifecycle():
     task = ComboExtendOnlineTask(self_port=1)
     history = _history([_gs(_self_neutral(), _opp_neutral(percent=0))])
     # Step 1: enter damage (should_start fires).
-    history.append(_gs(_self_neutral(), _opp_damaged(percent=10)))
+    history.append(_gs(_self_attack(100), _opp_damaged(percent=10)))
     assert task.should_start(history) is True
     episode_start_idx = len(history) - 1
 
-    # Step 2-10: sustained punish, percent climbs. should_end is
-    # called every frame (mirrors the actor's per-frame call).
+    # Step 2-10: sustained punish, percent climbs, distinct moves.
     for i in range(2, 11):
-        history.append(_gs(_self_neutral(), _opp_damaged(percent=10 + i * 3)))
+        history.append(_gs(_self_attack(100 + i), _opp_damaged(percent=10 + i * 3)))
         assert task.should_end(history, episode_start_idx) is False
 
-    # Step 11-onward: opp recovers. Need to call should_end on EACH
-    # frame to tick the frame counter and detect the K-frame gap.
-    final_pct = 10 + 10 * 3  # last damaged frame percent
+    # Step 11-onward: opp recovers (bot stays in last action; no new
+    # damage so no new moves register).
+    final_pct = 10 + 10 * 3
     ended = False
     for i in range(11, 11 + COMBO_END_GAP + 2):
-        history.append(_gs(_self_neutral(), _opp_neutral(percent=final_pct)))
+        history.append(_gs(_self_attack(110), _opp_neutral(percent=final_pct)))
         if task.should_end(history, episode_start_idx):
             ended = True
             break
     assert ended is True
 
-    # Outcome: damage = final_pct - 10 = 30%. Reward = 30/80.
+    # Outcome: start_percent is taken from the *prev* frame (pre-
+    # punish) so the initial hit's damage counts. prev.percent = 0,
+    # end.percent = 40. Damage = 40. Reward = 40/80 = 0.5.
     out = task.compute_outcome(history, episode_start_idx)
-    assert out.terminal_reward == pytest.approx(30.0 / MAX_DAMAGE_REWARD)
+    assert out.terminal_reward == pytest.approx(40.0 / MAX_DAMAGE_REWARD)
     assert out.metadata["result"] == "combo"

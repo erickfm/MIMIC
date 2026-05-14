@@ -87,6 +87,14 @@ class PlayerState:
     # Action state (libmelee Action enum value)
     action: int
 
+    # State age (libmelee `action_frame`): how many frames the
+    # character has been in the current action_state. Resets each
+    # time action_state transitions. Used by combo detection to
+    # distinguish "same move repeated" from "different move" when the
+    # action enum is identical (e.g. jab1 → jab1 → jab1, where the
+    # state_age resets each repeat).
+    action_frame: float
+
     # L-cancel label from the game engine.
     # 0 = not an L-cancel-eligible landing on this frame,
     # 1 = L-cancel succeeded, 2 = L-cancel failed.

@@ -82,6 +82,7 @@ def ppo_update(
     optimizer,
     cfg: OnlinePPOConfig = OnlinePPOConfig(),
     device: str = "cuda",
+    ref_model=None,
 ) -> Dict[str, float]:
     """Run one PPO epoch over the collected episodes.
 
@@ -111,9 +112,17 @@ def ppo_update(
     logprobs_old = torch.stack(
         [fr.logprob_old for fr in all_frames], dim=0
     ).to(device).float().detach()                                # (N,)
-    logprobs_ref = torch.stack(
-        [fr.logprob_ref for fr in all_frames], dim=0
-    ).to(device).float().detach()                                # (N,)
+    # logprob_ref is computed below per-minibatch from ref_model if
+    # provided (cheaper than running ref_model live during collection,
+    # which would slow each in-game frame). Fall back to the cached
+    # value stored in FrameRecord if no ref_model was passed (legacy
+    # path).
+    if ref_model is None:
+        logprobs_ref_cached = torch.stack(
+            [fr.logprob_ref for fr in all_frames], dim=0
+        ).to(device).float().detach()                            # (N,)
+    else:
+        logprobs_ref_cached = None
     rewards_end = torch.tensor(
         [fr.reward + (ep.terminal_reward if i == len(ep.frames) - 1 else 0.0)
          for ep in episodes
@@ -147,7 +156,14 @@ def ppo_update(
         # Per-chunk PPO objective (bptt cheap since per-chunk).
         adv_chunk = advantages[start:end]
         lp_old_chunk = logprobs_old[start:end]
-        lp_ref_chunk = logprobs_ref[start:end]
+        if ref_model is not None:
+            with torch.no_grad():
+                ref_logits = ref_model(batch)
+            lp_ref_chunk = _logprob_at_indices(
+                ref_logits, sampled_indices[start:end]
+            ).detach()
+        else:
+            lp_ref_chunk = logprobs_ref_cached[start:end]
 
         log_ratio = lp_theta - lp_old_chunk
         ratio = torch.exp(log_ratio)

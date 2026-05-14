@@ -222,6 +222,8 @@ replays_smoke_lcancel_flush/
 replays_smoke_lcancel_retry/
 replays_winrate/
 replays_winrate_*/
+replays_bvb/
+replays_h2h_smoke/
 checkpoints/_smoke/
 logs/
 .claude/

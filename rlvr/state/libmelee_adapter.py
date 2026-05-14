@@ -74,6 +74,7 @@ def _ps_from_libmelee(ps_lm, port: int) -> PlayerState:
         invulnerable=bool(ps_lm.invulnerable),
         moonwalkwarning=bool(ps_lm.moonwalkwarning),
         action=int(ps_lm.action.value),
+        action_frame=float(getattr(ps_lm, "action_frame", 0.0) or 0.0),
         # libmelee does not expose post.l_cancel — the game-engine label
         # lives only in the raw .slp event stream. This adapter leaves
         # it at 0; peppi is the canonical source for l_cancel labels.

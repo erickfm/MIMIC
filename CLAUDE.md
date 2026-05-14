@@ -545,6 +545,64 @@ checks), `tools/validate_checkpoint.py` (per-head CE on val),
 `target[i] = buttons[i+1]` alignment); `tools/shard_and_upload_ranked.py`
 (ranked .slp archive → HF tarballs); `tools/split_by_character.py`.
 
+## Porting slippistats logic (live-streaming variants)
+
+Several VR tasks under `rlvr/online/tasks/` need streaming-state-
+machine versions of logic that already exists in the slippistats
+library (`~/.local/lib/python3.12/site-packages/slippistats/`).
+slippistats is **batch on parsed .slp**; our actor needs
+**streaming on live `libmelee.PlayerState`**. Same predicates,
+different data shape + interface.
+
+The combo-extension task port (`rlvr/online/tasks/combo_extend_online.py`)
+went through ~6 rounds of "I caught another missed case" with the
+user. Each round caught a real bug. Pattern: the obvious predicates
+get ported on the first pass, the specialized ones get missed.
+
+**Default to paranoid faithfulness when porting** any slippistats
+logic. Concretely:
+
+1. Read the WHOLE function in `slippistats/stats/*` you're
+   porting (start to end), not just the parts that look relevant.
+2. Enumerate every conditional branch (`if X: ...`) and check
+   that the port has an equivalent — including the seemingly
+   incidental ones like `player_did_lose_stock` mid-combo.
+3. Enumerate every state predicate referenced (`is_X(...)`) and
+   verify the range constants match libmelee Action enum values
+   (don't rely on memory or assumed ranges).
+4. Compare start / keep-alive / termination sets line-by-line.
+5. Don't add safety nets / hard caps / extra filters that
+   slippistats DOESN'T have unless the reason is documented. They
+   handled the edge cases we'd think to add.
+
+Specific gotchas already found in the combo_extend port (all are
+slippistats behaviors a naive port misses):
+
+- **THROWN range (239-243)** is separate from CAPTURE (223-232).
+  Throws are NOT in the "in opp's grab" set on their own — a
+  grab→throw combo gets fragmented without explicit THROWN.
+- **DYING (0-10)** must be in the keep-alive set so the kill blow
+  stays in-episode long enough for the stock decrement to register
+  before the K-gap closes.
+- **`player_did_lose_stock`** (bot dies mid-combo) is a termination
+  condition alongside opp-died and K-gap.
+- **Command grabs (266-304, 327-338)** are separate from regular
+  grabs and must be in start + keep-alive predicates.
+- **`hitlag_left > 0`** is a keep-alive condition independent of
+  `hitstun_frames_left`. Both are populated by libmelee.
+- **`COMBO_LENIENCY = 45 frames`**, not 20 or 30. Tech-chase /
+  re-grab / wait-DI sequences need the full 45.
+- **`action_changed_since_hit`** uses the BOT's action state, not
+  opp's. Move counting requires tracking self.action + action_frame.
+- **No frame-count hard cap** in slippistats. The three termination
+  conditions (opp died / K-gap / bot died) are sufficient.
+
+When porting new slippistats logic (edgeguard, shield-escape,
+pressure, etc.), file a research note specifically calling out
+what was ported and what was intentionally skipped, with file
+references to the slippistats functions used. Past notes:
+`docs/research-notes-2026-05-14b.md`.
+
 ## Pitfalls for agents
 
 1. **`tools/run_hal_model.py` loads actual HAL weights.** MIMIC
