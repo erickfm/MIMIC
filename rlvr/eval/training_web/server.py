@@ -287,6 +287,13 @@ class LogTailer(threading.Thread):
             start_pct = float(m.group("sp") or "0")
         except ValueError:
             start_pct = 0.0
+        try:
+            close_frame = int(m.group("f"))
+        except (TypeError, ValueError):
+            close_frame = 0
+        # Combo duration = frames the window was open / 60 fps.
+        duration_frames = max(0, close_frame - self.state.window_open_frame)
+        duration_sec = duration_frames / 60.0
         ev = {
             "type": "window_close",
             "result": result,
@@ -294,6 +301,7 @@ class LogTailer(threading.Thread):
             "damage": damage,
             "start_pct": start_pct,
             "close_time": time.time(),
+            "duration_sec": duration_sec,
         }
         self.state.window_open = False
         self.state.last_close_time = ev["close_time"]
@@ -310,6 +318,7 @@ class LogTailer(threading.Thread):
                 "reward": reward,
                 "damage": damage,
                 "start_pct": start_pct,
+                "duration_sec": duration_sec,
             })
             self.state.recent_events = self.state.recent_events[:5]
         elif result == "single_hit":
@@ -660,6 +669,7 @@ function applyEvent(ev) {
         t: ev.close_time,
         kind: ev.result === 'combo_kill' ? 'ko' : 'combo',
         reward: ev.reward, damage: ev.damage, start_pct: ev.start_pct,
+        duration_sec: ev.duration_sec || 0,
       });
       state.recent_events = state.recent_events.slice(0, 5);
       // Trigger the floating reward badge animation.
@@ -800,17 +810,17 @@ function render() {
   } else {
     let html = '';
     for (const ev of state.recent_events) {
-      const age = Math.max(0, now - ev.t);
       const color = viridis(Math.min(1, ev.reward));
       const width = (Math.max(0, Math.min(1, ev.reward)) * 100).toFixed(0);
       const desc = ev.kind === 'ko'
         ? `KO from ${ev.start_pct.toFixed(0)}%`
         : `combo · ${ev.damage.toFixed(0)}% damage`;
+      const dur = (ev.duration_sec || 0).toFixed(1);
       html += `<div class="ev-row">
         <span class="rew mono">+${ev.reward.toFixed(2)}</span>
         <div class="ev-bar"><div style="width:${width}%; background:${color};"></div></div>
         <div class="ev-desc">${desc}</div>
-        <span class="ev-age mono">${age.toFixed(0)}s</span>
+        <span class="ev-age mono">${dur}s</span>
       </div>`;
     }
     list.innerHTML = html;

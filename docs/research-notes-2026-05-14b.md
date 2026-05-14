@@ -291,6 +291,17 @@ Pick this up after we see a clear positive head-to-head result from
 vanilla PPO. If the result is borderline, GRPO's variance reduction
 is the natural next move.
 
+## HUD micro-changes after the initial ship
+
+- Windows + combos counters added to the footer
+  (`windows X · combos Y`) — session totals so the user can see how
+  many opportunities the bot is opening vs how many it actually
+  closes successfully.
+- Recent-extensions list now shows each combo's **duration in
+  seconds** (close_frame - open_frame, /60) instead of seconds-
+  since-it-happened. "How long was the combo?" is more useful at
+  a glance than "how recently did it close?".
+
 ## Files touched today
 
 - `rlvr/online/tasks/combo_extend_online.py` — task rebuild
