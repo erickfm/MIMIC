@@ -1,0 +1,262 @@
+{
+  "ckpt": "hf_checkpoints/fox/model.pt",
+  "data_dir": "hf_checkpoints/fox",
+  "n_matches": 30,
+  "win_rate": 1.0,
+  "win": 30,
+  "loss": 0,
+  "draw": 0,
+  "avg_frames": 8237.066666666668,
+  "wall_seconds_total": 1059.5,
+  "config": {
+    "bot_character": "FOX",
+    "cpu_character": "FOX",
+    "cpu_level": 9,
+    "stage": "FINAL_DESTINATION",
+    "temperature": 1.0,
+    "use_exi_inputs": true,
+    "enable_ffw": true
+  },
+  "matches": [
+    {
+      "match_idx": 1,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 10330,
+      "wall_seconds": 43.2
+    },
+    {
+      "match_idx": 2,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 6391,
+      "wall_seconds": 27.5
+    },
+    {
+      "match_idx": 3,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 9939,
+      "wall_seconds": 41.0
+    },
+    {
+      "match_idx": 4,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 7100,
+      "wall_seconds": 28.0
+    },
+    {
+      "match_idx": 5,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 7412,
+      "wall_seconds": 32.0
+    },
+    {
+      "match_idx": 6,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 8666,
+      "wall_seconds": 36.5
+    },
+    {
+      "match_idx": 7,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 7696,
+      "wall_seconds": 34.9
+    },
+    {
+      "match_idx": 8,
+      "result": "win",
+      "bot_stocks": 1,
+      "opp_stocks": 0,
+      "frames": 11078,
+      "wall_seconds": 43.8
+    },
+    {
+      "match_idx": 9,
+      "result": "win",
+      "bot_stocks": 4,
+      "opp_stocks": 0,
+      "frames": 6542,
+      "wall_seconds": 26.6
+    },
+    {
+      "match_idx": 10,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 7014,
+      "wall_seconds": 29.3
+    },
+    {
+      "match_idx": 11,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 8287,
+      "wall_seconds": 36.0
+    },
+    {
+      "match_idx": 12,
+      "result": "win",
+      "bot_stocks": 1,
+      "opp_stocks": 0,
+      "frames": 9488,
+      "wall_seconds": 39.7
+    },
+    {
+      "match_idx": 13,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 7690,
+      "wall_seconds": 33.2
+    },
+    {
+      "match_idx": 14,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 6766,
+      "wall_seconds": 30.1
+    },
+    {
+      "match_idx": 15,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 7454,
+      "wall_seconds": 33.6
+    },
+    {
+      "match_idx": 16,
+      "result": "win",
+      "bot_stocks": 4,
+      "opp_stocks": 0,
+      "frames": 8127,
+      "wall_seconds": 37.3
+    },
+    {
+      "match_idx": 17,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 7857,
+      "wall_seconds": 34.5
+    },
+    {
+      "match_idx": 18,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 6685,
+      "wall_seconds": 28.3
+    },
+    {
+      "match_idx": 19,
+      "result": "win",
+      "bot_stocks": 1,
+      "opp_stocks": 0,
+      "frames": 8666,
+      "wall_seconds": 38.3
+    },
+    {
+      "match_idx": 20,
+      "result": "win",
+      "bot_stocks": 1,
+      "opp_stocks": 0,
+      "frames": 11612,
+      "wall_seconds": 49.5
+    },
+    {
+      "match_idx": 21,
+      "result": "win",
+      "bot_stocks": 4,
+      "opp_stocks": 0,
+      "frames": 8388,
+      "wall_seconds": 35.4
+    },
+    {
+      "match_idx": 22,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 6789,
+      "wall_seconds": 30.5
+    },
+    {
+      "match_idx": 23,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 9187,
+      "wall_seconds": 37.0
+    },
+    {
+      "match_idx": 24,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 9080,
+      "wall_seconds": 37.2
+    },
+    {
+      "match_idx": 25,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 8462,
+      "wall_seconds": 36.2
+    },
+    {
+      "match_idx": 26,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 7972,
+      "wall_seconds": 33.2
+    },
+    {
+      "match_idx": 27,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 7297,
+      "wall_seconds": 30.4
+    },
+    {
+      "match_idx": 28,
+      "result": "win",
+      "bot_stocks": 3,
+      "opp_stocks": 0,
+      "frames": 7449,
+      "wall_seconds": 31.4
+    },
+    {
+      "match_idx": 29,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 10573,
+      "wall_seconds": 44.8
+    },
+    {
+      "match_idx": 30,
+      "result": "win",
+      "bot_stocks": 2,
+      "opp_stocks": 0,
+      "frames": 7115,
+      "wall_seconds": 27.9
+    }
+  ]
+}
