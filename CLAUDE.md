@@ -441,40 +441,6 @@ non-debug runs newer than HF — useful to remind the user "you trained
 X but didn't upload it." The `.pt` itself must come from the GPU box
 (wandb doesn't store checkpoints) or a retrain.
 
-## VR discovery (`value/`)
-
-Offline analysis suite for sourcing Verifiable Reward candidates from
-fox_all_v2 via value-function + matched-pair analysis. Feeds `rlvr/`.
-**Not on any training or inference path.** Full writeup:
-`docs/research-notes-2026-05-13.md`.
-
-Working V(s): `checkpoints/v-fox-baseline-20260512_best.pt` (small
-per-frame MLP, val 0.6005 / 65% acc). The aggregate val_loss is a
-sampling artifact (early-game frames are random-noise predictions,
-late-game are decisive) — not a model ceiling.
-
-Discovery method is **matched-pair**: bin frames by
-`(self_stock_bucket, opp_stock_bucket, self_pct_bucket_charadj,
-opp_pct_bucket_charadj)` using empirical per-character kill percents
-(`value/char_kill_percents.json`). Within a bin, compare high-V to
-low-V frames; per-feature z-Δ is the discovery signal. Engineered
-features (`value/derived_features.py`, slippistats-style combo state
-machine on shard tensors) dominate the ranking.
-
-**Top candidate VRs**: `opp_in_hitstun` / `self_in_punish_state`
-(avoid) / `combo_on_opp_damage` / `combo_on_opp_frames`. Robust
-across per-opp-character audits. Still correlational on human data —
-**not yet validated causally**. Next step is writing each as a
-`rlvr/tasks/<name>.py` verifier and running GRPO against it.
-
-**Two pitfalls when working with shards in this context**:
-- Shard trajectories truncate before the loser's final death. Naive
-  `self_stock_last > opp_stock_last` mis-labels ~50% of games as
-  draws. Use `value/dataset.py:compute_game_outcomes` (stock-drop
-  recency tiebreak).
-- Percent uses the `normalize` transform (min=0, max=343.4), not
-  `standardize`. Invert as `raw = (normalized + 1) * 171.7`.
-
 ## File map
 
 ### Core
@@ -484,19 +450,6 @@ across per-opp-character audits. Still correlational on human data —
 - `mimic/frame_encoder.py` — MimicFlatEncoder; honors `mimic_minimal_features` (slices the shard numeric tensor to 9 cols in HAL order) vs full (13 numeric + 5 flags). Also hosts the optional `use_input_gate` L1 diagnostic.
 - `mimic/features.py` — feature schema + normalization. `numeric_state(full=True)` returns 13 cols.
 - `eval.py`, `inference.py` — legacy. Modern paths use `tools/play_vs_cpu.py` / `tools/play_netplay.py`.
-
-### VR discovery (`value/`)
-
-Offline analysis package — see § "VR discovery (`value/`)" above and
-`docs/research-notes-2026-05-13.md` for the full writeup. Headline files:
-
-- `value/model.py` — `MarkovValueModel` (working V(s)) + `WindowedValueModel` (deprecated).
-- `value/dataset.py` — `FoxValueWindowedDataset` + `compute_game_outcomes` (stock-drop-recency labeling).
-- `value/train.py` — V(s) trainer.
-- `value/matched_pair_charadj.py` — main discovery script (char-adjusted percent bucketing + optional `--opp-char-filter` for per-matchup audits).
-- `value/derived_features.py` — slippistats-style state-machine features computed on shard tensors (37 features).
-- `value/char_kill_percents.py` + `value/char_kill_percents.json` — empirical per-character kill percent.
-- `value/analyze.py`, `value/analyze_ckpt.py` — sklearn baselines + per-position breakdowns + calibration.
 
 ### Tools
 
