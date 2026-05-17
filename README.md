@@ -79,25 +79,26 @@ separate `wandb login` / `huggingface-cli login` step.
 ### Against a CPU locally
 
 ```bash
-python3 tools/play_vs_cpu.py \
-  --checkpoint checkpoints/falco-20260412-relpos-28k.pt \
+python3 tools/play.py \
+  --ckpt checkpoints/falco-20260412-relpos-28k.pt \
+  --opponent cpu:9 \
   --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \
   --iso-path ./melee.iso \
   --data-dir data/falco_v2 \
-  --character FALCO --cpu-character FALCO --cpu-level 9 \
+  --character FALCO --opponent-character FALCO \
   --stage FINAL_DESTINATION
 ```
 
 ### Bot vs bot (watchable ditto)
 
 ```bash
-python3 tools/head_to_head.py \
-  --p1-checkpoint checkpoints/falco-20260412-relpos-28k.pt \
-  --p2-checkpoint checkpoints/falco-20260412-relpos-28k.pt \
+python3 tools/play.py \
+  --ckpt checkpoints/falco-20260412-relpos-28k.pt \
+  --opponent checkpoints/falco-20260412-relpos-28k.pt \
   --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \
   --iso-path ./melee.iso \
   --data-dir data/falco_v2 \
-  --p1-character FALCO --p2-character FALCO \
+  --character FALCO --opponent-character FALCO \
   --stage FINAL_DESTINATION
 ```
 
@@ -227,8 +228,7 @@ state encoding the answer. Train with `--reaction-delay 0` on v2 shards.
 │   ├── features.py                   # Feature encoding, 7-class collapse
 │   └── dataset.py                    # Shard streaming
 ├── tools/
-│   ├── play_vs_cpu.py     # Bot vs CPU (local)
-│   ├── head_to_head.py               # Bot vs bot (local)
+│   ├── play.py                       # Bot vs CPU / bot vs bot (local)
 │   ├── play_netplay.py               # Bot vs human (Slippi netplay)
 │   ├── discord_bot.py                # Discord queue/frontend
 │   ├── inference_utils.py            # Shared decode + frame building

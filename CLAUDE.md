@@ -256,9 +256,9 @@ running inference.
 
 ### Running MIMIC checkpoints
 
-Use `tools/play_vs_cpu.py` for bot-vs-CPU matches,
-`tools/play_netplay.py` for Slippi Online Direct Connect, and
-`tools/head_to_head.py` for bot-vs-bot (watchable ditto). All three
+Use `tools/play.py` for bot-vs-CPU and bot-vs-bot matches (one
+Dolphin, N back-to-back matches, optional win-rate JSON report) and
+`tools/play_netplay.py` for Slippi Online Direct Connect. Both
 import from `tools/inference_utils.py`, which holds the shared decode
 pipeline (`load_mimic_model`, `load_inference_context`, `build_frame`,
 `build_frame_p2`, `PlayerState`, `decode_and_press`). Any new
@@ -449,13 +449,12 @@ X but didn't upload it." The `.pt` itself must come from the GPU box
 - `mimic/dataset.py` — StreamingMeleeDataset (per-game + pre-windowed shards).
 - `mimic/frame_encoder.py` — MimicFlatEncoder; honors `mimic_minimal_features` (slices the shard numeric tensor to 9 cols in HAL order) vs full (13 numeric + 5 flags). Also hosts the optional `use_input_gate` L1 diagnostic.
 - `mimic/features.py` — feature schema + normalization. `numeric_state(full=True)` returns 13 cols.
-- `eval.py`, `inference.py` — legacy. Modern paths use `tools/play_vs_cpu.py` / `tools/play_netplay.py`.
+- `eval.py`, `inference.py` — legacy. Modern paths use `tools/play.py` / `tools/play_netplay.py`.
 
 ### Tools
 
 **Inference (local):**
-- `tools/play_vs_cpu.py` — Runs MIMIC checkpoints vs CPU in Dolphin. Uses shared `inference_utils.decode_and_press`.
-- `tools/head_to_head.py` — Two checkpoints against each other in one Dolphin instance (watchable ditto).
+- `tools/play.py` — Run a MIMIC checkpoint vs a CPU (`--opponent cpu:9`) or a second checkpoint (`--opponent <ckpt>`) in one Dolphin instance: N back-to-back matches, `--n-matches 1` for a watchable game, optional win-rate JSON via `--out`. Uses shared `inference_utils.decode_and_press`.
 - `tools/run_hal_model.py` — Reimplementation of HAL's 5-class inference. Loads HAL checkpoints. Structurally can't wavedash (no TRIG class).
 
 **Inference (online, Slippi netplay):**
@@ -559,8 +558,8 @@ references to the slippistats functions used. Past notes:
 ## Pitfalls for agents
 
 1. **`tools/run_hal_model.py` loads actual HAL weights.** MIMIC
-   checkpoints go through `tools/play_vs_cpu.py` / `play_netplay.py`
-   / `head_to_head.py`. `run_hal_model.py` is the
+   checkpoints go through `tools/play.py` / `play_netplay.py`.
+   `run_hal_model.py` is the
    reference-implementation path for Eric Gu's original HAL
    checkpoints and is not used by any MIMIC production code.
 

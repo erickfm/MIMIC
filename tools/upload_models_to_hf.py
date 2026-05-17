@@ -227,12 +227,13 @@ snapshot_download('erickfm/MIMIC', local_dir='./hf_checkpoints')
 Run a character against a level-9 CPU:
 
 ```bash
-python3 tools/play_vs_cpu.py \\
-  --checkpoint hf_checkpoints/falco/model.pt \\
+python3 tools/play.py \\
+  --ckpt hf_checkpoints/falco/model.pt \\
+  --opponent cpu:9 \\
   --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \\
   --iso-path ./melee.iso \\
   --data-dir hf_checkpoints/falco \\
-  --character FALCO --cpu-character FALCO --cpu-level 9 \\
+  --character FALCO --opponent-character FALCO \\
   --stage FINAL_DESTINATION
 ```
 

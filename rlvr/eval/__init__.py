@@ -1,7 +1,6 @@
 # Keep this module lightweight. Sub-modules (especially `runner`) pull
 # in heavy deps (peppi, duckdb via `rlvr.sampler.mined`) that aren't
-# needed for every entry point in this package — e.g.
-# `rlvr.eval.winrate_vs_cpu` only needs libmelee + torch.
+# needed for every entry point in this package.
 __all__ = ["EVAL_SET_VERSION", "build_eval_set", "run_eval"]
 
 
