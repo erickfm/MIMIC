@@ -191,6 +191,53 @@ def test_low_percent_kill_sd_gated_out():
     assert sum(r) == 0.0
 
 
+def test_low_percent_kill_star_ko_dead_frames_transparent():
+    """Star KO at 60%: the opponent is hit, percent then resets to 0 and
+    they sit in a DEAD state for many frames before `stock` decrements.
+    The bonus must still fire — the gate stays 'remembered' (DEAD frames
+    transparent) and the death percent is the streaming peak (60), not a
+    backward scan that would only see the 0-percent DEAD frames. This is
+    the regression test for the stock-decrement-lag bug class."""
+    frames = [gs(ps(1), ps(2, stock=4))]
+    for _ in range(4):
+        frames.append(gs(ps(1), ps(2, stock=4, action=DAMAGE,
+                                    percent=60.0, hitstun=12.0)))
+    # long DEAD stretch — percent already reset to 0 — before stock ticks
+    frames += [gs(ps(1), ps(2, stock=4, action=DYING)) for _ in range(150)]
+    frames.append(gs(ps(1), ps(2, stock=3, action=DYING)))
+    r = run_vr(LowPercentKillVR(self_port=1, bonus=0.5), frames)
+    assert sum(r) == 0.5
+
+
+def test_low_percent_kill_late_fall_gated_out():
+    """Opponent hit at 60%, then a long *alive* fall (no hit reaction)
+    past the alive-frame hit-memory before dying — gates out as a
+    self-destruct, no bonus, even though 60% is below the bucket."""
+    frames = [gs(ps(1), ps(2, stock=4))]
+    for _ in range(4):
+        frames.append(gs(ps(1), ps(2, stock=4, action=DAMAGE,
+                                    percent=60.0, hitstun=12.0)))
+    frames += [gs(ps(1), ps(2, stock=4, percent=60.0)) for _ in range(120)]
+    frames.append(gs(ps(1), ps(2, stock=3, percent=0.0)))
+    r = run_vr(LowPercentKillVR(self_port=1), frames)
+    assert sum(r) == 0.0
+
+
+def test_low_percent_kill_finalize_reconciles_final_kill():
+    """A final opponent death never seen by observe() (the actor stops
+    before the last stock-0 frame) is reconciled by finalize()."""
+    vr = LowPercentKillVR(self_port=1, bonus=0.5)
+    h = history()
+    vr.reset()
+    for fr in [gs(ps(1), ps(2, stock=1)),
+               gs(ps(1), ps(2, stock=1, action=DAMAGE, percent=60.0,
+                            hitstun=12.0))]:
+        h.append(fr)
+        vr.observe(h)
+    h.append(gs(ps(1), ps(2, stock=0, action=DYING)))   # not observed
+    assert vr.finalize(h) == 0.5
+
+
 # --- tech ----------------------------------------------------------------
 def test_tech_punished_vs_clean():
     punished = run_vr(TechVR(self_port=1, penalty=0.15), [
