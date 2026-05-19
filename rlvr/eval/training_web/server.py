@@ -1,14 +1,21 @@
-"""Web-based training HUD. Stdlib HTTP server + SSE; tails the
-training log and streams events to a single self-contained HTML page.
+"""Web-based training HUD for the composite-VR RLVR loop. Stdlib HTTP
+server + SSE; tails the training log and streams events to a single
+self-contained HTML page.
 
 Run alongside training (auto-launched by rlvr/online/loop.py when
 training is viewable):
 
     python3 -m rlvr.eval.training_web.server \
-        --log logs/bvb_comboext.log --port 8765
+        --log logs/rlvr_run.log --port 8765 --max-updates 50
 
 Open http://localhost:8765 in a browser, or add it as an OBS Browser
 Source.
+
+The HUD is VR-suite-centric: it parses the `EVT_EP_VR` JSON event the
+actor emits per match (rlvr/online/dolphin_actor.py) and renders one
+card per VRModule — name, what it rewards, weight, cumulative reward
+contribution, a per-match reward sparkline, and the VR's diagnostic
+counts. The composite reward is attributed back to each VR by name.
 """
 from __future__ import annotations
 
@@ -22,37 +29,31 @@ import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, List
 
 log = logging.getLogger("rlvr.eval.training_web")
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s  [%(levelname)s]  %(message)s")
 
 
-# ---------- Log parsers (same as rlvr/eval/training_hud.py) -----------
+# ---------- Log parsers -----------------------------------------------
+#
+# Three line shapes are consumed:
+#   - `update=N ... kl=K ...`     the per-PPO-update line from loop.py
+#   - `EVT_MATCH_END result=...`  one per finished match (win/loss tally)
+#   - `EVT_EP_VR {json}`          one per match: the per-VR breakdown
+# plus `loading frozen opponent: PATH` for the opponent label.
 
 _RE_UPDATE = re.compile(
     r"update=(?P<u>\d+)\s+collected=(?P<c>\d+)\s+valid=(?P<v>\d+)\s+"
-    r"reward=(?P<r>[\d\.\-]+)\s+kl=(?P<kl>[\d\.\-]+)\s+"
-    r"clip_frac=(?P<cf>[\d\.\-]+)\s+results=(?P<res>\{[^}]*\})"
-)
-_RE_EVENT = re.compile(
-    r"EVT_EP\s+frame=(?P<f>\d+)\s+result=(?P<r>\S+)\s+reward=(?P<rw>[\d\.\-]+)"
-    r"(?:\s+damage=(?P<d>[\d\.\-]*))?"
-    r"(?:\s+start_pct=(?P<sp>[\d\.\-]*))?"
-)
-_RE_OPEN = re.compile(
-    r"EVT_EP_OPEN\s+frame=(?P<f>\d+)\s+start_pct=(?P<sp>[\d\.\-]*)"
-)
-_RE_TICK = re.compile(
-    r"EVT_EP_TICK\s+frame=(?P<f>\d+)\s+opp_pct=(?P<p>[\d\.\-]+)"
+    r"reward=(?P<r>[\d\.\-]+)\s+kl=(?P<kl>[\d\.\-]+)"
 )
 _RE_MATCH_END = re.compile(
     r"EVT_MATCH_END\s+result=(?P<r>\S+)\s+"
     r"trainee_stocks=(?P<ts>\d+)\s+opp_stocks=(?P<os>\d+)"
 )
 _RE_FROZEN = re.compile(r"loading frozen opponent: (\S+)")
+_EVT_VR = "EVT_EP_VR "
 
 
 # ---------- State + broker --------------------------------------------
@@ -60,66 +61,40 @@ _RE_FROZEN = re.compile(r"loading frozen opponent: (\S+)")
 
 class HUDState:
     """Server-side mirror of the dashboard state. Serializable to JSON
-    so a new client can be sent a `snapshot` event on connect."""
+    so a new client gets a correct `snapshot` event on connect."""
 
-    def __init__(self):
-        self.task_name: str = "composite_vr"
-        self.opponent_path: str = ""
-        self.opponent_label: str = "frozen model"
+    def __init__(self) -> None:
+        self.opponent_label: str = ""
         self.update: int = 0
         self.max_updates: int = 50
         self.session_start: float = time.time()
         self.last_kl: float = 0.0
-
-        self.window_open: bool = False
-        self.window_open_time: float = 0.0
-        self.window_open_frame: int = 0
-        self.window_start_pct: float = 0.0
-        self.window_trajectory: List[List[float]] = []  # [elapsed_frame, damage_pct]
-
-        self.last_close_time: float = -1e9
-        self.last_close_result: str = ""
-
-        self.recent_events: List[Dict[str, Any]] = []
         self.wins: int = 0
         self.losses: int = 0
         self.draws: int = 0
-        # Session totals (across all episodes, not just shown ones).
-        self.windows_opened: int = 0
-        self.windows_combo: int = 0
-        self.windows_single_hit: int = 0
+        self.matches: int = 0
+        # vr_id -> {weight, reward_total, counts: {k: n}, spark: [per-match r]}
+        self.vrs: Dict[str, Dict[str, Any]] = {}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "task_name": self.task_name,
-            "opponent_path": self.opponent_path,
             "opponent_label": self.opponent_label,
             "update": self.update,
             "max_updates": self.max_updates,
             "session_start": self.session_start,
             "last_kl": self.last_kl,
-            "window_open": self.window_open,
-            "window_open_time": self.window_open_time,
-            "window_open_frame": self.window_open_frame,
-            "window_start_pct": self.window_start_pct,
-            "window_trajectory": self.window_trajectory,
-            "last_close_time": self.last_close_time,
-            "last_close_result": self.last_close_result,
-            "recent_events": self.recent_events,
             "wins": self.wins,
             "losses": self.losses,
             "draws": self.draws,
-            "windows_opened": self.windows_opened,
-            "windows_combo": self.windows_combo,
-            "windows_single_hit": self.windows_single_hit,
+            "matches": self.matches,
+            "vrs": self.vrs,
             "server_now": time.time(),
         }
 
 
 class EventBroker:
-    """Thread-safe pub-sub. Each subscriber owns a queue.Queue that
-    the server's request handler drains and writes to the SSE
-    response."""
+    """Thread-safe pub-sub. Each subscriber owns a queue.Queue that the
+    request handler drains into the SSE response."""
 
     def __init__(self) -> None:
         self._subscribers: List[queue.Queue] = []
@@ -174,18 +149,15 @@ class LogTailer(threading.Thread):
         self._stop.set()
 
     def run(self) -> None:
-        # Wait for the log file to exist.
         while not self.log_path.exists() and not self._stop.is_set():
             time.sleep(0.5)
         if self._stop.is_set():
             return
         with self.log_path.open("r") as fh:
-            # Read existing content so we replay it into the state
-            # (so the dashboard starts with the right history on a
-            # mid-run launch).
+            # Replay existing content (so a mid-run launch has history),
+            # then tail.
             for line in fh:
                 self._consume(line, broadcast=False)
-            # Then tail.
             while not self._stop.is_set():
                 line = fh.readline()
                 if not line:
@@ -193,24 +165,12 @@ class LogTailer(threading.Thread):
                     continue
                 self._consume(line, broadcast=True)
 
-    # --- event handlers ---
+    # --- dispatch ---
 
     def _consume(self, line: str, broadcast: bool) -> None:
         m = _RE_FROZEN.search(line)
         if m:
             self._on_frozen(m.group(1), broadcast)
-            return
-        m = _RE_OPEN.search(line)
-        if m:
-            self._on_open(m, broadcast)
-            return
-        m = _RE_TICK.search(line)
-        if m:
-            self._on_tick(m, broadcast)
-            return
-        m = _RE_EVENT.search(line)
-        if m:
-            self._on_close(m, broadcast)
             return
         m = _RE_UPDATE.search(line)
         if m:
@@ -220,113 +180,19 @@ class LogTailer(threading.Thread):
         if m:
             self._on_match_end(m, broadcast)
             return
+        idx = line.find(_EVT_VR)
+        if idx != -1:
+            self._on_vr(line[idx + len(_EVT_VR):], broadcast)
+            return
+
+    # --- handlers ---
 
     def _on_frozen(self, path: str, broadcast: bool) -> None:
-        self.state.opponent_path = path
-        self.state.opponent_label = f"frozen model · {Path(path).name}"
+        self.state.opponent_label = Path(path).name
         if broadcast:
             self.broker.broadcast({
-                "type": "frozen",
-                "path": path,
-                "label": self.state.opponent_label,
+                "type": "frozen", "label": self.state.opponent_label,
             })
-
-    def _on_open(self, m, broadcast: bool) -> None:
-        try:
-            frame = int(m.group("f"))
-        except (TypeError, ValueError):
-            frame = 0
-        try:
-            start_pct = float(m.group("sp") or "0")
-        except ValueError:
-            start_pct = 0.0
-        self.state.window_open = True
-        self.state.window_open_time = time.time()
-        self.state.window_open_frame = frame
-        self.state.window_start_pct = start_pct
-        self.state.window_trajectory = [[0, 0.0]]
-        self.state.windows_opened += 1
-        if broadcast:
-            self.broker.broadcast({
-                "type": "window_open",
-                "open_time": self.state.window_open_time,
-                "start_pct": start_pct,
-                "frame": frame,
-                "windows_opened": self.state.windows_opened,
-            })
-
-    def _on_tick(self, m, broadcast: bool) -> None:
-        if not self.state.window_open:
-            return
-        try:
-            f = int(m.group("f"))
-            p = float(m.group("p"))
-        except (TypeError, ValueError):
-            return
-        elapsed = max(0, f - self.state.window_open_frame)
-        damage = max(0.0, p - self.state.window_start_pct)
-        self.state.window_trajectory.append([elapsed, damage])
-        if broadcast:
-            self.broker.broadcast({
-                "type": "window_tick",
-                "elapsed_frame": elapsed,
-                "damage_pct": damage,
-            })
-
-    def _on_close(self, m, broadcast: bool) -> None:
-        result = m.group("r")
-        try:
-            reward = float(m.group("rw"))
-        except (TypeError, ValueError):
-            reward = 0.0
-        try:
-            damage = float(m.group("d") or "0")
-        except (TypeError, ValueError):
-            damage = 0.0
-        try:
-            start_pct = float(m.group("sp") or "0")
-        except ValueError:
-            start_pct = 0.0
-        try:
-            close_frame = int(m.group("f"))
-        except (TypeError, ValueError):
-            close_frame = 0
-        # Combo duration = frames the window was open / 60 fps.
-        duration_frames = max(0, close_frame - self.state.window_open_frame)
-        duration_sec = duration_frames / 60.0
-        ev = {
-            "type": "window_close",
-            "result": result,
-            "reward": reward,
-            "damage": damage,
-            "start_pct": start_pct,
-            "close_time": time.time(),
-            "duration_sec": duration_sec,
-        }
-        self.state.window_open = False
-        self.state.last_close_time = ev["close_time"]
-        self.state.last_close_result = result
-        # Only keep the trajectory for one beat post-close (the
-        # frontend handles the fade); reset.
-        self.state.window_trajectory = []
-        # Add to recent_events only if a real extension landed.
-        if result in ("combo", "combo_kill"):
-            self.state.windows_combo += 1
-            self.state.recent_events.insert(0, {
-                "t": ev["close_time"],
-                "kind": "ko" if result == "combo_kill" else "combo",
-                "reward": reward,
-                "damage": damage,
-                "start_pct": start_pct,
-                "duration_sec": duration_sec,
-            })
-            self.state.recent_events = self.state.recent_events[:5]
-        elif result == "single_hit":
-            self.state.windows_single_hit += 1
-        ev["windows_combo"] = self.state.windows_combo
-        ev["windows_single_hit"] = self.state.windows_single_hit
-        if broadcast:
-            self.broker.broadcast(ev)
 
     def _on_update(self, m, broadcast: bool) -> None:
         try:
@@ -336,15 +202,11 @@ class LogTailer(threading.Thread):
         try:
             kl = float(m.group("kl"))
         except (TypeError, ValueError):
-            kl = 0.0
+            kl = self.state.last_kl
         self.state.update = u
         self.state.last_kl = kl
         if broadcast:
-            self.broker.broadcast({
-                "type": "update",
-                "update": u,
-                "kl": kl,
-            })
+            self.broker.broadcast({"type": "update", "update": u, "kl": kl})
 
     def _on_match_end(self, m, broadcast: bool) -> None:
         result = m.group("r")
@@ -357,14 +219,59 @@ class LogTailer(threading.Thread):
         if broadcast:
             self.broker.broadcast({
                 "type": "match_end",
-                "result": result,
                 "wins": self.state.wins,
                 "losses": self.state.losses,
                 "draws": self.state.draws,
             })
 
+    def _on_vr(self, payload: str, broadcast: bool) -> None:
+        """Consume one `EVT_EP_VR {json}` event: a per-match breakdown
+        `{n_frames, reward_sum, terminal, result, vrs:{id:{weight,
+        reward, ...counts}}}`. VR `metadata()` counts are per-match, so
+        they accumulate; the per-match reward feeds each VR's spark."""
+        try:
+            data = json.loads(payload)
+        except (ValueError, TypeError):
+            return
+        vrs = data.get("vrs")
+        if not isinstance(vrs, dict):
+            return
+        self.state.matches += 1
+        for vid, d in vrs.items():
+            if not isinstance(d, dict):
+                continue
+            entry = self.state.vrs.get(vid)
+            if entry is None:
+                entry = {"weight": 1.0, "reward_total": 0.0,
+                         "counts": {}, "spark": []}
+                self.state.vrs[vid] = entry
+            try:
+                entry["weight"] = float(d.get("weight", entry["weight"]))
+            except (TypeError, ValueError):
+                pass
+            try:
+                r = float(d.get("reward", 0.0))
+            except (TypeError, ValueError):
+                r = 0.0
+            entry["reward_total"] = round(entry["reward_total"] + r, 4)
+            entry["spark"].append(round(r, 3))
+            if len(entry["spark"]) > 48:
+                entry["spark"] = entry["spark"][-48:]
+            for k, v in d.items():
+                if k in ("weight", "reward") or isinstance(v, bool):
+                    continue
+                if isinstance(v, (int, float)):
+                    entry["counts"][k] = round(
+                        entry["counts"].get(k, 0) + v, 1)
+        if broadcast:
+            self.broker.broadcast({
+                "type": "vr",
+                "vrs": self.state.vrs,
+                "matches": self.state.matches,
+            })
 
-# ---------- HTTP server -----------------------------------------------
+
+# ---------- HTML page -------------------------------------------------
 
 
 INDEX_HTML = """<!doctype html>
@@ -378,16 +285,13 @@ INDEX_HTML = """<!doctype html>
 <style>
   :root {
     --bg: #0c0d10;
+    --card: #101116;
     --fg: #e8e8ea;
     --fg2: #7c7e88;
     --fg3: #3a3c44;
     --line: #1c1e25;
+    --good: #5fcf67;
     --bad: #a85258;
-    --v0: #441b5f;   /* viridis ~0.05 */
-    --v25: #3e497f;
-    --v50: #1f968b;
-    --v75: #5fcf67;
-    --v100: #fde725;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -396,297 +300,161 @@ INDEX_HTML = """<!doctype html>
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
     font-size: 14px;
     line-height: 1.45;
-    margin: 0;
-    padding: 0;
-    height: 100%;
-    overflow: hidden;
+    margin: 0; padding: 0; height: 100%;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
   .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
   .dim  { color: var(--fg2); }
-  .dim2 { color: var(--fg3); }
 
-  /* layout grid */
   .root {
     display: grid;
-    grid-template-rows: auto auto 1fr auto auto;
+    grid-template-rows: auto auto 1fr auto;
     height: 100vh;
     padding: 18px 28px;
-    gap: 16px;
+    gap: 14px;
   }
 
   /* header */
   .header { display: flex; align-items: baseline; justify-content: space-between; }
   .title { font-size: 18px; font-weight: 500; letter-spacing: 0.02em; }
   .title span.dot { color: var(--fg3); margin: 0 10px; }
-  .task { color: var(--fg2); }
+  .title .task { color: var(--fg2); font-size: 14px; }
   .update-wrap { display: flex; align-items: center; gap: 12px; }
   .update-text { color: var(--fg2); font-size: 13px; }
   .update-bar {
-    width: 180px; height: 2px; background: var(--line); border-radius: 1px;
-    overflow: hidden;
+    width: 180px; height: 2px; background: var(--line);
+    border-radius: 1px; overflow: hidden;
   }
   .update-bar > div { height: 100%; background: var(--fg2); transition: width 0.4s ease; }
 
-  .players { color: var(--fg2); font-size: 13px; padding-top: 2px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+  .players {
+    color: var(--fg2); font-size: 13px;
+    padding-bottom: 4px; border-bottom: 1px solid var(--line);
+  }
   .players strong { color: var(--fg); font-weight: 500; }
-  .players .arrow { color: var(--fg3); padding: 0 14px; }
+  .players .arrow { color: var(--fg3); padding: 0 12px; }
 
-  /* plot panel */
-  .plot {
-    position: relative;
-    padding: 18px 0 8px 0;
-    border-bottom: 1px solid var(--line);
-    transition: background 0.4s ease;
-  }
-  .plot.buzz { background: rgba(168, 82, 88, 0.07); }
-  .plot.win  { background: rgba(94, 201, 98, 0.06); }
-
-  /* Floating "+0.32" reward badge shown on successful close. */
-  .reward-badge {
-    position: absolute;
-    pointer-events: none;
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-variant-numeric: tabular-nums;
-    font-size: 22px;
-    font-weight: 500;
-    letter-spacing: 0.01em;
-    color: var(--fg);
-    opacity: 0;
-    transform: translateY(0);
-    transition: opacity 0.45s ease-out, transform 0.45s ease-out;
-  }
-  .reward-badge.show {
-    opacity: 1;
-    transform: translateY(-28px);
-  }
-  .reward-badge .label {
-    font-family: 'Inter', sans-serif;
-    font-weight: 400;
-    font-size: 12px;
-    color: var(--fg2);
-    margin-left: 8px;
-    letter-spacing: 0.04em;
-    text-transform: lowercase;
-  }
-
-  .plot-head { display: flex; justify-content: space-between; align-items: baseline; padding-bottom: 12px; }
-  .plot-status { font-size: 13px; }
-  .plot-status .dot {
-    display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-    background: var(--fg3); margin-right: 7px; transform: translateY(-1px);
-    transition: background 0.2s ease;
-  }
-  .plot-status.open .dot { background: var(--v50); animation: pulse 1.6s ease-in-out infinite; }
-  .plot-status.bad .dot { background: var(--bad); }
-  @keyframes pulse {
-    0%,100% { opacity: 1; transform: translateY(-1px) scale(1); }
-    50%     { opacity: 0.7; transform: translateY(-1px) scale(1.25); }
-  }
-  .plot-readout { font-size: 15px; }
-  .plot-readout .cur { color: var(--fg); }
-  .plot-readout .peak { color: var(--fg2); font-size: 12px; margin-left: 10px; }
-
-  .plot-svg-wrap { width: 100%; }
-  .plot-svg { width: 100%; height: 220px; display: block; }
-  .gridline { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 4; }
-  .axis-label { fill: var(--fg3); font-size: 11px; }
-  .traj { fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
-
-  /* events list (no header label per user spec) */
-  .events { padding: 8px 0 12px 0; }
-  .ev-row {
+  /* VR card grid */
+  .vr-grid {
     display: grid;
-    grid-template-columns: 60px 1fr 200px 50px;
-    column-gap: 16px;
-    align-items: center;
-    padding: 5px 0;
-    font-size: 13px;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 12px;
+    align-content: start;
+    overflow-y: auto;
+    padding-right: 4px;
   }
-  .ev-row .rew { text-align: right; }
-  .ev-bar {
-    height: 8px; background: var(--line); border-radius: 4px; overflow: hidden;
-    position: relative;
+  .vr-card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px 14px 10px;
   }
-  .ev-bar > div {
-    height: 100%; border-radius: 4px;
-    transition: width 0.4s ease;
+  .vr-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+  .vr-name { font-weight: 500; font-size: 14px; }
+  .vr-desc { color: var(--fg2); font-size: 11px; }
+  .vr-weight { color: var(--fg3); font-size: 12px; white-space: nowrap; }
+  .vr-reward {
+    font-size: 26px; font-weight: 500;
+    margin: 6px 0 2px; line-height: 1.1;
   }
-  .ev-desc { color: var(--fg); }
-  .ev-age  { color: var(--fg3); text-align: right; font-size: 12px; }
-  .ev-empty { color: var(--fg3); padding: 8px 0; font-size: 13px; font-style: italic; }
+  .vr-reward .unit { font-size: 12px; color: var(--fg3); margin-left: 6px; }
+  .vr-spark { width: 100%; height: 30px; display: block; }
+  .vr-counts {
+    color: var(--fg2); font-size: 12px; margin-top: 6px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .vr-empty { color: var(--fg3); font-size: 13px; font-style: italic; }
 
   /* footer */
   .footer {
     border-top: 1px solid var(--line);
     padding-top: 10px;
-    color: var(--fg2);
-    font-size: 13px;
-    display: flex;
-    gap: 22px;
+    color: var(--fg2); font-size: 13px;
+    display: flex; gap: 20px; align-items: baseline;
   }
   .footer .sep { color: var(--fg3); }
+  .footer .good { color: var(--good); }
+  .footer .bad { color: var(--bad); }
 </style>
 </head>
 <body>
   <div class="root">
     <div class="header">
       <div class="title">
-        RLVR live<span class="dot">·</span><span class="task mono" id="taskName">—</span>
+        RLVR live<span class="dot">·</span><span class="task mono" id="taskName">composite VR</span>
       </div>
       <div class="update-wrap">
         <span class="update-text mono" id="updateText">update —/—</span>
-        <div class="update-bar"><div id="updateBar" style="width: 0%"></div></div>
+        <div class="update-bar"><div id="updateBar" style="width:0%"></div></div>
       </div>
     </div>
 
-    <div class="players" id="players">
-      <strong>P1</strong> · trainee policy<span class="arrow">↔</span><strong>P2</strong> · frozen model <span class="dim" id="oppLabel"></span>
+    <div class="players">
+      <strong>P1</strong> · trainee policy<span class="arrow">↔</span><strong>P2</strong> · frozen baseline <span class="dim" id="oppLabel"></span>
     </div>
 
-    <div class="plot" id="plotPanel">
-      <div class="plot-head">
-        <div class="plot-status" id="plotStatus"><span class="dot"></span><span id="plotStatusText">no window open</span></div>
-        <div class="plot-readout">
-          <span class="cur mono" id="plotCur">—</span>
-          <span class="peak mono" id="plotPeak"></span>
-        </div>
-      </div>
-      <div class="plot-svg-wrap" style="position: relative;">
-        <svg class="plot-svg" id="plotSvg" viewBox="0 0 1000 220" preserveAspectRatio="none">
-          <g id="plotGrid"></g>
-          <path id="plotPath" class="traj" d=""></path>
-        </svg>
-        <div id="rewardBadge" class="reward-badge"></div>
-      </div>
-    </div>
-
-    <div class="events" id="eventsList">
-      <div class="ev-empty">waiting for first extension...</div>
+    <div class="vr-grid" id="vrGrid">
+      <div class="vr-empty">waiting for the first match…</div>
     </div>
 
     <div class="footer">
       <span class="mono" id="ftSession">0s</span>
       <span class="sep">·</span>
-      <span class="mono">wins <span id="ftWins">0</span></span>
+      <span class="mono" id="ftMatches">0 matches</span>
       <span class="sep">·</span>
-      <span class="mono">losses <span id="ftLosses">0</span></span>
+      <span class="mono"><span class="good" id="ftWins">0</span>–<span class="bad" id="ftLosses">0</span>–<span id="ftDraws">0</span> W–L–D</span>
       <span class="sep">·</span>
-      <span class="mono">combos <span id="ftCombos">0</span></span>
+      <span class="mono" id="ftComposite">Σ +0.00</span>
+      <span class="sep">·</span>
+      <span class="mono" id="ftHealth">kl —</span>
     </div>
   </div>
 
 <script>
-const VIRIDIS = [
-  [0.00, [68, 1, 84]],
-  [0.25, [59, 82, 139]],
-  [0.50, [33, 145, 140]],
-  [0.75, [94, 201, 98]],
-  [1.00, [253, 231, 37]],
-];
-function viridis(t) {
-  t = Math.max(0, Math.min(1, t));
-  for (let i = 0; i < VIRIDIS.length - 1; i++) {
-    const [t0, c0] = VIRIDIS[i], [t1, c1] = VIRIDIS[i + 1];
-    if (t <= t1) {
-      const f = (t - t0) / (t1 - t0);
-      return `rgb(${c0[0]+(c1[0]-c0[0])*f|0}, ${c0[1]+(c1[1]-c0[1])*f|0}, ${c0[2]+(c1[2]-c0[2])*f|0})`;
-    }
-  }
-  return `rgb(${VIRIDIS[VIRIDIS.length-1][1].join(',')})`;
-}
+// What each VR rewards — shown under the name so the UI is self-explaining.
+const VR_DESC = {
+  stock_delta:      'stocks won / lost',
+  damage_delta:     'damage dealt / taken',
+  neutral_win_loss: 'neutral exchanges',
+  combo_length:     'combo length',
+  low_percent_kill: 'early kills',
+  tech:             'tech success',
+  recovery:         'recovery success',
+};
 
 const state = {
-  task_name: 'composite_vr',
-  max_updates: 50,
   update: 0,
+  max_updates: 50,
   session_start: Date.now() / 1000,
+  last_kl: 0,
   opponent_label: '',
-  window_open: false,
-  window_open_time: 0,
-  window_open_frame: 0,
-  window_start_pct: 0,
-  window_trajectory: [],   // [[elapsed_frame, damage_pct], ...]
-  last_close_time: 0,
-  last_close_result: '',
-  recent_events: [],
-  wins: 0,
-  losses: 0,
-  draws: 0,
-  windows_opened: 0,
-  windows_combo: 0,
-  windows_single_hit: 0,
+  wins: 0, losses: 0, draws: 0, matches: 0,
+  vrs: {},
 };
 
 function applySnapshot(s) {
-  state.task_name = s.task_name;
-  state.max_updates = s.max_updates;
-  state.update = s.update;
-  state.session_start = s.session_start;
+  state.update = s.update || 0;
+  state.max_updates = s.max_updates || 50;
+  state.session_start = s.session_start || (Date.now() / 1000);
+  state.last_kl = s.last_kl || 0;
   state.opponent_label = s.opponent_label || '';
-  state.window_open = s.window_open;
-  state.window_open_time = s.window_open_time;
-  state.window_open_frame = s.window_open_frame;
-  state.window_start_pct = s.window_start_pct;
-  state.window_trajectory = s.window_trajectory || [];
-  state.last_close_time = s.last_close_time;
-  state.last_close_result = s.last_close_result;
-  state.recent_events = s.recent_events || [];
-  state.wins = s.wins; state.losses = s.losses; state.draws = s.draws;
-  state.windows_opened = s.windows_opened || 0;
-  state.windows_combo = s.windows_combo || 0;
-  state.windows_single_hit = s.windows_single_hit || 0;
+  state.wins = s.wins || 0;
+  state.losses = s.losses || 0;
+  state.draws = s.draws || 0;
+  state.matches = s.matches || 0;
+  state.vrs = s.vrs || {};
 }
 
 function applyEvent(ev) {
-  if (ev.type === 'snapshot') { applySnapshot(ev.state); return; }
-  if (ev.type === 'frozen')   { state.opponent_label = ev.label; return; }
-  if (ev.type === 'update')   { state.update = ev.update; return; }
-  if (ev.type === 'window_open') {
-    state.window_open = true;
-    state.window_open_time = ev.open_time;
-    state.window_open_frame = ev.frame;
-    state.window_start_pct = ev.start_pct;
-    state.window_trajectory = [[0, 0]];
-    if (ev.windows_opened !== undefined) state.windows_opened = ev.windows_opened;
-    return;
-  }
-  if (ev.type === 'window_tick') {
-    if (!state.window_open) return;
-    state.window_trajectory.push([ev.elapsed_frame, ev.damage_pct]);
-    return;
-  }
-  if (ev.type === 'window_close') {
-    state.window_open = false;
-    state.last_close_time = ev.close_time;
-    state.last_close_result = ev.result;
-    const success = (ev.result === 'combo' || ev.result === 'combo_kill');
-    if (success) {
-      state.recent_events.unshift({
-        t: ev.close_time,
-        kind: ev.result === 'combo_kill' ? 'ko' : 'combo',
-        reward: ev.reward, damage: ev.damage, start_pct: ev.start_pct,
-        duration_sec: ev.duration_sec || 0,
-      });
-      state.recent_events = state.recent_events.slice(0, 5);
-      // Trigger the floating reward badge animation.
-      flashRewardBadge(ev.reward, ev.result === 'combo_kill');
-    }
-    // Hold trajectory for a brief afterimage (longer on success so the
-    // viewer's eye lands on the green tint + climbing line).
-    state._closing_traj = state.window_trajectory;
-    state._closing_until = (Date.now() / 1000) + (success ? 0.55 : 0.45);
-    state._closing_success = success;
-    state.window_trajectory = [];
-    if (ev.windows_combo !== undefined) state.windows_combo = ev.windows_combo;
-    if (ev.windows_single_hit !== undefined) state.windows_single_hit = ev.windows_single_hit;
-    return;
-  }
+  if (ev.type === 'snapshot')  { applySnapshot(ev.state); return; }
+  if (ev.type === 'frozen')    { state.opponent_label = ev.label || ''; return; }
+  if (ev.type === 'update')    { state.update = ev.update; state.last_kl = ev.kl; return; }
   if (ev.type === 'match_end') {
     state.wins = ev.wins; state.losses = ev.losses; state.draws = ev.draws;
     return;
   }
+  if (ev.type === 'vr') { state.vrs = ev.vrs || {}; state.matches = ev.matches || 0; return; }
 }
 
 // --- render ---
@@ -696,158 +464,96 @@ const $ = id => document.getElementById(id);
 function fmtSession(seconds) {
   const s = Math.max(0, Math.floor(seconds));
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-  if (h) return `${h}h ${String(m).padStart(2,'0')}m`;
-  return `${m}m ${String(sec).padStart(2,'0')}s`;
+  if (h) return `${h}h ${String(m).padStart(2, '0')}m`;
+  return `${m}m ${String(sec).padStart(2, '0')}s`;
+}
+
+function fmtCount(v) {
+  return Number.isInteger(v) ? String(v) : v.toFixed(1);
+}
+
+// Sparkline: per-match reward for one VR, with a zero baseline. Returns
+// {line, zeroY} in a 100x30 viewBox.
+function sparkPaths(vals, w, h) {
+  if (!vals || vals.length < 2) return { line: '', zeroY: h };
+  let mn = 0, mx = 0;
+  for (const v of vals) { mn = Math.min(mn, v); mx = Math.max(mx, v); }
+  const range = (mx - mn) || 1;
+  const y = v => h - ((v - mn) / range) * h;
+  let line = '';
+  vals.forEach((v, i) => {
+    const x = (i / (vals.length - 1)) * w;
+    line += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y(v).toFixed(1);
+  });
+  return { line, zeroY: y(0) };
+}
+
+function vrCard(id, vr) {
+  const total = vr.reward_total || 0;
+  const sign = total > 1e-9 ? 'good' : (total < -1e-9 ? 'bad' : 'fg2');
+  const color = sign === 'good' ? 'var(--good)'
+              : sign === 'bad'  ? 'var(--bad)' : 'var(--fg2)';
+  const desc = VR_DESC[id] || '';
+  const weight = (vr.weight !== undefined ? vr.weight : 1);
+  const sp = sparkPaths(vr.spark || [], 100, 30);
+  const counts = Object.entries(vr.counts || {})
+    .map(([k, v]) => `${k} ${fmtCount(v)}`).join('  ·  ') || '—';
+  const sign_str = total >= 0 ? '+' : '';
+  return `<div class="vr-card">
+    <div class="vr-head">
+      <div>
+        <span class="vr-name">${id}</span>
+        <span class="vr-desc">${desc}</span>
+      </div>
+      <span class="vr-weight mono">w ${weight}</span>
+    </div>
+    <div class="vr-reward mono" style="color:${color}">${sign_str}${total.toFixed(2)}<span class="unit">reward Σ</span></div>
+    <svg class="vr-spark" viewBox="0 0 100 30" preserveAspectRatio="none">
+      <line x1="0" y1="${sp.zeroY.toFixed(1)}" x2="100" y2="${sp.zeroY.toFixed(1)}"
+            stroke="var(--fg3)" stroke-width="0.6" stroke-dasharray="2 3"/>
+      <path d="${sp.line}" fill="none" stroke="${color}" stroke-width="1.6"
+            stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
+    </svg>
+    <div class="vr-counts mono">${counts}</div>
+  </div>`;
 }
 
 function render() {
-  // Header
-  $('taskName').textContent = state.task_name;
+  // Header.
+  const ids = Object.keys(state.vrs);
+  $('taskName').textContent = ids.length
+    ? `composite VR · ${ids.length} VRs` : 'composite VR';
   $('updateText').textContent = `update ${state.update}/${state.max_updates}`;
-  $('updateBar').style.width = `${(state.update / Math.max(1, state.max_updates)) * 100}%`;
-  $('oppLabel').textContent = state.opponent_label ? `— ${state.opponent_label.replace(/^frozen model · /, '')}` : '';
+  $('updateBar').style.width =
+    `${(state.update / Math.max(1, state.max_updates)) * 100}%`;
+  $('oppLabel').textContent = state.opponent_label ? `— ${state.opponent_label}` : '';
 
-  // Plot
-  const now = Date.now() / 1000;
-  const psStatus = $('plotStatus');
-  const buzz = (!state.window_open && state.last_close_result &&
-                state.last_close_result !== 'combo' &&
-                state.last_close_result !== 'combo_kill' &&
-                (now - state.last_close_time) < 0.45);
-  const win  = (!state.window_open && state._closing_success &&
-                (now - state.last_close_time) < 0.55);
-  $('plotPanel').classList.toggle('buzz', buzz);
-  $('plotPanel').classList.toggle('win', win);
-  psStatus.classList.remove('open', 'bad');
-  if (state.window_open) {
-    psStatus.classList.add('open');
-    const dt = now - state.window_open_time;
-    $('plotStatusText').textContent = `window open · ${dt.toFixed(1)}s`;
-  } else if (buzz) {
-    psStatus.classList.add('bad');
-    $('plotStatusText').textContent = `no extension · ${state.last_close_result}`;
-  } else if ((now - state.last_close_time) < 0.6 && state.last_close_result) {
-    $('plotStatusText').textContent = `closed · ${state.last_close_result}`;
-  } else {
-    $('plotStatusText').textContent = 'no window open';
-  }
-
-  // Pick trajectory to draw.
-  let traj;
-  let traj_fade = 1.0;
-  if (state.window_open) {
-    traj = state.window_trajectory;
-  } else if (state._closing_traj && now < (state._closing_until || 0)) {
-    traj = state._closing_traj;
-    const dur = state._closing_success ? 0.55 : 0.45;
-    traj_fade = Math.max(0.2, ((state._closing_until || 0) - now) / dur);
-  } else {
-    traj = [];
-  }
-
-  // Y autoscale on damage.
-  let yMax = 25;
-  if (traj.length > 0) {
-    const peak = traj.reduce((a, p) => Math.max(a, p[1]), 0);
-    yMax = Math.max(25, Math.ceil((peak + 1) / 25) * 25);
-  }
-  // X: pad to 90 frames or actual.
-  const xMax = traj.length ? Math.max(traj[traj.length-1][0], 90) : 90;
-
-  // Gridlines.
-  const grid = $('plotGrid');
-  grid.innerHTML = '';
-  const W = 1000, H = 220, padL = 50, padR = 14, padT = 8, padB = 18;
-  const innerW = W - padL - padR;
-  const innerH = H - padT - padB;
-  const nLines = yMax / 25 + 1;
-  for (let i = 0; i < nLines; i++) {
-    const y = padT + innerH - (i * 25 / yMax) * innerH;
-    grid.insertAdjacentHTML('beforeend',
-      `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" class="gridline"/>`);
-    grid.insertAdjacentHTML('beforeend',
-      `<text x="${padL - 8}" y="${y + 4}" text-anchor="end" class="axis-label mono">${i*25}</text>`);
-  }
-
-  // Trajectory path.
-  const path = $('plotPath');
-  if (traj.length >= 1) {
-    const peak = traj.reduce((a, p) => Math.max(a, p[1]), 0);
-    const color = viridis(Math.min(1, peak / 100));
-    let d = '';
-    for (let i = 0; i < traj.length; i++) {
-      const [ef, dmg] = traj[i];
-      const x = padL + (ef / xMax) * innerW;
-      const y = padT + innerH - Math.min(1, dmg / yMax) * innerH;
-      d += (i === 0 ? `M${x.toFixed(1)},${y.toFixed(1)}` : ` L${x.toFixed(1)},${y.toFixed(1)}`);
-    }
-    path.setAttribute('d', d);
-    path.setAttribute('stroke', color);
-    path.style.opacity = traj_fade;
-  } else {
-    path.setAttribute('d', '');
-  }
-
-  // Readout.
-  if (traj.length) {
-    const cur = traj[traj.length - 1][1];
-    const peak = traj.reduce((a, p) => Math.max(a, p[1]), 0);
-    $('plotCur').textContent = `+${cur.toFixed(0)}% dealt`;
-    $('plotPeak').textContent = `peak ${peak.toFixed(0)}`;
-  } else {
-    $('plotCur').textContent = '';
-    $('plotPeak').textContent = '';
-  }
-
-  // Events list.
-  const list = $('eventsList');
-  if (state.recent_events.length === 0) {
-    if (!list.querySelector('.ev-empty')) {
-      list.innerHTML = `<div class="ev-empty">waiting for first extension...</div>`;
+  // VR card grid — high-weight VRs first, then by name.
+  const grid = $('vrGrid');
+  if (ids.length === 0) {
+    if (!grid.querySelector('.vr-empty')) {
+      grid.innerHTML = '<div class="vr-empty">waiting for the first match…</div>';
     }
   } else {
-    let html = '';
-    for (const ev of state.recent_events) {
-      const color = viridis(Math.min(1, ev.reward));
-      const width = (Math.max(0, Math.min(1, ev.reward)) * 100).toFixed(0);
-      const desc = ev.kind === 'ko'
-        ? `KO from ${ev.start_pct.toFixed(0)}%`
-        : `combo · ${ev.damage.toFixed(0)}% damage`;
-      const dur = (ev.duration_sec || 0).toFixed(1);
-      html += `<div class="ev-row">
-        <span class="rew mono">+${ev.reward.toFixed(2)}</span>
-        <div class="ev-bar"><div style="width:${width}%; background:${color};"></div></div>
-        <div class="ev-desc">${desc}</div>
-        <span class="ev-age mono">${dur}s</span>
-      </div>`;
-    }
-    list.innerHTML = html;
+    ids.sort((a, b) => {
+      const wa = state.vrs[a].weight ?? 1, wb = state.vrs[b].weight ?? 1;
+      return wb - wa || a.localeCompare(b);
+    });
+    grid.innerHTML = ids.map(id => vrCard(id, state.vrs[id])).join('');
   }
 
   // Footer.
+  const now = Date.now() / 1000;
   $('ftSession').textContent = fmtSession(now - state.session_start);
+  $('ftMatches').textContent = `${state.matches} matches`;
   $('ftWins').textContent = state.wins;
   $('ftLosses').textContent = state.losses;
-  $('ftCombos').textContent = state.windows_combo;
-}
-
-// Reward badge animation. Positions the badge at the right end of the
-// last-known trajectory point, then fades up + out.
-function flashRewardBadge(reward, isKO) {
-  const badge = $('rewardBadge');
-  badge.classList.remove('show');
-  // Force layout flush so the transition restarts.
-  void badge.offsetWidth;
-  const label = isKO ? 'KO' : 'combo';
-  const color = viridis(Math.min(1, reward));
-  badge.style.color = color;
-  badge.innerHTML = `+${reward.toFixed(2)}<span class="label">${label}</span>`;
-  // Place near top-right of plot (above the latest point).
-  badge.style.right = '12px';
-  badge.style.top = '10px';
-  badge.classList.add('show');
-  // Schedule un-show (CSS transitions back) so it can re-fire.
-  setTimeout(() => badge.classList.remove('show'), 450);
+  $('ftDraws').textContent = state.draws;
+  const composite = ids.reduce((a, id) => a + (state.vrs[id].reward_total || 0), 0);
+  $('ftComposite').textContent = `Σ ${composite >= 0 ? '+' : ''}${composite.toFixed(2)}`;
+  const kl = state.last_kl;
+  const health = kl > 1.0 ? 'drifting' : (kl > 0.2 ? 'elevated' : 'stable');
+  $('ftHealth').textContent = `kl ${kl.toFixed(4)} · ${health}`;
 }
 
 // SSE.
@@ -857,8 +563,7 @@ sse.onmessage = e => {
 };
 sse.onerror = () => console.warn('SSE error');
 
-// Render loop.
-setInterval(render, 60);
+setInterval(render, 250);
 render();
 </script>
 </body>
@@ -866,15 +571,17 @@ render();
 """
 
 
+# ---------- HTTP server -----------------------------------------------
+
+
 class HUDHandler(BaseHTTPRequestHandler):
     server: "HUDServer"  # set by server class
-    _logged_paths: set = set()
 
     def log_message(self, format: str, *args) -> None:  # silence default
         pass
 
     def do_GET(self) -> None:
-        if self.path == "/" or self.path == "/index.html":
+        if self.path in ("/", "/index.html"):
             self._serve_html()
         elif self.path == "/events":
             self._serve_sse()
@@ -914,7 +621,6 @@ class HUDHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b"data: " + payload.encode("utf-8") + b"\n\n")
                     self.wfile.flush()
                 except queue.Empty:
-                    # Heartbeat to keep the proxy / browser happy.
                     try:
                         self.wfile.write(b": heartbeat\n\n")
                         self.wfile.flush()
@@ -941,8 +647,8 @@ def main():
     ap.add_argument("--log", required=True, type=Path)
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--max-updates", type=int, default=50,
-                    help="Total PPO updates for this training run; "
-                         "used for the header progress bar.")
+                    help="Total PPO updates for this run; used for the "
+                         "header progress bar.")
     ap.add_argument("--no-open", action="store_true",
                     help="Don't auto-open the browser.")
     args = ap.parse_args()
@@ -958,7 +664,6 @@ def main():
     log.info("training HUD serving at %s  (log=%s)", url, args.log)
 
     if not args.no_open:
-        # Best-effort browser launch.
         try:
             webbrowser.open(url, new=0, autoraise=False)
         except Exception:

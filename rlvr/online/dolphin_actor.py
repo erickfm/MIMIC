@@ -21,6 +21,7 @@ Runs fully headless under Xvfb with Vulkan (see CLAUDE.md pitfalls
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import signal
@@ -659,12 +660,16 @@ class DolphinActor:
             for i, r in enumerate(outcome.per_frame_reward[:len(self._pending)]):
                 self._pending[i].reward = float(r)
         metadata = dict(outcome.metadata or {})
-        # DEBUG: surface composite-VR per-episode reward + per-module diag.
-        log.info("EVT_EP_VR n_frames=%s reward_sum=%.4f terminal=%.4f modules=%s",
-                 metadata.get("n_frames"),
-                 float(metadata.get("reward_sum", 0.0)),
-                 float(outcome.terminal_reward),
-                 {k: v for k, v in metadata.items() if isinstance(v, dict)})
+        # Composite-VR per-episode event for the live HUD: one JSON blob,
+        # parsed with json.loads (no brittle regex). `vrs` maps each VR id
+        # -> {weight, reward, ...diagnostic counts}.
+        log.info("EVT_EP_VR %s", json.dumps({
+            "n_frames": metadata.get("n_frames"),
+            "reward_sum": round(float(metadata.get("reward_sum", 0.0)), 4),
+            "terminal": round(float(outcome.terminal_reward), 4),
+            "result": metadata.get("result", "?"),
+            "vrs": {k: v for k, v in metadata.items() if isinstance(v, dict)},
+        }, sort_keys=True))
         ep = Episode(
             task_id=self.task.id,
             frames=list(self._pending),

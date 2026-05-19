@@ -75,20 +75,27 @@ class CompositeVRTask:
         self.description = "Composite VR: " + ", ".join(
             f"{m.id}*{w:g}" for m, w in zip(self.modules, self.weights))
         self._reward_vec: List[float] = []
+        # Per-module weighted reward accumulated over the episode — so the
+        # HUD can attribute the composite reward back to each VR by name.
+        self._module_reward: List[float] = [0.0] * len(self.modules)
 
     # -- OnlineTask protocol -------------------------------------------------
     def should_start(self, state_history) -> bool:
         """Open the whole-match episode on the first in-game frame."""
         self._reward_vec = []
+        self._module_reward = [0.0] * len(self.modules)
         for m in self.modules:
             m.reset()
         return True
 
     def observe(self, state_history) -> float:
-        """Per-frame: accumulate the weighted sum over every module."""
+        """Per-frame: accumulate the weighted sum over every module, and
+        keep each module's weighted contribution separately."""
         total = 0.0
-        for m, w in zip(self.modules, self.weights):
-            total += w * float(m.observe(state_history))
+        for i, (m, w) in enumerate(zip(self.modules, self.weights)):
+            r = w * float(m.observe(state_history))
+            self._module_reward[i] += r
+            total += r
         self._reward_vec.append(total)
         return total
 
@@ -102,11 +109,17 @@ class CompositeVRTask:
         terminal (`finalize`) contributions."""
         terminal = 0.0
         meta: Dict[str, Any] = {}
-        for m, w in zip(self.modules, self.weights):
-            terminal += w * float(m.finalize(state_history))
-            md = m.metadata()
-            if md:
-                meta[m.id] = md
+        for i, (m, w) in enumerate(zip(self.modules, self.weights)):
+            fin = w * float(m.finalize(state_history))
+            terminal += fin
+            # Per-VR entry: weight, this VR's weighted reward contribution
+            # (per-frame accumulation + its finalize term), and its own
+            # diagnostic counts. Keyed by VR id so the HUD names each one.
+            meta[m.id] = {
+                "weight": w,
+                "reward": round(self._module_reward[i] + fin, 4),
+                **m.metadata(),
+            }
         per_frame = list(self._reward_vec)
         meta["n_frames"] = len(per_frame)
         meta["reward_sum"] = float(sum(per_frame) + terminal)
