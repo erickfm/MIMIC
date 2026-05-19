@@ -179,6 +179,7 @@ class Replay:
             return a.to_numpy(zero_copy_only=False)[index]
         return {
             "state": arr(post.state),
+            "state_age": arr(post.state_age),
             "position_x": arr(post.position.x),
             "position_y": arr(post.position.y),
             "percent": arr(post.percent),
@@ -310,6 +311,7 @@ class Replay:
             invulnerable=invulnerable,
             moonwalkwarning=moonwalk,
             action=int(post["state"][fi]),
+            action_frame=float(post["state_age"][fi]),
             l_cancel=int(post["l_cancel"][fi]),
             controller=ctrl,
         )

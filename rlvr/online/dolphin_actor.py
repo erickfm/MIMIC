@@ -25,6 +25,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,7 +73,7 @@ class ActorConfig:
     stage: str = "FINAL_DESTINATION"
     temperature: float = 1.0
     gfx_backend: str = ""               # "" inherits Dolphin default (works headless here)
-    disable_audio: bool = False         # match tools/play_vs_cpu.py
+    disable_audio: bool = False         # match tools/play.py
     # FFW-only: enable via the ExiAI Ishiiruka Dolphin fork at
     # emulator_ffw/. Realtime mode (default) uses the regular online
     # emulator at emulator/. Both can't be combined: ffw needs
@@ -93,6 +94,10 @@ class ActorConfig:
     replay_dir: Optional[str] = None
     state_history_len: int = 256       # long enough for any task's episode
     max_episode_frames: int = 600      # safety: kill runaway episodes
+    # Whole-match episode mode (CompositeVRTask / the VR suite): one
+    # episode == one whole match. Disables the max_episode_frames cap;
+    # the match-end transition scores (not drops) the open episode.
+    whole_match_episode: bool = False
     # Bot-vs-bot training. When opponent_ckpt is None, the cpu_port is
     # driven by cpu_level (legacy CPU-9 mode). When set, that .pt is
     # loaded as a frozen second policy and pressed every frame. cpu_level
@@ -320,6 +325,11 @@ class DolphinActor:
         self._menu_ego = melee.MenuHelper()
         self._menu_cpu = melee.MenuHelper()
 
+        # enet keepalive (see start_keepalive): a background thread that
+        # keeps Dolphin stepping during the inter-update PPO pause.
+        self._keepalive_thread: Optional[threading.Thread] = None
+        self._keepalive_stop = threading.Event()
+
         self._bot_char = melee.Character[cfg.character]
         self._cpu_char = melee.Character[cfg.cpu_character]
         self._stage = melee.Stage[cfg.stage]
@@ -382,6 +392,57 @@ class DolphinActor:
                 pass
             self.console = None
 
+    # -- enet keepalive ------------------------------------------------------
+    # Between collect() calls the main thread is busy in ppo_update (~90 s of
+    # GPU work) and nothing pumps console.step(). enet is only serviced inside
+    # step(), so Dolphin's slippstream peer stops seeing traffic and drops the
+    # connection (melee.slippstream.EnetDisconnected) after ~20 s — fatal for
+    # FFW runs (this is why RL runs were forced to realtime). The keepalive
+    # thread idle-steps Dolphin (neutral input, between matches) so the
+    # connection stays warm across the PPO pause.
+    def start_keepalive(self) -> None:
+        """Begin idle-stepping Dolphin on a background thread. Call right
+        after collect() returns; pair with stop_keepalive() before the next
+        collect() — the two must never drive the console concurrently."""
+        if self.console is None:
+            return
+        if self._keepalive_thread is not None and self._keepalive_thread.is_alive():
+            return
+        self._keepalive_stop.clear()
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop, name="dolphin-keepalive", daemon=True)
+        self._keepalive_thread.start()
+
+    def stop_keepalive(self) -> None:
+        """Stop the keepalive thread and wait for it to exit, so the main
+        thread regains exclusive ownership of the console before collect()."""
+        if self._keepalive_thread is None:
+            return
+        self._keepalive_stop.set()
+        self._keepalive_thread.join(timeout=10.0)
+        self._keepalive_thread = None
+
+    def _keepalive_loop(self) -> None:
+        """Step Dolphin with neutral input until stopped. Discards game
+        state — its only job is to keep enet serviced. Touches only the
+        console + controllers (never episode/model state), so it is safe
+        to run concurrently with ppo_update on the main thread."""
+        while not self._keepalive_stop.is_set():
+            try:
+                self.console.step()
+                for c in (self.ego_ctrl, self.cpu_ctrl):
+                    if c is None:
+                        continue
+                    c.tilt_analog(melee.enums.Button.BUTTON_MAIN, 0.5, 0.5)
+                    c.tilt_analog(melee.enums.Button.BUTTON_C, 0.5, 0.5)
+                    for b in ALL_ACTION_BUTTONS:
+                        c.release_button(b)
+                    c.press_shoulder(melee.enums.Button.BUTTON_L, 0.0)
+                    c.flush()
+            except Exception as e:
+                log.warning("keepalive step failed (%s) — stopping keepalive", e)
+                break
+
     def _snapshot_context(self) -> Dict[str, torch.Tensor]:
         """Stack the policy cache into a (T, ...) tensor dict (on CPU,
         detached). Each value is the concatenation of the per-frame
@@ -435,7 +496,14 @@ class DolphinActor:
                 log.info("EVT_MATCH_END result=%s trainee_stocks=%d opp_stocks=%d",
                          result, ts, os_)
                 self._in_game = False
-                self._close_open_episode_abortive()
+                # Whole-match episode: this match IS the episode, so
+                # score it. Legacy scenario tasks abort an unfinished
+                # scenario at match end, as before.
+                if (self.cfg.whole_match_episode
+                        and self._episode_open_idx is not None):
+                    self._score_and_close_open_episode()
+                else:
+                    self._close_open_episode_abortive()
                 self._find_latest_replay()
             # If opponent is a bot, both ports are bot-driven (cpu_level=0).
             opp_cpu_level = 0 if self.opp_policy is not None else self.cfg.cpu_level
@@ -535,6 +603,13 @@ class DolphinActor:
                 game_frame_id=int(gs.frame),
             )
             self._pending.append(rec)
+            # Per-frame VR hook: whole-match composite tasks accumulate
+            # their per-frame reward here. Optional — scenario tasks omit
+            # it. Called in lockstep with _pending so the two stay aligned
+            # (one observe per FrameRecord).
+            _observe = getattr(self.task, "observe", None)
+            if _observe is not None:
+                _observe(self._state_history)
 
         # Press controller. n_btn from logits shape.
         n_btn = int(theta_logits["btn_logits"].shape[-1])
@@ -568,6 +643,50 @@ class DolphinActor:
         """Discard any in-progress episode (menu-return, abort)."""
         self._episode_open_idx = None
         self._pending = []
+
+    def _score_and_close_open_episode(self) -> None:
+        """Score the open episode via task.compute_outcome, build the
+        Episode, buffer it for the match, and reset episode state.
+
+        Used both for scenario-task closes (should_end / cap) and for
+        whole-match composite episodes at the match-end transition."""
+        if self._episode_open_idx is None:
+            return
+        outcome = self.task.compute_outcome(
+            self._state_history, self._episode_open_idx
+        )
+        if outcome.per_frame_reward is not None:
+            for i, r in enumerate(outcome.per_frame_reward[:len(self._pending)]):
+                self._pending[i].reward = float(r)
+        metadata = dict(outcome.metadata or {})
+        # DEBUG: surface composite-VR per-episode reward + per-module diag.
+        log.info("EVT_EP_VR n_frames=%s reward_sum=%.4f terminal=%.4f modules=%s",
+                 metadata.get("n_frames"),
+                 float(metadata.get("reward_sum", 0.0)),
+                 float(outcome.terminal_reward),
+                 {k: v for k, v in metadata.items() if isinstance(v, dict)})
+        ep = Episode(
+            task_id=self.task.id,
+            frames=list(self._pending),
+            terminal_reward=float(outcome.terminal_reward),
+            start_game_frame=self._pending[0].game_frame_id if self._pending else 0,
+            end_game_frame=self._pending[-1].game_frame_id if self._pending else 0,
+            metadata=metadata,
+        )
+        self._match_episodes.append(ep)
+        self.episode_count += 1
+        # Per-episode log line for the live HUD watcher.
+        _r = metadata.get("result", "?")
+        _dmg = metadata.get("damage", "")
+        _sp = metadata.get("start_percent", "")
+        _ep_ = metadata.get("end_percent", "")
+        _st = metadata.get("stocks_taken", "")
+        log.info("EVT_EP frame=%d result=%s reward=%.3f "
+                 "damage=%s start_pct=%s end_pct=%s stocks_taken=%s",
+                 ep.end_game_frame, _r, float(outcome.terminal_reward),
+                 _dmg, _sp, _ep_, _st)
+        self._pending = []
+        self._episode_open_idx = None
 
     def _find_latest_replay(self) -> None:
         """Locate the .slp libmelee just saved for the finished match.
@@ -636,7 +755,9 @@ class DolphinActor:
         the quota because enrichment only happens at match granularity.
         """
         collected: List[Episode] = []
-        max_steps = n_episodes * self.cfg.max_episode_frames + 60 * 60 * 60  # broad safety
+        per_ep = (28800 if self.cfg.whole_match_episode
+                  else self.cfg.max_episode_frames)
+        max_steps = n_episodes * per_ep + 60 * 60 * 60  # broad safety
         steps_this_call = 0
         while len(collected) < n_episodes and steps_this_call < max_steps:
             was_in_game = self._in_game
@@ -650,45 +771,25 @@ class DolphinActor:
 
             # Episode boundary check (only if open).
             if self._episode_open_idx is not None and self._in_game:
-                if self.task.should_end(self._state_history, self._episode_open_idx):
-                    outcome = self.task.compute_outcome(
-                        self._state_history, self._episode_open_idx
-                    )
-                    if outcome.per_frame_reward is not None:
-                        for i, r in enumerate(outcome.per_frame_reward[:len(self._pending)]):
-                            self._pending[i].reward = float(r)
-                    metadata = dict(outcome.metadata or {})
-                    ep = Episode(
-                        task_id=self.task.id,
-                        frames=list(self._pending),
-                        terminal_reward=float(outcome.terminal_reward),
-                        start_game_frame=self._pending[0].game_frame_id if self._pending else 0,
-                        end_game_frame=self._pending[-1].game_frame_id if self._pending else 0,
-                        metadata=metadata,
-                    )
-                    self._match_episodes.append(ep)
-                    self.episode_count += 1
-                    # Per-episode log line for the live HUD watcher.
-                    # Schema: EVT_EP frame=<g> result=<r> reward=<f>
-                    # damage=<f> start_pct=<f> end_pct=<f> stocks_taken=<i>
-                    _r = metadata.get("result", "?")
-                    _dmg = metadata.get("damage", "")
-                    _sp = metadata.get("start_percent", "")
-                    _ep_ = metadata.get("end_percent", "")
-                    _st = metadata.get("stocks_taken", "")
-                    log.info("EVT_EP frame=%d result=%s reward=%.3f "
-                             "damage=%s start_pct=%s end_pct=%s "
-                             "stocks_taken=%s",
-                             ep.end_game_frame, _r,
-                             float(outcome.terminal_reward),
-                             _dmg, _sp, _ep_, _st)
-                    self._pending = []
-                    self._episode_open_idx = None
+                # The max-episode-frames cap used to abortively close
+                # (dropping the entire episode silently) on long
+                # combos. That cost us real reward signal — a combo
+                # that runs 10+ seconds because opp gets launched far
+                # is a legit combo, not garbage. Now: treat the cap
+                # as if should_end returned True and score normally.
+                cap_hit = (
+                    not self.cfg.whole_match_episode
+                    and len(self._pending) >= self.cfg.max_episode_frames
+                )
+                if cap_hit or self.task.should_end(
+                        self._state_history, self._episode_open_idx):
+                    if cap_hit:
+                        log.warning(
+                            "episode hit max_episode_frames=%d cap; "
+                            "scoring at cap",
+                            self.cfg.max_episode_frames)
+                    self._score_and_close_open_episode()
                     continue
-                if len(self._pending) >= self.cfg.max_episode_frames:
-                    log.warning("episode exceeded max_episode_frames=%d; aborting",
-                                self.cfg.max_episode_frames)
-                    self._close_open_episode_abortive()
 
         if len(collected) < n_episodes:
             log.warning("collected %d/%d episodes before step cap (%d steps)",

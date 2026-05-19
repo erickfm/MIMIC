@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 3-way PPO comparison: l_cancel / shield_escape / combo_extend on Fox.
+# PPO runs on Fox: l_cancel / shield_escape scenario tasks, plus the
+# base VR composite (stock_delta + damage_delta).
 # Sequential because we share one GPU + one Dolphin actor at a time.
 # All three start from the same BC base; same hyperparameters.
 #
@@ -44,7 +45,25 @@ run_one () {
 
 run_one l_cancel_online      "3way-${DATE}-lcancel"
 run_one shield_escape_online "3way-${DATE}-shieldesc"
-run_one combo_extend_online  "3way-${DATE}-comboext"
+
+# The VR composite uses --vrs (whole-match episode), not --task.
+echo ""
+echo "======================================================================"
+echo "[$(date -Iseconds)]  TRAIN vr-composite  →  ${CKPT_ROOT}/3way-${DATE}-vrbase"
+echo "======================================================================"
+python3 -m rlvr.online.loop \
+    --base-ckpt "${BASE_CKPT}" \
+    --data-dir "${DATA_DIR}" \
+    --dolphin-path "${DOLPHIN}" \
+    --iso-path "${ISO}" \
+    --vrs stock_delta damage_delta \
+    --run-name "3way-${DATE}-vrbase" \
+    --max-updates ${MAX_UPDATES} \
+    --checkpoint-every ${MAX_UPDATES} \
+    --checkpoint-dir "${CKPT_ROOT}" \
+    --use-exi-inputs --enable-ffw \
+    --gfx-backend Null \
+    --replay-dir "replays_3way/3way-${DATE}-vrbase"
 
 echo ""
 echo "[$(date -Iseconds)]  ALL 3 RUNS COMPLETE  →  ${CKPT_ROOT}/"

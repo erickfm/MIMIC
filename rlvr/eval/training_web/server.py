@@ -63,7 +63,7 @@ class HUDState:
     so a new client can be sent a `snapshot` event on connect."""
 
     def __init__(self):
-        self.task_name: str = "combo_extend"
+        self.task_name: str = "composite_vr"
         self.opponent_path: str = ""
         self.opponent_label: str = "frozen model"
         self.update: int = 0
@@ -598,7 +598,7 @@ function viridis(t) {
 }
 
 const state = {
-  task_name: 'combo_extend',
+  task_name: 'composite_vr',
   max_updates: 50,
   update: 0,
   session_start: Date.now() / 1000,

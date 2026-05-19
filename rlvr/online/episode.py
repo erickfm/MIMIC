@@ -47,6 +47,16 @@ class OnlineTask(Protocol):
         """
         ...
 
+    def observe(self, state_history) -> None:
+        """Optional per-frame hook: called every in-game frame while an
+        episode is open. Whole-match composite tasks (see
+        `rlvr/online/vr/composite.py`) use it to accumulate per-frame
+        rewards as the match streams. Scenario tasks omit it; the actor
+        guards the call with `getattr`, so this is not required to
+        implement.
+        """
+        ...
+
     def enrich_with_replay(self, episodes, slp_path, self_port: int) -> list:
         """Optional hook: read the .slp at `slp_path` post-match and
         finalize rewards for any episodes the task marked as pending.

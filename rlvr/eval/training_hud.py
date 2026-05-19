@@ -3,7 +3,7 @@
 Tails the training log, renders a 960x540 pygame window:
 
   +-- HEADER ----------------------------------------+
-  |  RLVR live · combo_extend       update X/50  ▓▓▓ |
+  |  RLVR live · composite_vr       update X/50  ▓▓▓ |
   +-- PLAYERS ---------------------------------------+
   |  P1: trainee (learning combo extension)          |
   |  P2: frozen BC baseline (fixed opponent)         |
@@ -108,7 +108,7 @@ def _pick_font(size, bold=False):
 
 class HUDState:
     def __init__(self):
-        self.task_name = "combo_extend"
+        self.task_name = "composite_vr"
         self.task_description = "learning to extend punishes on opp"
         self.opponent = "frozen BC"
         self.update = 0

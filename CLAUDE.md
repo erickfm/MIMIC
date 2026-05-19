@@ -499,17 +499,22 @@ checks), `tools/validate_checkpoint.py` (per-head CE on val),
 
 ## Porting slippistats logic (live-streaming variants)
 
-Several VR tasks under `rlvr/online/tasks/` need streaming-state-
+Several VR modules under `rlvr/online/vr/` need streaming-state-
 machine versions of logic that already exists in the slippistats
 library (`~/.local/lib/python3.12/site-packages/slippistats/`).
 slippistats is **batch on parsed .slp**; our actor needs
 **streaming on live `libmelee.PlayerState`**. Same predicates,
 different data shape + interface.
 
-The combo-extension task port (`rlvr/online/tasks/combo_extend_online.py`)
-went through ~6 rounds of "I caught another missed case" with the
-user. Each round caught a real bug. Pattern: the obvious predicates
-get ported on the first pass, the specialized ones get missed.
+The streaming-slippistats module (`rlvr/online/slippi_stream.py`) is
+the canonical home for these ports — the `is_*`/`in_punish_state`
+predicates plus the `MoveCounter` / `ComboTracker` / `TechTracker` /
+`RecoveryTracker` state machines, consumed by the VR modules in
+`rlvr/online/vr/`. Its combo logic went through ~6 rounds of "I caught
+another missed case" (in the now-retired `combo_extend_online.py`,
+since superseded by `slippi_stream.py` + the `combo_length` VR). Each
+round caught a real bug. Pattern: the obvious predicates get ported on
+the first pass, the specialized ones get missed.
 
 **Default to paranoid faithfulness when porting** any slippistats
 logic. Concretely:
@@ -527,8 +532,8 @@ logic. Concretely:
    slippistats DOESN'T have unless the reason is documented. They
    handled the edge cases we'd think to add.
 
-Specific gotchas already found in the combo_extend port (all are
-slippistats behaviors a naive port misses):
+Specific gotchas already found while porting the combo logic into
+`slippi_stream.py` (all are slippistats behaviors a naive port misses):
 
 - **THROWN range (239-243)** is separate from CAPTURE (223-232).
   Throws are NOT in the "in opp's grab" set on their own — a
@@ -548,6 +553,15 @@ slippistats behaviors a naive port misses):
   opp's. Move counting requires tracking self.action + action_frame.
 - **No frame-count hard cap** in slippistats. The three termination
   conditions (opp died / K-gap / bot died) are sufficient.
+- **The `stock` counter decrements ~1.5 s *after* the kill** — the KO'd
+  character runs the DEAD animation (action 0-10) first. A fixed
+  backward look-back window from the stock-decrement frame lands inside
+  those DEAD frames and misses the killing hit. This broke
+  `stock_delta`'s SD-gate — every kill scored as an opponent
+  self-destruct, inverting the reward. Gate hit-recency *statefully*
+  (`OppHitRecencyTracker`: a decay counter that DEAD frames pass through
+  untouched), not with a backward scan. `low_percent_kill` still has
+  this bug in both its SD-gate and its death-percent peak.
 
 When porting new slippistats logic (edgeguard, shield-escape,
 pressure, etc.), file a research note specifically calling out
@@ -680,6 +694,20 @@ references to the slippistats functions used. Past notes:
     `ValueError('Null video requires mainline or ExiAI Ishiiruka.')`
     and the `ENABLE_HEADLESS` cmake flag is broken on this fork
     anyway (project-slippi/Ishiiruka#209).
+
+18. **FFW (`emulator_ffw/` + `--use-exi-inputs --enable-ffw`) is not
+    gameplay-faithful.** It produces matches ~4× shorter than realtime
+    from the same models (h2h: ~2,400 vs ~9,700 frames/match) — the bots
+    lose stocks ~4× faster, likely the EXI input path mistiming
+    controller inputs under fast-forward. Do NOT use FFW for RL training
+    or h2h eval; run realtime (`emulator/`). A win-rate that looks
+    consistent FFW-vs-realtime is a false positive — win-rate survives
+    *symmetric* degradation (both bots equally hobbled); compare **match
+    length** (frame count) to detect emulator-fidelity problems. The
+    separate inter-update PPO-pause disconnect (`EnetDisconnected`, enet
+    unserviced > ~20 s) is fixed by the `dolphin_actor.py` keepalive
+    thread, but that fix is moot while FFW gameplay is unfaithful. See
+    `docs/research-notes-2026-05-18.md`.
 
 ## Research notes
 

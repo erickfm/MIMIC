@@ -132,7 +132,10 @@ def ppo_update(
 
     # --- re-forward in minibatches with gradient ---
     all_logprobs_theta = []
-    model.train()
+    # eval(), not train(): the re-forward must be deterministic so the
+    # policy logprobs are comparable to the eval-mode reference and to
+    # the rollout-time logprobs. eval() does not block gradients.
+    model.eval()
     optimizer.zero_grad()
     minibatch = cfg.minibatch_frames
     total_loss = 0.0
