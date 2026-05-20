@@ -280,6 +280,9 @@ class DolphinActor:
         self.opp_ctx: Optional[dict] = None
         self.opp_policy: Optional[_PolicyRunner] = None
         self.opp_n_btn: Optional[int] = None
+        # CUDA side stream for the opponent's forward. None when there
+        # is no opponent or when running CPU-only. Allocated below.
+        self._opp_stream: Optional["torch.cuda.Stream"] = None
         if cfg.opponent_ckpt:
             opp_data_dir = cfg.opponent_data_dir or ""
             log.info("loading frozen opponent: %s (data_dir=%s, T=%.2f)",
@@ -311,6 +314,12 @@ class DolphinActor:
             self.opp_policy = _PolicyRunner(
                 self.opp_model, opp_cfg.max_seq_len, device, opp_ctx)
             self.opp_n_btn = n
+            # Side stream lets the opp forward overlap the trainee's on
+            # the GPU. Frame budget is 16.67 ms and each ~20M-param
+            # forward is ~5-10 ms; without overlap the two serialize
+            # and Dolphin runs <60 fps (blocking_input waits on Python).
+            if "cuda" in str(device):
+                self._opp_stream = torch.cuda.Stream(device=device)
 
         # Streaming state history (libmelee GameStates as RLVR PlayerState
         # objects via the libmelee_adapter shim — enough for task logic).
@@ -357,6 +366,11 @@ class DolphinActor:
             "..", "..", "replays_online",
         )
         os.makedirs(replay_dir, exist_ok=True)
+        # Always-headless: route Dolphin to the Xvfb buffer (:99) when no
+        # display is inherited. setdefault, so an explicit DISPLAY (e.g. a
+        # dev watching on :0) still wins. :99 is reached only here and in
+        # tools/play_netplay.py — never via a global export (see setup.sh).
+        os.environ.setdefault("DISPLAY", ":99")
         self.console = melee.Console(
             path=self.cfg.dolphin_path, is_dolphin=True,
             tmp_home_directory=True, copy_home_directory=False,
@@ -535,15 +549,42 @@ class DolphinActor:
         except Exception:
             pass
 
-        # Build input frame + forward
+        # Build input frame(s). Trainee always; opponent if configured.
+        # Both frames are built eagerly so we can launch the two GPU
+        # forwards concurrently — see "concurrent dispatch" below.
         frame = build_frame(gs, self.policy.prev_sent, self.ctx)
         if frame is None:
             return
         self.policy.push_frame(frame)
 
-        # Policy forward + sample is ALWAYS needed (Dolphin waits on us).
+        opp_frame = None
+        if self.opp_policy is not None:
+            if self.self_port == 1:
+                opp_frame = build_frame_p2(gs, self.opp_policy.prev_sent,
+                                           self.opp_ctx)
+            else:
+                opp_frame = build_frame(gs, self.opp_policy.prev_sent,
+                                        self.opp_ctx)
+            if opp_frame is not None:
+                self.opp_policy.push_frame(opp_frame)
+
+        # Concurrent dispatch: launch BOTH forwards before draining
+        # either. The opp forward goes on a side CUDA stream so it
+        # overlaps the trainee's default-stream forward on the GPU. The
+        # trainee sample below implicitly syncs the default stream; the
+        # opp stream is waited on later, after the CPU-bound state
+        # machine / HUD / snapshot work runs alongside the opp kernel.
+        opp_logits = None
         with torch.no_grad():
+            if opp_frame is not None and self._opp_stream is not None:
+                self._opp_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(self._opp_stream):
+                    opp_logits = self.opp_policy.forward_latest(self.opp_model)
             theta_logits = self.policy.forward_latest(self.model)
+            # CPU / no-side-stream fallback: sequential.
+            if opp_frame is not None and self._opp_stream is None:
+                opp_logits = self.opp_policy.forward_latest(self.opp_model)
+
         (m_i, s_i, c_i, b_i), lp_old = _sample_four_heads(
             theta_logits, self.cfg.temperature
         )
@@ -578,6 +619,16 @@ class DolphinActor:
             if opp is not None:
                 log.info("EVT_EP_TICK frame=%d opp_pct=%.1f",
                          int(gs.frame), float(opp.percent))
+
+        # Live per-VR pulse for the HUD — every 30 game frames (~2 Hz at
+        # 60 fps) emit the composite task's in-progress per-VR state, so
+        # the HUD can show each card's reward climbing during the match
+        # instead of going silent for ~3 min between EVT_EP_VR events.
+        if (self._episode_open_idx is not None
+                and (int(gs.frame) % 30) == 0
+                and hasattr(self.task, "live_state")):
+            log.info("EVT_VR_TICK %s",
+                     json.dumps(self.task.live_state(), sort_keys=True))
 
         # Ref-model forward is now done at PPO-update time on the
         # cached obs (frozen weights → deterministic logprob, doesn't
@@ -618,27 +669,17 @@ class DolphinActor:
             self.ego_ctrl, m_i, s_i, c_i, b_i, n_btn
         )
 
-        # Opponent step (when configured): build the perspective-flipped
-        # frame, run the frozen opp policy, press the cpu_port. Selection
-        # of build_frame vs build_frame_p2 depends on which port the
-        # trainee is on — opp always sees from the OTHER port's POV.
-        if self.opp_policy is not None:
-            if self.self_port == 1:
-                opp_frame = build_frame_p2(gs, self.opp_policy.prev_sent,
-                                           self.opp_ctx)
-            else:
-                opp_frame = build_frame(gs, self.opp_policy.prev_sent,
-                                        self.opp_ctx)
-            if opp_frame is not None:
-                self.opp_policy.push_frame(opp_frame)
-                with torch.no_grad():
-                    opp_logits = self.opp_policy.forward_latest(self.opp_model)
-                (om_i, os_i, oc_i, ob_i), _ = _sample_four_heads(
-                    opp_logits, self.cfg.opponent_temperature
-                )
-                self.opp_policy.prev_sent = _press_controller(
-                    self.cpu_ctrl, om_i, os_i, oc_i, ob_i, self.opp_n_btn
-                )
+        # Opponent step (when configured): the forward was already
+        # launched concurrently above; just wait, sample, and press.
+        if opp_logits is not None:
+            if self._opp_stream is not None:
+                torch.cuda.current_stream().wait_stream(self._opp_stream)
+            (om_i, os_i, oc_i, ob_i), _ = _sample_four_heads(
+                opp_logits, self.cfg.opponent_temperature
+            )
+            self.opp_policy.prev_sent = _press_controller(
+                self.cpu_ctrl, om_i, os_i, oc_i, ob_i, self.opp_n_btn
+            )
 
     def _close_open_episode_abortive(self) -> None:
         """Discard any in-progress episode (menu-return, abort)."""
