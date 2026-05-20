@@ -27,6 +27,7 @@ import os
 import signal
 import sys
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -121,10 +122,24 @@ class _PolicyRunner:
 
     def __init__(self, model, seq_len: int, device, ctx: dict):
         self.model = model
+        # torch.compile the inference path only — the raw `model` handle
+        # is still what PPO sees (so its variable-batch training path is
+        # unaffected). Compiled module shares parameters with `model`,
+        # so optimizer updates propagate transparently. No precision
+        # change; just kernel fusion + launch-overhead reduction.
+        self._compiled_model = (
+            torch.compile(model) if "cuda" in str(device) else model
+        )
         self.seq_len = seq_len
         self.device = device
         self.ctx = ctx
+        # CPU deque kept for _snapshot_context (PPO replay needs CPU
+        # tensors). The GPU sliding window below mirrors it for the
+        # live forward path so we don't re-concat + H2D 180 frames per
+        # forward — that overhead measured at ~4.5 ms/frame p50 (half
+        # the per-frame budget) before this change.
         self._cache: Deque[Dict[str, torch.Tensor]] = deque(maxlen=seq_len)
+        self._gpu_window: Optional[Dict[str, torch.Tensor]] = None
         self.prev_sent: Optional[dict] = None
 
     def push_frame(self, frame: Dict[str, torch.Tensor]) -> None:
@@ -135,14 +150,35 @@ class _PolicyRunner:
                 self._cache.append({k: v.clone() for k, v in mock.items()})
         self._cache.append(frame)
 
+        # Mirror the deque state into a persistent GPU sliding-window
+        # tensor per key. On the first real frame we build the full
+        # (T, ...) window from the just-filled cache. On every
+        # subsequent frame we slide-left and append the new frame at
+        # the end — a single small GPU cat instead of the 180-frame
+        # CPU concat + H2D the old forward_latest performed.
+        if self._gpu_window is None:
+            self._gpu_window = {}
+            for k in frame:
+                stacked = torch.cat([f[k] for f in self._cache], dim=0)
+                self._gpu_window[k] = stacked.to(self.device)
+        else:
+            for k, v in frame.items():
+                v_dev = v.to(self.device)
+                self._gpu_window[k] = torch.cat(
+                    [self._gpu_window[k][1:], v_dev], dim=0
+                )
+
     def forward_latest(self, model=None) -> Dict[str, torch.Tensor]:
         """Run the model on the current context window; return the
-        logits at the final position (B=1)."""
-        m = model if model is not None else self.model
-        frames = list(self._cache)
-        batch = {}
-        for k in frames[0]:
-            batch[k] = torch.cat([f[k] for f in frames], dim=0).unsqueeze(0).to(self.device)
+        logits at the final position (B=1). Uses the compiled inference
+        wrapper (shares params with `self.model`); the optional `model`
+        arg is honored for callers that pass a different model, in
+        which case compilation is skipped."""
+        if model is not None and model is not self.model:
+            m = model
+        else:
+            m = self._compiled_model
+        batch = {k: v.unsqueeze(0) for k, v in self._gpu_window.items()}
         return m(batch)
 
 
@@ -321,6 +357,13 @@ class DolphinActor:
             if "cuda" in str(device):
                 self._opp_stream = torch.cuda.Stream(device=device)
 
+        # Per-frame profiling: accumulate per-segment durations and emit a
+        # P50/P95 summary every _PROFILE_WINDOW frames. Cheap (~6 floats /
+        # frame); diagnoses why Dolphin runs <60 fps when CPU and GPU
+        # utilization both look idle.
+        self._timing_buf: List[Dict[str, float]] = []
+        self._PROFILE_WINDOW: int = 60
+
         # Streaming state history (libmelee GameStates as RLVR PlayerState
         # objects via the libmelee_adapter shim — enough for task logic).
         self._state_history: Deque[GameState] = deque(maxlen=cfg.state_history_len)
@@ -470,6 +513,26 @@ class DolphinActor:
             )
         return out
 
+    def _emit_timing_summary(self) -> None:
+        """Log P50 / P95 per-segment per-frame durations (in ms) from the
+        last _PROFILE_WINDOW frames. Tells us which segment of the
+        in-game critical path is the long pole when Dolphin runs
+        below 60 fps with low CPU / GPU utilization."""
+        if not self._timing_buf:
+            return
+        keys = ["build", "launch", "fwd+sample", "cpu_work",
+                "opp_w+s+p", "total"]
+        parts = []
+        for k in keys:
+            xs = sorted(d[k] for d in self._timing_buf)
+            p50 = xs[len(xs) // 2] * 1000.0
+            p95 = xs[min(len(xs) - 1, int(len(xs) * 0.95))] * 1000.0
+            parts.append(f"{k}={p50:.2f}/{p95:.2f}")
+        fps_p50 = 1.0 / max(1e-6, sorted(d["total"]
+                            for d in self._timing_buf)[len(self._timing_buf) // 2])
+        log.info("EVT_PERF n=%d fps_p50=%.1f %s (ms p50/p95)",
+                 len(self._timing_buf), fps_p50, " ".join(parts))
+
     def _rlvr_gamestate(self, gs) -> GameState:
         """Convert a libmelee GameState -> RLVR GameState (for task logic)."""
         players = sorted(gs.players.items())
@@ -536,6 +599,7 @@ class DolphinActor:
 
         self._in_game = True
         self.step_count += 1
+        _perf_t0 = time.perf_counter()
 
         # Snapshot current stocks for the eventual EVT_MATCH_END emission.
         try:
@@ -567,6 +631,7 @@ class DolphinActor:
                                         self.opp_ctx)
             if opp_frame is not None:
                 self.opp_policy.push_frame(opp_frame)
+        _perf_t1 = time.perf_counter()
 
         # Concurrent dispatch: launch BOTH forwards before draining
         # either. The opp forward goes on a side CUDA stream so it
@@ -584,10 +649,12 @@ class DolphinActor:
             # CPU / no-side-stream fallback: sequential.
             if opp_frame is not None and self._opp_stream is None:
                 opp_logits = self.opp_policy.forward_latest(self.opp_model)
+        _perf_t2 = time.perf_counter()
 
         (m_i, s_i, c_i, b_i), lp_old = _sample_four_heads(
             theta_logits, self.cfg.temperature
         )
+        _perf_t3 = time.perf_counter()
 
         # Track task state machine FIRST so should_start sees the latest frame.
         rlvr_gs = self._rlvr_gamestate(gs)
@@ -668,6 +735,7 @@ class DolphinActor:
         self.policy.prev_sent = _press_controller(
             self.ego_ctrl, m_i, s_i, c_i, b_i, n_btn
         )
+        _perf_t4 = time.perf_counter()
 
         # Opponent step (when configured): the forward was already
         # launched concurrently above; just wait, sample, and press.
@@ -680,6 +748,19 @@ class DolphinActor:
             self.opp_policy.prev_sent = _press_controller(
                 self.cpu_ctrl, om_i, os_i, oc_i, ob_i, self.opp_n_btn
             )
+        _perf_t5 = time.perf_counter()
+
+        self._timing_buf.append({
+            "build":       _perf_t1 - _perf_t0,
+            "launch":      _perf_t2 - _perf_t1,
+            "fwd+sample":  _perf_t3 - _perf_t2,
+            "cpu_work":    _perf_t4 - _perf_t3,
+            "opp_w+s+p":   _perf_t5 - _perf_t4,
+            "total":       _perf_t5 - _perf_t0,
+        })
+        if len(self._timing_buf) >= self._PROFILE_WINDOW:
+            self._emit_timing_summary()
+            self._timing_buf = []
 
     def _close_open_episode_abortive(self) -> None:
         """Discard any in-progress episode (menu-return, abort)."""
