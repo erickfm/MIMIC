@@ -5,8 +5,15 @@ deltas only (a negative delta is a respawn reset, not healing). See
 docs/vr-proposals/damage-delta.md.
 
 `lam_give` and `lam_take` are separate knobs — their ratio is the bot's
-aggression dial. Keep both small: a full stock of damage (~120%) should
-sum to well under stock-delta's `±1`.
+aggression dial. Defaults bumped from the original 0.003 to 0.04 after
+the first 7-VR run showed damage_delta contributing only 1.3% of total
+gradient signal (live HUD data) — too small to actually shape behavior.
+At 0.04, a full stock of damage (~120%) sums to ~4.8 — meaningfully
+bigger than stock_delta's ±1, encoding that "the journey of dealing
+damage" is the dominant per-event signal among the dense shaping VRs.
+This is the per-event-magnitude knob; relative importance among VRs
+lives in DEFAULT_VR_WEIGHTS (rlvr/online/vr/__init__.py), where this VR
+sits at weight 1.0 (no doubling-up).
 """
 from __future__ import annotations
 
@@ -18,7 +25,7 @@ class DamageDeltaVR(VRModule):
     id = "damage_delta"
 
     def __init__(self, self_port: int = 1,
-                 lam_give: float = 0.003, lam_take: float = 0.003):
+                 lam_give: float = 0.04, lam_take: float = 0.04):
         self.self_port = self_port
         self.lam_give = lam_give
         self.lam_take = lam_take
