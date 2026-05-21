@@ -198,8 +198,17 @@ def train(
                 opp_ctx_shared["n_combos"] = n
             opp_max_seq_len_shared = opp_cfg_shared.max_seq_len
             opp_n_btn_shared = n
+        # Each actor gets its OWN task instance — sharing one across N
+        # actors corrupts the per-VR state machines (see ActorPool
+        # docstring). The single `task` built at line 146 above is
+        # used only by the single-actor branch below. _build_task is a
+        # pure factory: each call constructs fresh VR module instances
+        # via VR_REGISTRY (id -> class lookup), so the factory is safe
+        # to invoke N times.
         actor = ActorPool(
-            n=n_actors, cfg=actor_cfg, task=task,
+            n=n_actors, cfg=actor_cfg,
+            task_factory=lambda: _build_task(
+                task_id, vrs, vr_weights, self_port=self_port),
             model=model, ref_model=ref_model, ctx=ctx, device=device,
             opp_model=opp_model_shared,
             opp_max_seq_len=opp_max_seq_len_shared or cfg.max_seq_len,

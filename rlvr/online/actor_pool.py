@@ -26,7 +26,7 @@ import logging
 import threading
 import time
 from copy import copy
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
@@ -196,7 +196,7 @@ class ActorPool:
         self,
         n: int,
         cfg: ActorConfig,
-        task: OnlineTask,
+        task_factory: Callable[[], OnlineTask],
         model,
         ref_model,
         ctx: dict,
@@ -207,6 +207,17 @@ class ActorPool:
         opp_n_btn: int,
         model_seq_len: int = 256,
     ):
+        # `task_factory()` is invoked once per actor (N total) to get N
+        # INDEPENDENT task instances. Sharing one task across N actors
+        # corrupts its per-VR state machines (combo tracker, stock-delta
+        # prev_stock, damage-delta prev_percent etc.) because each
+        # actor's observe() call mutates the same counters with state
+        # from a different game. Empirically: produced stock_delta.kills
+        # in the thousands within ~90s of wall clock and made all N
+        # actors read identical (corrupt) live_state values. Each
+        # factory call must return a task with fresh VR module
+        # instances; _build_task in loop.py does this naturally because
+        # VR_REGISTRY maps id -> class, not id -> instance.
         self.n = n
         self.coord = BatchCoordinator(n, model, opp_model, device)
         self.actors: List[DolphinActor] = []
@@ -215,7 +226,8 @@ class ActorPool:
             acfg = copy(cfg)
             acfg.actor_id = i
             actor = DolphinActor(
-                cfg=acfg, task=task, model=model, ref_model=ref_model,
+                cfg=acfg, task=task_factory(),
+                model=model, ref_model=ref_model,
                 ctx=ctx, device=device, model_seq_len=model_seq_len,
                 self_port=1,
                 injected_opp_model=opp_model,
