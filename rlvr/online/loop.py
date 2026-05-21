@@ -95,6 +95,9 @@ def train(
     use_wandb: bool = False,
     seed: int = 0,
     n_actors: int = 1,
+    episode_frames: Optional[int] = None,
+    whole_match_episode_override: Optional[bool] = None,
+    infinite_time: bool = False,
 ) -> None:
     from tools.inference_utils import load_inference_context, load_mimic_model
 
@@ -157,8 +160,16 @@ def train(
         cpu_level=cpu_level,
         stage=stage,
         temperature=temperature,
-        # The VR suite runs as one whole-match episode (CompositeVRTask).
-        whole_match_episode=bool(vrs),
+        # The VR suite runs as one whole-match episode (CompositeVRTask)
+        # by default. --whole-match-episode / --no-whole-match-episode
+        # overrides explicitly; --episode-frames sets the cap when
+        # whole-match is False (continuous-mode training with
+        # frame-budget episodes).
+        whole_match_episode=(whole_match_episode_override
+                             if whole_match_episode_override is not None
+                             else bool(vrs)),
+        max_episode_frames=(episode_frames if episode_frames is not None
+                            else 600),
         gfx_backend=gfx_backend,
         # FFW: needs both use_exi_inputs and enable_ffw, plus the
         # emulator_ffw/ Exi-AI build (not emulator/).
@@ -170,6 +181,7 @@ def train(
         opponent_data_dir=str(opponent_data_dir) if opponent_data_dir else None,
         opponent_temperature=opponent_temperature,
         replay_dir=str(replay_dir) if replay_dir else None,
+        infinite_time=infinite_time,
     )
     if n_actors > 1:
         # ActorPool path: load opp_model once here and inject it into
@@ -445,6 +457,28 @@ def main():
                          "inference across N actors. ~N x throughput "
                          "vs single-actor (each Dolphin still caps at "
                          "60 fps realtime).")
+    ap.add_argument("--episode-frames", type=int, default=None,
+                    help="Cap each episode at N frames (mid-match close + "
+                         "immediate reopen at the cap). Default: 600 for "
+                         "scenario tasks, ignored when --vrs is in "
+                         "whole-match mode. Use with "
+                         "--no-whole-match-episode for frame-budget VR "
+                         "training (e.g. 18000 ≈ 5 min game time).")
+    ap.add_argument("--whole-match-episode",
+                    action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="Treat one match as one episode. Default: True "
+                         "when --vrs is set, False otherwise. Pass "
+                         "--no-whole-match-episode plus --episode-frames "
+                         "for fixed-budget episodes inside natural matches.")
+    ap.add_argument("--infinite-time", action="store_true",
+                    help="Enable libmelee's Infinite Time Mode gecko code "
+                         "(Fizzi: 043D4A48 00340000). Hypothesis: this "
+                         "switches Melee from 'Stock Mode ends on 0 "
+                         "stocks' to 'Time Mode with no timer' — "
+                         "matches don't end on stock loss. Combine with "
+                         "--no-whole-match-episode --episode-frames N for "
+                         "continuous-mode training.")
     args = ap.parse_args()
     if (args.task is None) == (args.vrs is None):
         ap.error("exactly one of --task / --vrs is required")
@@ -476,6 +510,9 @@ def main():
         log_file=args.log_file,
         use_wandb=args.wandb, seed=args.seed,
         n_actors=args.n_actors,
+        episode_frames=args.episode_frames,
+        whole_match_episode_override=args.whole_match_episode,
+        infinite_time=args.infinite_time,
     )
 
 

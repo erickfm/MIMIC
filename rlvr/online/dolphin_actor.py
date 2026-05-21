@@ -117,6 +117,13 @@ class ActorConfig:
     # by ActorPool to 0..N-1 so per-actor log lines can be demuxed by
     # the HUD parser (EVT_* lines are prefixed with actor=K).
     actor_id: int = 0
+    # Infinite Time Mode gecko code (Fizzi, 043D4A48 00340000). Zeros
+    # the lower 16 bits of the match-settings word that normally sets
+    # "Stock Mode" (00340102). Hypothesis: this flips Melee into
+    # "Time Mode with no timer," in which matches don't end on stock
+    # depletion. Enables continuous-mode RL training without menu
+    # transitions between matches.
+    infinite_time: bool = False
 
 
 class _PolicyRunner:
@@ -475,6 +482,7 @@ class DolphinActor:
             disable_audio=self.cfg.disable_audio,
             use_exi_inputs=self.cfg.use_exi_inputs,
             enable_ffw=self.cfg.enable_ffw,
+            infinite_time=self.cfg.infinite_time,
             save_replays=True, replay_dir=replay_dir,
         )
         log.info("actor=%d slippi_port=%d", self._actor_id, _slippi_port)
