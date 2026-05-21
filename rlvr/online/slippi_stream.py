@@ -500,7 +500,18 @@ class RecoveryTracker:
                 self._active = True
                 self._start_stock = stock
         else:
-            if self._start_stock is not None and stock < self._start_stock:
+            # Failure: bot crossed the blast zone (entered DYING action
+            # range 0-10) while still recovering. Check this BEFORE the
+            # success branch because under the infinite_time gecko the
+            # game doesn't decrement stock (stock<start_stock never
+            # fires), and the bot respawns on the platform with
+            # on_ground=True, which would falsely match the success
+            # branch. The dying-action rising edge correctly captures
+            # off-stage deaths in either gecko mode.
+            if is_dying(self_ps):
+                result = RecoveryResult(succeeded=False)
+                self._active = False
+            elif self._start_stock is not None and stock < self._start_stock:
                 result = RecoveryResult(succeeded=False)
                 self._active = False
             elif not offstage and (
