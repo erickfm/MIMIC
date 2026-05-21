@@ -306,9 +306,17 @@ class ActorPool:
             try:
                 actor._step_one_frame()
             except Exception as exc:
-                log.error("actor %d crashed in _step_one_frame: %s",
+                # Tolerate single-actor death. Common cause:
+                # EnetDisconnected after a Dolphin glitch (CLAUDE.md
+                # pitfall #18). Killing the pool because one Dolphin
+                # disconnects means losing N-1 healthy actors too —
+                # too brittle in practice. Drop this actor, log
+                # clearly, let the others continue. The
+                # BatchCoordinator's max_wait_ms timeout handles the
+                # missing submissions naturally.
+                log.error("actor=%d crashed in _step_one_frame: %s — "
+                          "dropping actor, pool continues with N-1",
                           actor_id, exc, exc_info=True)
-                self._stop_collect.set()
                 return
 
             # Match end: finalize buffered episodes.
