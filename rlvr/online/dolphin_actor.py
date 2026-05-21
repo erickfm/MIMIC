@@ -137,13 +137,18 @@ class _PolicyRunner:
         self.seq_len = seq_len
         self.device = device
         self.ctx = ctx
-        # CPU deque kept for _snapshot_context (PPO replay needs CPU
-        # tensors). The GPU sliding window below mirrors it for the
-        # live forward path so we don't re-concat + H2D 180 frames per
-        # forward — that overhead measured at ~4.5 ms/frame p50 (half
-        # the per-frame budget) before this change.
+        # CPU deque kept for legacy callers; the live in-game path
+        # bypasses it via _cpu_window / _gpu_window below. GPU window
+        # = (T, ...) tensor on device, updated incrementally — saves
+        # the 180-frame concat + H2D that used to run per forward.
+        # CPU window = same shape on host, used by _snapshot_context
+        # to produce per-frame FrameRecord obs as one .clone() instead
+        # of a 180-element Python list comp. At N>1 actors this is the
+        # difference between cpu_work running per-actor or
+        # GIL-serialized 4x across threads.
         self._cache: Deque[Dict[str, torch.Tensor]] = deque(maxlen=seq_len)
         self._gpu_window: Optional[Dict[str, torch.Tensor]] = None
+        self._cpu_window: Optional[Dict[str, torch.Tensor]] = None
         self.prev_sent: Optional[dict] = None
 
     def push_frame(self, frame: Dict[str, torch.Tensor]) -> None:
@@ -154,22 +159,30 @@ class _PolicyRunner:
                 self._cache.append({k: v.clone() for k, v in mock.items()})
         self._cache.append(frame)
 
-        # Mirror the deque state into a persistent GPU sliding-window
-        # tensor per key. On the first real frame we build the full
+        # Mirror the deque state into persistent sliding-window tensors
+        # (one on GPU for the live forward, one on CPU for the
+        # snapshot). On the first real frame we build the full
         # (T, ...) window from the just-filled cache. On every
         # subsequent frame we slide-left and append the new frame at
-        # the end — a single small GPU cat instead of the 180-frame
-        # CPU concat + H2D the old forward_latest performed.
+        # the end — single tensor cats instead of 180-element list
+        # comps. The CPU clone in _snapshot_context then becomes one
+        # memcpy per key (releases GIL) vs the prior 180-iteration
+        # list comp (held GIL the whole time).
         if self._gpu_window is None:
             self._gpu_window = {}
+            self._cpu_window = {}
             for k in frame:
                 stacked = torch.cat([f[k] for f in self._cache], dim=0)
+                self._cpu_window[k] = stacked.detach().contiguous()
                 self._gpu_window[k] = stacked.to(self.device)
         else:
             for k, v in frame.items():
                 v_dev = v.to(self.device)
                 self._gpu_window[k] = torch.cat(
                     [self._gpu_window[k][1:], v_dev], dim=0
+                )
+                self._cpu_window[k] = torch.cat(
+                    [self._cpu_window[k][1:], v.detach()], dim=0
                 )
 
     def forward_latest(self, model=None) -> Dict[str, torch.Tensor]:
@@ -540,16 +553,27 @@ class DolphinActor:
                 break
 
     def _snapshot_context(self) -> Dict[str, torch.Tensor]:
-        """Stack the policy cache into a (T, ...) tensor dict (on CPU,
-        detached). Each value is the concatenation of the per-frame
-        leading-dim-1 tensors stored in the deque."""
-        frames = list(self.policy._cache)
-        out: Dict[str, torch.Tensor] = {}
-        for k in frames[0]:
-            out[k] = torch.cat(
-                [f[k].detach().cpu() for f in frames], dim=0
-            )
-        return out
+        """Return a (T, ...) tensor dict snapshot of the current
+        context window, on CPU, detached. Used by PPO replay to
+        re-forward the policy with gradient on the exact input it saw
+        at sampling time.
+
+        Reads from `_PolicyRunner._cpu_window` (a persistent (T, ...)
+        tensor mirrored from `_cache` incrementally in `push_frame`).
+        One `.clone()` per key — C-level memcpy that releases the GIL
+        — vs the prior 180-iteration Python list comp that held the
+        GIL the whole time. At N>1 actors this is what lets cpu_work
+        scale; with the old version, 4 threads serialized through the
+        GIL and each thread's snapshot cost grew ~Nx.
+        """
+        cpu_window = self.policy._cpu_window
+        if cpu_window is None:
+            # First-ever frame hasn't been pushed yet. Fall back to
+            # the deque path so we still return something well-formed.
+            frames = list(self.policy._cache)
+            return {k: torch.cat([f[k].detach() for f in frames], dim=0)
+                    for k in frames[0]}
+        return {k: v.clone() for k, v in cpu_window.items()}
 
     def _emit_timing_summary(self) -> None:
         """Log P50 / P95 per-segment per-frame durations (in ms) from the
