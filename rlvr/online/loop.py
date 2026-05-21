@@ -94,6 +94,7 @@ def train(
     log_file: Optional[Path] = None,
     use_wandb: bool = False,
     seed: int = 0,
+    n_actors: int = 1,
 ) -> None:
     from tools.inference_utils import load_inference_context, load_mimic_model
 
@@ -170,12 +171,49 @@ def train(
         opponent_temperature=opponent_temperature,
         replay_dir=str(replay_dir) if replay_dir else None,
     )
-    actor = DolphinActor(
-        cfg=actor_cfg, task=task,
-        model=model, ref_model=ref_model, ctx=ctx,
-        device=device, model_seq_len=cfg.max_seq_len,
-        self_port=self_port,
-    )
+    if n_actors > 1:
+        # ActorPool path: load opp_model once here and inject it into
+        # all N DolphinActor instances, so all share one frozen model
+        # + one BatchCoordinator. N Dolphins run concurrently, their
+        # forwards batched into a single (N, T, ...) call per tick.
+        from rlvr.online.actor_pool import ActorPool
+        opp_model_shared = None
+        opp_ctx_shared = None
+        opp_max_seq_len_shared = None
+        opp_n_btn_shared = None
+        if opponent_ckpt:
+            opp_model_shared, opp_cfg_shared = load_mimic_model(
+                str(opponent_ckpt), device)
+            for p in opp_model_shared.parameters():
+                p.requires_grad_(False)
+            opp_model_shared.eval()
+            opp_data_dir_str = (str(opponent_data_dir) if opponent_data_dir
+                                else str(data_dir))
+            opp_ctx_base = load_inference_context(opp_data_dir_str)
+            from mimic.features import BTN7_N_CLASSES
+            opp_ctx_shared = dict(opp_ctx_base)
+            n = opp_cfg_shared.n_controller_combos
+            if n == BTN7_N_CLASSES:
+                opp_ctx_shared["combo_map"] = {}
+                opp_ctx_shared["n_combos"] = n
+            opp_max_seq_len_shared = opp_cfg_shared.max_seq_len
+            opp_n_btn_shared = n
+        actor = ActorPool(
+            n=n_actors, cfg=actor_cfg, task=task,
+            model=model, ref_model=ref_model, ctx=ctx, device=device,
+            opp_model=opp_model_shared,
+            opp_max_seq_len=opp_max_seq_len_shared or cfg.max_seq_len,
+            opp_ctx=opp_ctx_shared or ctx,
+            opp_n_btn=opp_n_btn_shared or 7,
+            model_seq_len=cfg.max_seq_len,
+        )
+    else:
+        actor = DolphinActor(
+            cfg=actor_cfg, task=task,
+            model=model, ref_model=ref_model, ctx=ctx,
+            device=device, model_seq_len=cfg.max_seq_len,
+            self_port=self_port,
+        )
     actor.start()
 
     # Auto-launch the live web HUD on every RLVR run when --log-file
@@ -392,6 +430,12 @@ def main():
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--n-actors", type=int, default=1,
+                    help="Number of parallel Dolphin instances. >1 spawns "
+                         "an ActorPool with shared model + batched "
+                         "inference across N actors. ~N x throughput "
+                         "vs single-actor (each Dolphin still caps at "
+                         "60 fps realtime).")
     args = ap.parse_args()
     if (args.task is None) == (args.vrs is None):
         ap.error("exactly one of --task / --vrs is required")
@@ -422,6 +466,7 @@ def main():
         replay_dir=args.replay_dir,
         log_file=args.log_file,
         use_wandb=args.wandb, seed=args.seed,
+        n_actors=args.n_actors,
     )
 
 

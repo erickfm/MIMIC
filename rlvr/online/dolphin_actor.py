@@ -113,6 +113,10 @@ class ActorConfig:
     # play the same character. Default trainee=0 (white), opp=3 (green).
     trainee_costume: int = 0
     opponent_costume: int = 3
+    # Multi-actor identifier. 0 in the default single-actor path; set
+    # by ActorPool to 0..N-1 so per-actor log lines can be demuxed by
+    # the HUD parser (EVT_* lines are prefixed with actor=K).
+    actor_id: int = 0
 
 
 class _PolicyRunner:
@@ -300,6 +304,15 @@ class DolphinActor:
         device: str = "cuda",
         model_seq_len: int = 256,
         self_port: int = 1,
+        # Multi-actor injection points. When ActorPool drives N actors,
+        # they share one opp_model + one coordinator. Single-actor mode
+        # leaves these None and the actor loads its own opp_model from
+        # cfg.opponent_ckpt and forwards inline (legacy behavior).
+        injected_opp_model=None,
+        injected_opp_max_seq_len: Optional[int] = None,
+        injected_opp_ctx: Optional[dict] = None,
+        injected_opp_n_btn: Optional[int] = None,
+        coordinator=None,
     ):
         self.cfg = cfg
         self.task = task
@@ -308,6 +321,8 @@ class DolphinActor:
         self.ctx = ctx
         self.device = device
         self.self_port = self_port
+        self.coordinator = coordinator
+        self._actor_id = int(getattr(cfg, "actor_id", 0))
         self.policy = _PolicyRunner(model, model_seq_len, device, ctx)
 
         # Optional frozen opponent policy. When configured, the cpu_port
@@ -319,7 +334,19 @@ class DolphinActor:
         # CUDA side stream for the opponent's forward. None when there
         # is no opponent or when running CPU-only. Allocated below.
         self._opp_stream: Optional["torch.cuda.Stream"] = None
-        if cfg.opponent_ckpt:
+        # ActorPool path: opp model + ctx + n_btn injected from outside,
+        # shared across N actors. No load_mimic_model call here, no
+        # side stream (the coordinator owns its own).
+        if injected_opp_model is not None:
+            self.opp_model = injected_opp_model
+            self.opp_ctx = injected_opp_ctx
+            self.opp_n_btn = injected_opp_n_btn
+            self.opp_policy = _PolicyRunner(
+                injected_opp_model,
+                int(injected_opp_max_seq_len or model_seq_len),
+                device, injected_opp_ctx or ctx,
+            )
+        elif cfg.opponent_ckpt:
             opp_data_dir = cfg.opponent_data_dir or ""
             log.info("loading frozen opponent: %s (data_dir=%s, T=%.2f)",
                      cfg.opponent_ckpt, opp_data_dir or "<trainee's>",
@@ -530,8 +557,8 @@ class DolphinActor:
             parts.append(f"{k}={p50:.2f}/{p95:.2f}")
         fps_p50 = 1.0 / max(1e-6, sorted(d["total"]
                             for d in self._timing_buf)[len(self._timing_buf) // 2])
-        log.info("EVT_PERF n=%d fps_p50=%.1f %s (ms p50/p95)",
-                 len(self._timing_buf), fps_p50, " ".join(parts))
+        log.info("EVT_PERF actor=%d n=%d fps_p50=%.1f %s (ms p50/p95)",
+                 self._actor_id, len(self._timing_buf), fps_p50, " ".join(parts))
 
     def _rlvr_gamestate(self, gs) -> GameState:
         """Convert a libmelee GameState -> RLVR GameState (for task logic)."""
@@ -571,8 +598,8 @@ class DolphinActor:
                     result = "loss"
                 else:
                     result = "draw"
-                log.info("EVT_MATCH_END result=%s trainee_stocks=%d opp_stocks=%d",
-                         result, ts, os_)
+                log.info("EVT_MATCH_END actor=%d result=%s trainee_stocks=%d opp_stocks=%d",
+                         self._actor_id, result, ts, os_)
                 self._in_game = False
                 # Whole-match episode: this match IS the episode, so
                 # score it. Legacy scenario tasks abort an unfinished
@@ -633,22 +660,32 @@ class DolphinActor:
                 self.opp_policy.push_frame(opp_frame)
         _perf_t1 = time.perf_counter()
 
-        # Concurrent dispatch: launch BOTH forwards before draining
-        # either. The opp forward goes on a side CUDA stream so it
-        # overlaps the trainee's default-stream forward on the GPU. The
-        # trainee sample below implicitly syncs the default stream; the
-        # opp stream is waited on later, after the CPU-bound state
-        # machine / HUD / snapshot work runs alongside the opp kernel.
+        # Forward dispatch. Two paths:
+        #   - With coordinator (ActorPool): ship the per-actor GPU
+        #     windows to the BatchCoordinator and block until the
+        #     per-actor split outputs come back. N actors' forwards run
+        #     as one (N, T, ...) batch.
+        #   - Without (single-actor): launch trainee + opp on default
+        #     and side CUDA streams respectively so they overlap.
         opp_logits = None
-        with torch.no_grad():
-            if opp_frame is not None and self._opp_stream is not None:
-                self._opp_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(self._opp_stream):
+        if self.coordinator is not None:
+            theta_logits, opp_logits = self.coordinator.submit_and_wait(
+                self._actor_id,
+                self.policy._gpu_window,
+                (self.opp_policy._gpu_window
+                 if (self.opp_policy is not None and opp_frame is not None)
+                 else None),
+            )
+        else:
+            with torch.no_grad():
+                if opp_frame is not None and self._opp_stream is not None:
+                    self._opp_stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(self._opp_stream):
+                        opp_logits = self.opp_policy.forward_latest(self.opp_model)
+                theta_logits = self.policy.forward_latest(self.model)
+                # CPU / no-side-stream fallback: sequential.
+                if opp_frame is not None and self._opp_stream is None:
                     opp_logits = self.opp_policy.forward_latest(self.opp_model)
-            theta_logits = self.policy.forward_latest(self.model)
-            # CPU / no-side-stream fallback: sequential.
-            if opp_frame is not None and self._opp_stream is None:
-                opp_logits = self.opp_policy.forward_latest(self.opp_model)
         _perf_t2 = time.perf_counter()
 
         (m_i, s_i, c_i, b_i), lp_old = _sample_four_heads(
@@ -671,8 +708,8 @@ class DolphinActor:
                                        "_episode_start_opp_state", None)
                 if start_state is not None:
                     start_pct = f"{start_state[0]:.1f}"
-                log.info("EVT_EP_OPEN frame=%d start_pct=%s",
-                         int(gs.frame), start_pct)
+                log.info("EVT_EP_OPEN actor=%d frame=%d start_pct=%s",
+                         self._actor_id, int(gs.frame), start_pct)
 
         # Live opp-percent tick for the HUD's live plot — every 6 game
         # frames while a window is open. Schema:
@@ -684,8 +721,8 @@ class DolphinActor:
                     opp = ps
                     break
             if opp is not None:
-                log.info("EVT_EP_TICK frame=%d opp_pct=%.1f",
-                         int(gs.frame), float(opp.percent))
+                log.info("EVT_EP_TICK actor=%d frame=%d opp_pct=%.1f",
+                         self._actor_id, int(gs.frame), float(opp.percent))
 
         # Live per-VR pulse for the HUD — every 30 game frames (~2 Hz at
         # 60 fps) emit the composite task's in-progress per-VR state, so
@@ -694,7 +731,8 @@ class DolphinActor:
         if (self._episode_open_idx is not None
                 and (int(gs.frame) % 30) == 0
                 and hasattr(self.task, "live_state")):
-            log.info("EVT_VR_TICK %s",
+            log.info("EVT_VR_TICK actor=%d %s",
+                     self._actor_id,
                      json.dumps(self.task.live_state(), sort_keys=True))
 
         # Ref-model forward is now done at PPO-update time on the
@@ -738,9 +776,10 @@ class DolphinActor:
         _perf_t4 = time.perf_counter()
 
         # Opponent step (when configured): the forward was already
-        # launched concurrently above; just wait, sample, and press.
+        # launched concurrently above (single-actor path) or completed
+        # inside the coordinator (pool path); just sample and press.
         if opp_logits is not None:
-            if self._opp_stream is not None:
+            if self.coordinator is None and self._opp_stream is not None:
                 torch.cuda.current_stream().wait_stream(self._opp_stream)
             (om_i, os_i, oc_i, ob_i), _ = _sample_four_heads(
                 opp_logits, self.cfg.opponent_temperature
@@ -785,7 +824,7 @@ class DolphinActor:
         # Composite-VR per-episode event for the live HUD: one JSON blob,
         # parsed with json.loads (no brittle regex). `vrs` maps each VR id
         # -> {weight, reward, ...diagnostic counts}.
-        log.info("EVT_EP_VR %s", json.dumps({
+        log.info("EVT_EP_VR actor=%d %s", self._actor_id, json.dumps({
             "n_frames": metadata.get("n_frames"),
             "reward_sum": round(float(metadata.get("reward_sum", 0.0)), 4),
             "terminal": round(float(outcome.terminal_reward), 4),
@@ -808,9 +847,10 @@ class DolphinActor:
         _sp = metadata.get("start_percent", "")
         _ep_ = metadata.get("end_percent", "")
         _st = metadata.get("stocks_taken", "")
-        log.info("EVT_EP frame=%d result=%s reward=%.3f "
+        log.info("EVT_EP actor=%d frame=%d result=%s reward=%.3f "
                  "damage=%s start_pct=%s end_pct=%s stocks_taken=%s",
-                 ep.end_game_frame, _r, float(outcome.terminal_reward),
+                 self._actor_id, ep.end_game_frame, _r,
+                 float(outcome.terminal_reward),
                  _dmg, _sp, _ep_, _st)
         self._pending = []
         self._episode_open_idx = None
