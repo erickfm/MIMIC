@@ -81,11 +81,18 @@ class CompositeVRTask:
 
     # -- OnlineTask protocol -------------------------------------------------
     def should_start(self, state_history) -> bool:
-        """Open the whole-match episode on the first in-game frame."""
+        """Open the episode. Resets the per-episode reward accumulators
+        (so compute_outcome at episode close reports per-episode reward
+        correctly), but does NOT reset the VR modules themselves —
+        their internal trackers (kills/deaths counters, prev_stock,
+        prev_pct, combo state) persist across episode boundaries so
+        live counts grow monotonically within an actor in continuous
+        mode. Single-actor whole-match mode is unaffected: each match
+        is one episode, this fires once per match, and persisting the
+        trackers does no harm (they wouldn't have had observations
+        between matches anyway)."""
         self._reward_vec = []
         self._module_reward = [0.0] * len(self.modules)
-        for m in self.modules:
-            m.reset()
         return True
 
     def observe(self, state_history) -> float:
