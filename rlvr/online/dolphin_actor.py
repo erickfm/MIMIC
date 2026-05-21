@@ -1029,6 +1029,14 @@ class DolphinActor:
                             "scoring at cap",
                             self.cfg.max_episode_frames)
                     self._score_and_close_open_episode()
+                    # Drain the just-closed episode (and any prior
+                    # cap-hit episodes) into `collected`. Without this,
+                    # in continuous mode (no match-end ever fires) the
+                    # match-end branch above never extracts, episodes
+                    # pile up in self._match_episodes, and collect()
+                    # returns empty → PPO never gets data.
+                    finalized = self._finalize_match_episodes()
+                    collected.extend(finalized)
                     continue
 
         if len(collected) < n_episodes:

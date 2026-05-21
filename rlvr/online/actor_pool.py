@@ -347,6 +347,14 @@ class ActorPool:
                             "scoring at cap", actor_id,
                             actor.cfg.max_episode_frames)
                     actor._score_and_close_open_episode()
+                    # Drain the just-closed episode into the shared
+                    # list. Without this, in continuous mode (no
+                    # match-end ever fires) episodes pile up in the
+                    # actor's _match_episodes and never reach PPO.
+                    finalized = actor._finalize_match_episodes()
+                    if finalized:
+                        with self._episodes_lock:
+                            self._episodes.extend(finalized)
 
         if not self._stop_collect.is_set():
             log.warning("actor=%d hit max_steps=%d before global quota",
