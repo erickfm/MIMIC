@@ -535,8 +535,28 @@ class DolphinActor:
         """Step Dolphin with neutral input until stopped. Discards game
         state — its only job is to keep enet serviced. Touches only the
         console + controllers (never episode/model state), so it is safe
-        to run concurrently with ppo_update on the main thread."""
+        to run concurrently with ppo_update on the main thread.
+
+        Sleeps KEEPALIVE_PERIOD seconds between steps so Dolphin's
+        emulation is effectively paused during the PPO update — game
+        advances ~1 frame per period instead of 60 fps. With
+        blocking_input=True, Dolphin literally waits for our next
+        input, so no input = no frame. We just need enough traffic
+        within enet's ~20s timeout window (CLAUDE.md pitfall #18).
+        Period is interruptible via the stop event so stopping the
+        keepalive is fast (no up-to-period delay before collect()
+        resumes).
+        """
+        KEEPALIVE_PERIOD = 10.0  # seconds; must be < ~20s enet timeout
+        # First iteration: step immediately so enet sees activity right
+        # after collect() returns. Subsequent iterations: sleep then
+        # step.
+        first = True
         while not self._keepalive_stop.is_set():
+            if not first:
+                if self._keepalive_stop.wait(timeout=KEEPALIVE_PERIOD):
+                    return
+            first = False
             try:
                 self.console.step()
                 for c in (self.ego_ctrl, self.cpu_ctrl):
