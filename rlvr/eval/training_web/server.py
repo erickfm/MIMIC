@@ -227,8 +227,13 @@ class LogTailer(threading.Thread):
         idx = line.find(_EVT_VR_TICK)
         if idx != -1:
             payload = line[idx + len(_EVT_VR_TICK):]
+            # Capture per-actor id BEFORE stripping the prefix. Used to
+            # demux 4 actors' live-overlay state in _on_vr_tick (else
+            # the displayed live counts/rewards bounce between actors).
+            m_act = _RE_ACTOR_PREFIX.match(payload)
+            actor_id = int(m_act.group(0).split("=")[1].strip()) if m_act else 0
             payload = _RE_ACTOR_PREFIX.sub("", payload, count=1)
-            self._on_vr_tick(payload, broadcast)
+            self._on_vr_tick(payload, actor_id, broadcast)
             return
         idx = line.find(_EVT_VR)
         if idx != -1:
@@ -379,16 +384,22 @@ class LogTailer(threading.Thread):
             entry.setdefault("_last_live", 0.0)
         return entry
 
-    def _on_vr_tick(self, payload: str, broadcast: bool) -> None:
+    def _on_vr_tick(self, payload: str, actor_id: int,
+                    broadcast: bool) -> None:
         """Consume an `EVT_VR_TICK {json}` event — the composite task's
         in-progress per-VR state, emitted by the actor every ~30 game
         frames (~2 Hz). Updates each VR's `live` overlay; the card UI
         displays `reward_total + live.reward` so numbers climb live.
 
-        Also records firing events for the per-card event timeline: when
-        a VR's live.reward delta from the prior tick exceeds 0.01, we
-        log {frame, delta} at the current game frame. Reset each match
-        in _on_ep_open."""
+        Multi-actor: each of N actors emits its own ticks. Per-actor
+        live state is kept under `entry["live"]["per_actor"][actor_id]`,
+        and `entry["live"]["reward"]` / `entry["live"]["counts"]` are
+        SUMS across all actors. Without this, the displayed live values
+        would bounce between actors as each one's tick lands.
+
+        Per-actor `_last_live` keys track delta-from-prior-tick for the
+        event timeline; events are still written to the shared
+        `entry["events"]` list (no per-actor demux on that yet)."""
         try:
             data = json.loads(payload)
         except (ValueError, TypeError):
@@ -408,22 +419,36 @@ class LogTailer(threading.Thread):
                 new_live = float(d.get("reward", 0.0))
             except (TypeError, ValueError):
                 new_live = 0.0
-            delta = new_live - entry.get("_last_live", 0.0)
+
+            # Per-actor state for proper aggregation.
+            pa_map = entry["live"].setdefault("per_actor", {})
+            pa = pa_map.setdefault(str(actor_id),
+                                   {"reward": 0.0, "counts": {},
+                                    "_last_live": 0.0})
+            delta = new_live - pa["_last_live"]
             if abs(delta) > 0.01:
                 entry["events"].append({"frame": frame,
                                          "delta": round(delta, 3)})
-                # Bound the per-match event list so the snapshot stays small.
                 if len(entry["events"]) > 80:
                     entry["events"] = entry["events"][-80:]
-            entry["_last_live"] = new_live
-            entry["live"]["reward"] = new_live
-            live_counts: Dict[str, Any] = {}
+            pa["_last_live"] = new_live
+            pa["reward"] = new_live
+            pa_counts: Dict[str, Any] = {}
             for k, v in d.items():
                 if k in ("weight", "reward") or isinstance(v, bool):
                     continue
                 if isinstance(v, (int, float)):
-                    live_counts[k] = v
-            entry["live"]["counts"] = live_counts
+                    pa_counts[k] = v
+            pa["counts"] = pa_counts
+
+            # Aggregate (sum) across all actors for display.
+            entry["live"]["reward"] = round(
+                sum(p["reward"] for p in pa_map.values()), 4)
+            agg_counts: Dict[str, float] = {}
+            for p in pa_map.values():
+                for k, v in p["counts"].items():
+                    agg_counts[k] = agg_counts.get(k, 0) + v
+            entry["live"]["counts"] = agg_counts
         if broadcast:
             self.broker.broadcast({"type": "vr_tick", "vrs": self.state.vrs})
 
