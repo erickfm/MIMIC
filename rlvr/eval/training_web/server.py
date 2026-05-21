@@ -405,7 +405,7 @@ class LogTailer(threading.Thread):
         # trajectory plot. Trim to the last 200 matches so snapshots stay
         # small (a 100-update run is 600 matches but 200 is plenty for
         # visual trend).
-        self.state.composite_history.append(round(match_total, 4))
+        self.state.composite_history.append(round(ep_total, 4))
         if len(self.state.composite_history) > 200:
             self.state.composite_history = self.state.composite_history[-200:]
         if broadcast:
