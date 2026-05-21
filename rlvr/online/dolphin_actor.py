@@ -441,12 +441,22 @@ class DolphinActor:
         # dev watching on :0) still wins. :99 is reached only here and in
         # tools/play_netplay.py — never via a global export (see setup.sh).
         os.environ.setdefault("DISPLAY", ":99")
+        # Per-actor Slippi port offset. libmelee defaults slippi_port to
+        # 51441 (used as both SpectatorLocalPort in dolphin.ini and the
+        # slippstream client's connect target). When N Dolphins share
+        # the same port, only the first can bind — the others spawn but
+        # libmelee's slippstream client connects to the FIRST Dolphin's
+        # spectator and reads its game state instead, producing the
+        # "lockstep / only one actually running" symptom. actor_id-based
+        # offset gives each instance its own port.
+        _slippi_port = 51441 + self._actor_id
         self.console = melee.Console(
             path=self.cfg.dolphin_path, is_dolphin=True,
             tmp_home_directory=True, copy_home_directory=False,
             blocking_input=self.cfg.blocking_input,
             polling_mode=self.cfg.polling_mode,
             online_delay=0,
+            slippi_port=_slippi_port,
             setup_gecko_codes=True, fullscreen=False,
             gfx_backend=self.cfg.gfx_backend,
             disable_audio=self.cfg.disable_audio,
@@ -454,6 +464,7 @@ class DolphinActor:
             enable_ffw=self.cfg.enable_ffw,
             save_replays=True, replay_dir=replay_dir,
         )
+        log.info("actor=%d slippi_port=%d", self._actor_id, _slippi_port)
         self.ego_ctrl = melee.Controller(
             console=self.console, port=self.self_port,
             type=melee.ControllerType.STANDARD,
