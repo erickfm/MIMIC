@@ -138,6 +138,18 @@ class CompositeVRTask:
         self._reward_vec = []
         return outcome
 
+    def reset_modules(self) -> None:
+        """Reset each VR module's internal state machines (combo
+        trackers, kill/death counters, prev-stock, etc.). Called by
+        the loop at PPO-update boundaries — the natural cadence at
+        which the policy changes — so each cycle's HUD display
+        shows a clean per-cycle sawtooth rather than ever-growing
+        session totals. Does NOT touch `_reward_vec` or
+        `_module_reward`; those are per-EPISODE accumulators reset by
+        `should_start` and used by `compute_outcome`."""
+        for m in self.modules:
+            m.reset()
+
     def live_state(self) -> Dict[str, Any]:
         """Per-VR in-progress state for the live HUD: same shape as the
         per-VR entries in `compute_outcome`'s metadata, but mid-episode

@@ -88,7 +88,13 @@ class HUDState:
         self.wins: int = 0
         self.losses: int = 0
         self.draws: int = 0
-        self.matches: int = 0
+        # In continuous mode no match-ends fire, but EVT_EP_VR still
+        # fires per cap-hit episode. `episodes` is the unit that
+        # actually corresponds to PPO batch input. (Renamed from
+        # `matches` since the field always counted EP_VR events, not
+        # actual match-end events — the old name was off even in
+        # whole-match mode.)
+        self.episodes: int = 0
         # vr_id -> {weight, reward_total, counts: {k: n}, spark: [per-match r],
         #          live: {reward, counts}, events: [{frame, delta}], _last_live}
         self.vrs: Dict[str, Dict[str, Any]] = {}
@@ -113,7 +119,7 @@ class HUDState:
             "wins": self.wins,
             "losses": self.losses,
             "draws": self.draws,
-            "matches": self.matches,
+            "episodes": self.episodes,
             "vrs": self.vrs,
             "live": self.live,
             "composite_history": self.composite_history,
@@ -238,8 +244,17 @@ class LogTailer(threading.Thread):
         idx = line.find(_EVT_VR)
         if idx != -1:
             payload = line[idx + len(_EVT_VR):]
+            m_act = _RE_ACTOR_PREFIX.match(payload)
+            actor_id = int(m_act.group(0).split("=")[1].strip()) if m_act else 0
             payload = _RE_ACTOR_PREFIX.sub("", payload, count=1)
-            self._on_vr(payload, broadcast)
+            self._on_vr(payload, actor_id, broadcast)
+            return
+        # EVT_PPO_RESET update=N — fires from loop.py right after each
+        # PPO update completes and the actor's VR modules are reset.
+        # The HUD resets its per-actor cumulative counters to match,
+        # so the displayed counts show a clean per-cycle sawtooth.
+        if "EVT_PPO_RESET" in line:
+            self._on_ppo_reset(broadcast)
             return
 
     # --- handlers ---
@@ -268,6 +283,24 @@ class LogTailer(threading.Thread):
                 "type": "update", "update": u, "kl": kl,
                 "kl_history": self.state.kl_history,
             })
+
+    def _on_ppo_reset(self, broadcast: bool) -> None:
+        """Consume an `EVT_PPO_RESET update=N` event — emitted by loop.py
+        right after PPO update N completes and each actor's VR module
+        state machines have been reset. Mirror that reset on the HUD
+        side: clear per-actor live state and per-actor cumulative
+        counts so the displayed live/cumulative counts start the next
+        cycle at 0. The reward_total / spark / events history is
+        preserved (those are session-wide trajectory)."""
+        for entry in self.state.vrs.values():
+            entry["live"]["per_actor"] = {}
+            entry["live"]["reward"] = 0.0
+            entry["live"]["counts"] = {}
+            entry["counts_per_actor"] = {}
+            entry["counts"] = {}
+        if broadcast:
+            self.broker.broadcast({"type": "ppo_reset",
+                                    "vrs": self.state.vrs})
 
     def _on_match_end(self, m, broadcast: bool) -> None:
         result = m.group("r")
@@ -309,11 +342,20 @@ class LogTailer(threading.Thread):
         if self._tick_skip == 0:
             self.broker.broadcast({"type": "live", "live": dict(self.state.live)})
 
-    def _on_vr(self, payload: str, broadcast: bool) -> None:
-        """Consume one `EVT_EP_VR {json}` event: a per-match breakdown
+    def _on_vr(self, payload: str, actor_id: int, broadcast: bool) -> None:
+        """Consume one `EVT_EP_VR {json}` event: a per-episode breakdown
         `{n_frames, reward_sum, terminal, result, vrs:{id:{weight,
-        reward, ...counts}}}`. VR `metadata()` counts are per-match, so
-        they accumulate; the per-match reward feeds each VR's spark."""
+        reward, ...counts}}}`. In continuous mode the "match" framing
+        is misleading — episodes are the unit; the actor emits one
+        EVT_EP_VR per cap-hit (or per natural match-end in legacy
+        whole-match mode).
+
+        Multi-actor + don't-reset-VR-on-episode means the VR module's
+        metadata reports CUMULATIVE-since-last-PPO-reset counts. So
+        we can't `+= v` per EP_VR (would over-count). Track per-actor
+        last-seen counts (they're monotonic per actor within a PPO
+        cycle), sum across actors for display, reset all per-actor
+        state in _on_ppo_reset."""
         try:
             data = json.loads(payload)
         except (ValueError, TypeError):
@@ -321,8 +363,8 @@ class LogTailer(threading.Thread):
         vrs = data.get("vrs")
         if not isinstance(vrs, dict):
             return
-        self.state.matches += 1
-        match_total = 0.0
+        self.state.episodes += 1
+        ep_total = 0.0
         for vid, d in vrs.items():
             if not isinstance(d, dict):
                 continue
@@ -339,18 +381,26 @@ class LogTailer(threading.Thread):
             entry["spark"].append(round(r, 3))
             if len(entry["spark"]) > 48:
                 entry["spark"] = entry["spark"][-48:]
-            match_total += r
+            ep_total += r
+            # Per-actor monotonic counts within a PPO cycle. We take
+            # last-seen (overwrite) per actor — metadata is cumulative
+            # since the cycle's reset, so the latest value is the
+            # actor's current cycle total. Display = sum across actors.
+            pa_map = entry.setdefault("counts_per_actor", {})
+            this_actor = pa_map.setdefault(str(actor_id), {})
             for k, v in d.items():
                 if k in ("weight", "reward") or isinstance(v, bool):
                     continue
                 if isinstance(v, (int, float)):
-                    entry["counts"][k] = round(
-                        entry["counts"].get(k, 0) + v, 1)
-            # The just-finished match is now folded into the cumulative
-            # totals; clear the live overlay so the card doesn't double-
-            # show it until the next EVT_VR_TICK arrives.
-            entry["live"] = {"reward": 0.0, "counts": {}}
-            entry["_last_live"] = 0.0
+                    this_actor[k] = v
+            agg: Dict[str, float] = {}
+            for pa in pa_map.values():
+                for k, v in pa.items():
+                    agg[k] = agg.get(k, 0) + v
+            entry["counts"] = {k: round(v, 1) for k, v in agg.items()}
+            # The just-closed episode is now folded into entry["counts"];
+            # don't blow away live state — actors are still emitting
+            # ticks for their ongoing episodes.
         # One composite-Σ point per finished match for the session-wide
         # trajectory plot. Trim to the last 200 matches so snapshots stay
         # small (a 100-update run is 600 matches but 200 is plenty for
@@ -362,7 +412,7 @@ class LogTailer(threading.Thread):
             self.broker.broadcast({
                 "type": "vr",
                 "vrs": self.state.vrs,
-                "matches": self.state.matches,
+                "episodes": self.state.episodes,
                 "composite_history": self.state.composite_history,
             })
 
@@ -688,7 +738,7 @@ INDEX_HTML = """<!doctype html>
     <div class="footer">
       <span class="mono" id="ftSession">0s</span>
       <span class="sep">·</span>
-      <span class="mono" id="ftMatches">0 matches</span>
+      <span class="mono" id="ftMatches">0 episodes</span>
       <span class="sep">·</span>
       <span class="mono"><span class="good" id="ftWins">0</span>–<span class="bad" id="ftLosses">0</span>–<span id="ftDraws">0</span> W–L–D</span>
       <span class="sep">·</span>
@@ -716,7 +766,7 @@ const state = {
   session_start: Date.now() / 1000,
   last_kl: 0,
   opponent_label: '',
-  wins: 0, losses: 0, draws: 0, matches: 0,
+  wins: 0, losses: 0, draws: 0, episodes: 0,
   vrs: {},
   live: { in_match: false, frame: 0, opp_pct: 0, last_result: '' },
   composite_history: [],   // one value per match
@@ -765,7 +815,7 @@ function applySnapshot(s) {
   state.wins = s.wins || 0;
   state.losses = s.losses || 0;
   state.draws = s.draws || 0;
-  state.matches = s.matches || 0;
+  state.episodes = s.episodes ?? s.matches ?? 0;
   state.vrs = s.vrs || {};
   if (s.live) state.live = s.live;
   state.composite_history = s.composite_history || [];
@@ -786,7 +836,7 @@ function applyEvent(ev) {
     return;
   }
   if (ev.type === 'vr')      {
-    state.vrs = ev.vrs || {}; state.matches = ev.matches || 0;
+    state.vrs = ev.vrs || {}; state.episodes = ev.episodes ?? ev.matches ?? 0;
     if (ev.composite_history) state.composite_history = ev.composite_history;
     // Match-end folds live → total; reset our live-delta tracker so the
     // next match's first tick isn't seen as a giant negative jump.
@@ -799,6 +849,10 @@ function applyEvent(ev) {
     return;
   }
   if (ev.type === 'live')    { if (ev.live) state.live = ev.live; return; }
+  if (ev.type === 'ppo_reset') {
+    state.vrs = ev.vrs || state.vrs;
+    return;
+  }
 }
 
 // --- render ---
@@ -950,7 +1004,7 @@ function render() {
   const L = state.live || {};
   const strip = $('liveStrip');
   const EP_PER_UPDATE = 6;
-  const epsThisUpdate = state.matches - state.update * EP_PER_UPDATE;
+  const epsThisUpdate = state.episodes - state.update * EP_PER_UPDATE;
   const inPPO = epsThisUpdate >= EP_PER_UPDATE;
 
   if (inPPO) {
@@ -967,14 +1021,14 @@ function render() {
       strip.classList.remove('idle');
       const sec = (L.frame / 60).toFixed(1);
       $('liveText').textContent =
-        `match ${epsThisUpdate + 1} of ${EP_PER_UPDATE} this batch · frame ${L.frame} (${sec}s) · opp ${L.opp_pct.toFixed(0)}%`;
+        `episode ${epsThisUpdate + 1} of ${EP_PER_UPDATE} this batch · frame ${L.frame} (${sec}s) · opp ${L.opp_pct.toFixed(0)}%`;
     } else if (L.last_result) {
       strip.classList.add('idle');
       $('liveText').textContent =
-        `between matches · last result: ${L.last_result} · ${epsThisUpdate}/${EP_PER_UPDATE} this batch`;
+        `between episodes · last result: ${L.last_result} · ${epsThisUpdate}/${EP_PER_UPDATE} this batch`;
     } else {
       strip.classList.add('idle');
-      $('liveText').textContent = 'waiting for first match…';
+      $('liveText').textContent = 'waiting for first episode…';
     }
   }
 
@@ -998,7 +1052,7 @@ function render() {
   // Footer.
   const now = Date.now() / 1000;
   $('ftSession').textContent = fmtSession(now - state.session_start);
-  $('ftMatches').textContent = `${state.matches} matches`;
+  $('ftMatches').textContent = `${state.episodes} episodes`;
   $('ftWins').textContent = state.wins;
   $('ftLosses').textContent = state.losses;
   $('ftDraws').textContent = state.draws;

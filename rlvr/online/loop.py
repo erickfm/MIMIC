@@ -350,6 +350,17 @@ def train(
                     log.info("saved %s", ck)
             finally:
                 actor.stop_keepalive()
+                # PPO update is done. Reset each actor's VR module
+                # state machines so the next cycle's HUD live counts
+                # show a clean per-cycle sawtooth (kill/death/etc.
+                # counters restart at 0). The reward-vector
+                # accumulators (_reward_vec / _module_reward) are
+                # already reset per-episode via should_start; this is
+                # specifically the VR modules' lifetime trackers.
+                _rtm = getattr(actor, "reset_task_modules", None)
+                if callable(_rtm):
+                    _rtm()
+                    log.info("EVT_PPO_RESET update=%d", update)
     finally:
         actor.stop()
         if hud_proc is not None:

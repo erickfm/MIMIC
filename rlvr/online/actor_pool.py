@@ -264,6 +264,13 @@ class ActorPool:
         for a in self.actors:
             a.start_keepalive()
 
+    def reset_task_modules(self) -> None:
+        """Reset every actor's task VR module state. Called by the
+        loop at PPO-update boundaries — produces a clean per-cycle
+        sawtooth in the HUD instead of ever-growing session totals."""
+        for a in self.actors:
+            a.reset_task_modules()
+
     def stop_keepalive(self) -> None:
         for a in self.actors:
             a.stop_keepalive()

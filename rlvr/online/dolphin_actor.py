@@ -539,6 +539,16 @@ class DolphinActor:
         self._keepalive_thread.join(timeout=10.0)
         self._keepalive_thread = None
 
+    def reset_task_modules(self) -> None:
+        """Reset the task's VR module state machines. Called by the
+        loop at PPO-update boundaries (between collect() returns and
+        the next collect() call, while the keepalive thread is up so
+        Dolphin stays serviced). Safe to call concurrently with
+        keepalive — only touches Python task state, not the console."""
+        rm = getattr(self.task, "reset_modules", None)
+        if callable(rm):
+            rm()
+
     def _keepalive_loop(self) -> None:
         """Step Dolphin with neutral input until stopped. Discards game
         state — its only job is to keep enet serviced. Touches only the
