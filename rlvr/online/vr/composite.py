@@ -131,6 +131,20 @@ class CompositeVRTask:
         self._reward_vec = []
         return outcome
 
+    def live_state(self) -> Dict[str, Any]:
+        """Per-VR in-progress state for the live HUD: same shape as the
+        per-VR entries in `compute_outcome`'s metadata, but mid-episode
+        (no finalize() term — that only fires at match end). Lets the
+        HUD show each card's reward climbing during the match."""
+        return {
+            m.id: {
+                "weight": w,
+                "reward": round(self._module_reward[i], 4),
+                **m.metadata(),
+            }
+            for i, (m, w) in enumerate(zip(self.modules, self.weights))
+        }
+
     def enrich_with_replay(self, episodes, slp_path, self_port: int) -> list:
         """No post-match .slp enrichment — every VR scores from live
         state. Identity."""
