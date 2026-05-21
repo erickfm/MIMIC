@@ -27,7 +27,9 @@ from __future__ import annotations
 import json
 import os
 
-from rlvr.online.slippi_stream import OppHitRecencyTracker, get_opponent
+from rlvr.online.slippi_stream import (
+    OppHitRecencyTracker, get_opponent, is_dying,
+)
 from rlvr.online.vr.composite import VRModule
 
 # Alive-frames of "recently hit" memory for the kill-attribution gate.
@@ -75,6 +77,7 @@ class LowPercentKillVR(VRModule):
 
     def reset(self) -> None:
         self._prev_opp_stock = None
+        self._prev_opp_dying = False
         self._opp_peak_percent = 0.0
         self._kills = 0
         self._low_kills = 0
@@ -91,9 +94,17 @@ class LowPercentKillVR(VRModule):
         self._opp_peak_percent = max(self._opp_peak_percent,
                                      float(opp_ps.percent))
         opp_stock = int(opp_ps.stock)
+        opp_dying = is_dying(opp_ps)
         reward = 0.0
-        if self._prev_opp_stock is not None and opp_stock < self._prev_opp_stock:
+        # Fire on the rising edge of the DEAD action range (action 0-10)
+        # rather than stock decrement. Works under the Fizzi infinite-
+        # time gecko (stocks don't decrement; DEAD animation still
+        # plays). The peak percent read happens BEFORE the post-death
+        # percent reset, so we still get the kill-percent value at the
+        # right time.
+        if opp_dying and not self._prev_opp_dying:
             reward += self._score_kill(opp_ps)
+        self._prev_opp_dying = opp_dying
         self._prev_opp_stock = opp_stock
         return reward
 

@@ -18,7 +18,7 @@ the decrement frame misses the hit entirely.
 from __future__ import annotations
 
 from rlvr.online.slippi_stream import (
-    OppHitRecencyTracker, get_opponent, get_player,
+    OppHitRecencyTracker, get_opponent, get_player, is_dying,
 )
 from rlvr.online.vr.composite import VRModule
 
@@ -39,6 +39,8 @@ class StockDeltaVR(VRModule):
     def reset(self) -> None:
         self._prev_self_stock = None
         self._prev_opp_stock = None
+        self._prev_self_dying = False
+        self._prev_opp_dying = False
         self._kills = 0
         self._deaths = 0
         self._filtered_opp_sds = 0
@@ -55,22 +57,30 @@ class StockDeltaVR(VRModule):
         self._opp_hit.update(opp_ps)
         self_stock = int(self_ps.stock)
         opp_stock = int(opp_ps.stock)
+        # Detect kills/deaths by the rising edge of the DEAD action range
+        # (slippi_stream.is_dying — action 0-10) rather than stock
+        # decrement. Works with the Fizzi infinite-time gecko (stocks
+        # don't decrement; characters still play the DEAD animation when
+        # KO'd). Fires ~1.5-3 s EARLIER than the stock tick would have
+        # fired in normal mode, so credit assignment is faster too.
+        self_dying = is_dying(self_ps)
+        opp_dying = is_dying(opp_ps)
         reward = 0.0
 
-        if self._prev_opp_stock is not None and opp_stock < self._prev_opp_stock:
-            n = self._prev_opp_stock - opp_stock
+        if opp_dying and not self._prev_opp_dying:
             if self._opp_hit.recently_hit:
-                reward += float(n)          # the bot earned the kill
-                self._kills += n
+                reward += 1.0
+                self._kills += 1
             else:
-                self._filtered_opp_sds += n  # opponent self-destruct — no +1
-            self._opp_hit.reset()            # next opponent life starts fresh
+                self._filtered_opp_sds += 1
+            self._opp_hit.reset()           # next opponent life starts fresh
 
-        if self._prev_self_stock is not None and self_stock < self._prev_self_stock:
-            n = self._prev_self_stock - self_stock
-            reward -= float(n)               # always — a bot SD is its own failure
-            self._deaths += n
+        if self_dying and not self._prev_self_dying:
+            reward -= 1.0
+            self._deaths += 1
 
+        self._prev_self_dying = self_dying
+        self._prev_opp_dying = opp_dying
         self._prev_self_stock = self_stock
         self._prev_opp_stock = opp_stock
         return reward
