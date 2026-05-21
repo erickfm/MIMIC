@@ -703,12 +703,12 @@ INDEX_HTML = """<!doctype html>
     <div class="live-strip idle" id="liveStrip">
       <span class="pulse"></span>
       <span class="live-spinner"></span>
-      <span id="liveText">waiting for first match…</span>
+      <span id="liveText">waiting for first episode…</span>
     </div>
 
     <div class="telemetry">
       <div class="tel-cell">
-        <span class="tel-label">composite Σ per match</span>
+        <span class="tel-label">composite Σ per episode</span>
         <span class="tel-value" id="telCompositeVal">—</span>
         <svg class="tel-svg" viewBox="0 0 200 22" preserveAspectRatio="none">
           <line id="telCompositeZero" x1="0" y1="11" x2="200" y2="11"
@@ -732,7 +732,7 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="vr-grid" id="vrGrid">
-      <div class="vr-empty">waiting for the first match…</div>
+      <div class="vr-empty">waiting for the first episode…</div>
     </div>
 
     <div class="footer">
@@ -740,7 +740,7 @@ INDEX_HTML = """<!doctype html>
       <span class="sep">·</span>
       <span class="mono" id="ftMatches">0 episodes</span>
       <span class="sep">·</span>
-      <span class="mono"><span class="good" id="ftWins">0</span>–<span class="bad" id="ftLosses">0</span>–<span id="ftDraws">0</span> W–L–D</span>
+      <span class="mono"><span class="good" id="ftWins">0</span>–<span class="bad" id="ftLosses">0</span> K–D this cycle</span>
       <span class="sep">·</span>
       <span class="mono" id="ftComposite">Σ +0.00</span>
       <span class="sep">·</span>
@@ -1003,7 +1003,12 @@ function render() {
   // running. The next `update=N` line resets it.
   const L = state.live || {};
   const strip = $('liveStrip');
-  const EP_PER_UPDATE = 6;
+  // Episodes per PPO update — matches loop.py's --episodes-per-update.
+  // TODO: plumb this value via the HUD process so it's not hardcoded;
+  // for now 4 matches our continuous-mode default (one per actor at
+  // --n-actors 4). Display will be slightly off if you change
+  // --episodes-per-update without updating here.
+  const EP_PER_UPDATE = 4;
   const epsThisUpdate = state.episodes - state.update * EP_PER_UPDATE;
   const inPPO = epsThisUpdate >= EP_PER_UPDATE;
 
@@ -1039,7 +1044,7 @@ function render() {
   const grid = $('vrGrid');
   if (ids.length === 0) {
     if (!grid.querySelector('.vr-empty')) {
-      grid.innerHTML = '<div class="vr-empty">waiting for the first match…</div>';
+      grid.innerHTML = '<div class="vr-empty">waiting for the first episode…</div>';
     }
   } else {
     ids.sort((a, b) => {
@@ -1053,9 +1058,16 @@ function render() {
   const now = Date.now() / 1000;
   $('ftSession').textContent = fmtSession(now - state.session_start);
   $('ftMatches').textContent = `${state.episodes} episodes`;
-  $('ftWins').textContent = state.wins;
-  $('ftLosses').textContent = state.losses;
-  $('ftDraws').textContent = state.draws;
+  // Cycle K-D from stock_delta VR. With infinite_time gecko enabled,
+  // EVT_MATCH_END never fires (matches don't end) so state.wins /
+  // state.losses / state.draws stay 0. K-D from stock_delta's live
+  // counts (sum across actors, resets at EVT_PPO_RESET) is the
+  // analogous "winning vs losing" signal in continuous mode.
+  const sd = state.vrs['stock_delta'];
+  const cycleK = sd ? (sd.live && sd.live.counts && sd.live.counts.kills || 0) : 0;
+  const cycleD = sd ? (sd.live && sd.live.counts && sd.live.counts.deaths || 0) : 0;
+  $('ftWins').textContent = cycleK;
+  $('ftLosses').textContent = cycleD;
   const composite = ids.reduce((a, id) => a + (state.vrs[id].reward_total || 0), 0);
   $('ftComposite').textContent = `Σ ${composite >= 0 ? '+' : ''}${composite.toFixed(2)}`;
   const kl = state.last_kl;
