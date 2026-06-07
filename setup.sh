@@ -90,6 +90,30 @@ else
     echo "  Exi-AI Dolphin ready at $EMULATOR_FFW_DIR/squashfs-root/usr/bin/dolphin-emu"
 fi
 
+# ── 2c. Mainline Slippi Dolphin (netplay build — used by play_netplay.py) ──
+# libmelee's menu navigation targets the *mainline* Slippi online-submenu
+# layout; the bundled Ishiiruka build indexes it differently and stalls the
+# bot at MAIN_MENU/ONLINE_PLAY_SUBMENU (never goes online). Mainline also
+# supports gfx_backend="Null" (no rendering) — no GPU/Xvfb needed. See CLAUDE.md #19.
+EMULATOR_MAINLINE_DIR="emulator_mainline"
+EMULATOR_MAINLINE_URL="https://github.com/project-slippi/dolphin/releases/download/v4.0.0-mainline-beta.17/Slippi_Netplay_Mainline-x86_64.AppImage"
+echo ""
+echo "── Setting up mainline Slippi Dolphin (netplay) ──"
+if [[ -x "$EMULATOR_MAINLINE_DIR/squashfs-root/usr/bin/dolphin-emu" ]]; then
+    echo "  Mainline Dolphin already extracted."
+else
+    mkdir -p "$EMULATOR_MAINLINE_DIR"
+    if [[ ! -f "$EMULATOR_MAINLINE_DIR/mainline.AppImage" ]]; then
+        echo "  Downloading mainline Slippi AppImage (~150 MB)..."
+        curl -sSL -o "$EMULATOR_MAINLINE_DIR/mainline.AppImage" "$EMULATOR_MAINLINE_URL"
+        chmod +x "$EMULATOR_MAINLINE_DIR/mainline.AppImage"
+    fi
+    echo "  Extracting mainline AppImage ..."
+    (cd "$EMULATOR_MAINLINE_DIR" && ./mainline.AppImage --appimage-extract >/dev/null)
+    rm -f "$EMULATOR_MAINLINE_DIR/mainline.AppImage"
+    echo "  Mainline Dolphin ready at $EMULATOR_MAINLINE_DIR/squashfs-root/usr/bin/dolphin-emu"
+fi
+
 # Dolphin runtime libs — missing any of these makes the binary fail with
 # exit code 127, which libmelee surfaces as "Unexpected return code 127
 # from dolphin" during Console.__init__.

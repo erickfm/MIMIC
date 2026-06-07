@@ -709,6 +709,19 @@ references to the slippistats functions used. Past notes:
     thread, but that fix is moot while FFW gameplay is unfaithful. See
     `docs/research-notes-2026-05-18.md`.
 
+19. **Netplay headless: use the *mainline* Slippi Dolphin + `gfx_backend="Null"`,
+    NOT the bundled Ishiiruka.** libmelee's `choose_direct_online` only selects
+    Direct when `menu_selection` is 2/3 (mainline's online-submenu layout); the
+    Ishiiruka 3.5.2 build reports `sel=6` there, so the bot stalls forever at
+    `MAIN_MENU/ONLINE_PLAY_SUBMENU` and never goes online (zero matchmaking
+    traffic). `setup.sh` now also fetches mainline into `emulator_mainline/` and
+    `DOLPHIN_PATH` defaults to it. Mainline supports `Null` video → no rendering,
+    so #16/#17 (Xvfb/Vulkan) don't apply to the netplay bot. `play_netplay.py`
+    also forces the `fork` mp start-method (macOS/Windows `spawn` re-imports the
+    unguarded script and double-runs it). And the host must pass **inbound P2P
+    UDP** — RunPod-style container pods drop it (STUN falsely reports "cone");
+    use a real VM (e.g. GCP).
+
 ## Research notes
 
 The chronological dev journal lives in `docs/research-notes-*.md`,
