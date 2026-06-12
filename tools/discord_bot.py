@@ -72,7 +72,7 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 BOT_SLIPPI_CODE = os.environ.get("BOT_SLIPPI_CODE", "MIMIC#000").strip()
 DOLPHIN_PATH = _resolve_path(
     os.environ.get("DOLPHIN_PATH", ""),
-    "emulator/squashfs-root/usr/bin/dolphin-emu",
+    "emulator_mainline/squashfs-root/usr/bin/dolphin-emu",
 )
 ISO_PATH = _resolve_path(
     os.environ.get("ISO_PATH", ""),

@@ -24,6 +24,15 @@ Requirements (one-time setup):
 """
 
 import sys
+# libmelee's ENet reader runs in a multiprocessing worker. macOS/Windows
+# default to the 'spawn' start method, which re-imports this (unguarded)
+# module in the worker and double-runs the script (crash/EOFError). Force
+# 'fork' (Linux default) so the worker doesn't re-exec us. No-op on Linux.
+import multiprocessing as _mp
+try:
+    _mp.set_start_method('fork', force=True)
+except (RuntimeError, ValueError):
+    pass
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -273,7 +282,7 @@ console_kwargs = dict(
     online_delay=2,  # matches standard Slippi direct connect default
     setup_gecko_codes=True,
     fullscreen=False,
-    gfx_backend="Vulkan",
+    gfx_backend="Null",  # mainline Dolphin headless: no rendering. Ishiiruka needs "Vulkan" (see CLAUDE.md)
     disable_audio=False,
     use_exi_inputs=False,
     enable_ffw=False,
