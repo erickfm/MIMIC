@@ -449,7 +449,7 @@ X but didn't upload it." The `.pt` itself must come from the GPU box
 - `mimic/dataset.py` — StreamingMeleeDataset (per-game + pre-windowed shards).
 - `mimic/frame_encoder.py` — MimicFlatEncoder; honors `mimic_minimal_features` (slices the shard numeric tensor to 9 cols in HAL order) vs full (13 numeric + 5 flags). Also hosts the optional `use_input_gate` L1 diagnostic.
 - `mimic/features.py` — feature schema + normalization. `numeric_state(full=True)` returns 13 cols.
-- `eval.py`, `inference.py` — legacy. Modern paths use `tools/play.py` / `tools/play_netplay.py`.
+- The old root-level `eval.py` / `inference.py` were removed (2026-06); inference lives in `tools/play.py` / `tools/play_netplay.py`.
 
 ### Tools
 
