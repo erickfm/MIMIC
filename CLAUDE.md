@@ -317,13 +317,23 @@ Existing `fox_hal_local` shards were built without these filters and
 contain low-quality games. Rebuild from .slp source to get clean
 data.
 
-### `btns_single` encoding
+### Button encoding (7-class priority collapse)
 
-Shards encode multi-hot buttons as single-label using early-release
-logic (matching HAL's `convert_multi_hot_to_one_hot_early_release`):
-when buttons change but nothing new is pressed (partial release), the
-label is `NO_BUTTON` (4). Do not "keep the surviving held button" —
-that diverges from the training target.
+Current shards (v2, 7-class) collapse multi-hot buttons to a single
+label **statelessly per frame** via Melee's input-resolution rules
+(`mimic/features.py:_collapse_buttons_7class_np`): B overrides
+everything → A+TRIG (no B) → A_TRIG → else highest priority of
+Z > A ≈ TRIG > JUMP → NONE. No dependence on the previous frame's
+buttons. X and Y both map to JUMP; L and R both map to TRIG.
+
+**Legacy 5-class shards only** (`btns_single`, HAL-compat): encoded
+with HAL's early-release state machine
+(`convert_multi_hot_to_one_hot_early_release`): when buttons change
+but nothing new is pressed (partial release), the label is
+`NO_BUTTON` (4). Do not "keep the surviving held button" — that
+diverges from the training target. The 7-class encoding replaced
+this in commit `ed87d7c` (2026-04-11); it applies only when working
+with old 5-combo data.
 
 ### HuggingFace datasets
 
@@ -374,11 +384,21 @@ cannot represent airdodge / wavedash / L-cancel.
 
 Full pipeline (download master-* ranked replays from HF → extract →
 re-shard with existing `mimic_norm.json` → train using the current
-best command) is wired into `tools/run_all_chars.sh`. Don't rebuild
-the per-char metadata JSONs (`cat_maps`, `controller_combos`,
-`mimic_norm`, `norm_stats`, `stick_clusters`) — pull them from
-`erickfm/MIMIC/<char>/` on HF. Per-char wall time on 2×RTX 5090 is
-~1.5–2.5 hr; disk peak 200–800 GB.
+best command) is wired into `tools/run_all_chars.sh` (remote 2×5090
+box) and `tools/run_local_chars.sh` (local single-4090 box; builds
+fresh per-char metadata, prefetches char N+1 during char N's
+training, uploads in the background). Per-char wall time on 2×RTX
+5090 is ~1.5–2.5 hr; on the local 4090 ~2 hr of GPU time per char
+(bs 256 × grad-accum 2, ~4.5 step/s).
+
+**`hf download --include` gotcha:** repeating the `--include` flag
+overwrites earlier patterns (argparse `nargs='*'`) — all glob
+patterns must follow a SINGLE `--include`. `run_all_chars.sh` has
+the repeated-flag bug and silently fetched only `master-platinum`
+(6 of 18 tarballs per char); the 2026-06-12 local runs initially
+trained on that ⅓ data and early-stopped at 1.6k–7.8k steps before
+the fix. Any model whose data was pulled through the buggy path
+should be considered platinum-only until verified.
 
 Character index + HF bucket map (Zelda/Sheik bucket as `ZELDA_SHEIK`;
 Jigglypuff bucket is the full name):
@@ -629,9 +649,11 @@ references to the slippistats functions used. Past notes:
     buttons; the 7-class head adds TRIG + A_TRIG for the one emergent
     combo that matters (airdodge/wavedash + an A-attack shield-grab
     interaction). Multi-button overlaps (2.65% of frames) are
-    collapsed via early-release encoding: the newest button (0→1
-    transition) gets the label. Shoulder+button combos ARE
-    representable since shoulder is a separate head.
+    collapsed via a stateless per-frame priority cascade mirroring
+    Melee's input resolution (B overrides all; A+TRIG → A_TRIG; else
+    Z > A ≈ TRIG > JUMP) — see "Button encoding" in the Data section.
+    Early-release encoding is legacy 5-class only. Shoulder+button
+    combos ARE representable since shoulder is a separate head.
 
 11. **RoPE (`mimic-rope*`) presets are deprecated.** They underperform
     the relpos baseline — the bug is in the positional-encoding path

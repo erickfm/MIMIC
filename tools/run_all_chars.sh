@@ -61,16 +61,19 @@ for entry in "${CHARS[@]}"; do
   mkdir -p "${SLP_DIR}" "${TAR_DIR}" "${DATA_DIR}" "${REPO_ROOT}/checkpoints"
 
   # -------- A. Download all master-* tarballs (master-master + master-diamond + master-platinum) --------
+  # NOTE: all glob patterns must follow a SINGLE --include flag — repeating
+  # --include overwrites earlier patterns (argparse nargs='*'). The repeated
+  # form silently fetched only master-platinum (1/3 of the data) per char.
   log "[A/${C}] downloading master-* tarballs"
   hf download erickfm/melee-ranked-replays \
     --repo-type dataset \
-    --include "shards/${HF_BUCKET}_master-master_a*.tar.gz" \
-    --include "shards/${HF_BUCKET}_master-diamond_a*.tar.gz" \
-    --include "shards/${HF_BUCKET}_master-platinum_a*.tar.gz" \
+    --include "${HF_BUCKET}/${HF_BUCKET}_master-master_a*.tar.gz" \
+              "${HF_BUCKET}/${HF_BUCKET}_master-diamond_a*.tar.gz" \
+              "${HF_BUCKET}/${HF_BUCKET}_master-platinum_a*.tar.gz" \
     --local-dir "${TAR_DIR}"
 
   shopt -s nullglob
-  TARS=( "${TAR_DIR}/shards/${HF_BUCKET}_master-"*"_a"*".tar.gz" )
+  TARS=( "${TAR_DIR}/${HF_BUCKET}/${HF_BUCKET}_master-"*"_a"*".tar.gz" )
   shopt -u nullglob
   if (( ${#TARS[@]} == 0 )); then
     log "[A/${C}] ERROR no master-* tarballs for ${HF_BUCKET}; aborting"

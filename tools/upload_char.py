@@ -40,6 +40,15 @@ CHAR_DISPLAY = {
     "luigi": ("Luigi", "LUIGI"),
     "peach": ("Peach", "PEACH"),
     "ice_climbers": ("Ice Climbers", "POPO"),
+    "samus": ("Samus", "SAMUS"),
+    "ganondorf": ("Ganondorf", "GANONDORF"),
+    "doc": ("Dr. Mario", "DOC"),
+    "pikachu": ("Pikachu", "PIKACHU"),
+    "yoshi": ("Yoshi", "YOSHI"),
+    "mario": ("Mario", "MARIO"),
+    "dk": ("Donkey Kong", "DK"),
+    "link": ("Link", "LINK"),
+    "ness": ("Ness", "NESS"),
 }
 
 
