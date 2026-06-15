@@ -20,11 +20,14 @@ mkdir -p "${WS_ROOT}/data" "${WS_ROOT}/checkpoints"
 
 # Order: char | HF bucket prefix | --character index
 # marth/fox/falco first — user wants those retrained and re-uploaded first.
+# NOTE: as of 2026-06-15 the dataset folders are correctly named; Sheik's
+# bucket is now `SHEIK` (was the combined `ZELDA_SHEIK`), and `ZELDA` is a
+# separate folder (idx 19) if you want to train Zelda.
 CHARS=(
   "marth|MARTH|18"
   "fox|FOX|1"
   "falco|FALCO|22"
-  "sheik|ZELDA_SHEIK|7"
+  "sheik|SHEIK|7"
   "cptfalcon|CPTFALCON|2"
   "puff|JIGGLYPUFF|15"
   "luigi|LUIGI|17"
