@@ -41,6 +41,21 @@ REPO = "erickfm/melee-ranked-replays"
 RANK_RE = re.compile(r"^(platinum|diamond|master)-(platinum|diamond|master)-[0-9a-f]+\.slp$")
 
 BAD_CHARS = {"WIREFRAME_MALE", "WIREFRAME_FEMALE", "GIGA_BOWSER", "SANDBAG", "UNKNOWN_CHARACTER"}
+
+# peppi returns EXTERNAL (CSS-order) character IDs, but libmelee's Character
+# enum uses different VALUES. Remap external -> libmelee value before naming.
+# Verified empirically against libmelee on 50+ master-master replays (see
+# rlvr/state/peppi_adapter.py and tools/validate_ranked_index.py).
+#
+# !! HISTORY: the original code indexed CHAR_NAME (keyed by libmelee value)
+# with peppi's external id directly — scrambling every character bucket
+# (e.g. real Pikachu filed under "SAMUS"). This remap is the fix; see
+# docs/research-notes-2026-06-15.md. Do NOT drop it.
+PEPPI_TO_LIBMELEE = {
+    0: 2, 1: 3, 2: 1, 3: 24, 4: 4, 5: 5, 6: 6, 7: 17, 8: 0, 9: 18,
+    10: 16, 11: 8, 12: 9, 13: 12, 14: 10, 15: 15, 16: 13, 17: 14,
+    18: 19, 19: 7, 20: 22, 21: 20, 22: 21, 23: 26, 24: 23, 25: 25,
+}
 CHAR_NAME = {c.value: c.name for c in Character}
 CHAR_NAME[Character.ZELDA.value] = "ZELDA_SHEIK"
 CHAR_NAME[Character.SHEIK.value] = "ZELDA_SHEIK"
@@ -56,7 +71,8 @@ def _parse_one(slp_path: str):
             return (slp_path, None, None, f"n_players={len(players)}")
         chars = []
         for p in players:
-            name = CHAR_NAME.get(p.character)
+            lib_val = PEPPI_TO_LIBMELEE.get(p.character)  # external -> libmelee
+            name = CHAR_NAME.get(lib_val) if lib_val is not None else None
             if name is None or name in BAD_CHARS:
                 return (slp_path, None, None, f"bad_char:{p.character}")
             chars.append(name)

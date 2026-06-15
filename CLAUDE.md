@@ -348,7 +348,17 @@ Two sources of raw replays. Ranked is canonical for new training.
   (master-master has both players master; master-diamond/platinum
   mixes in games where the other player is sub-master and we can't
   tell from the .slp which port is master — accepted as a
-  data-quality/quantity tradeoff).
+  data-quality/quantity tradeoff). **Folders are now correctly
+  labeled** — as of 2026-06-15 the dataset was re-sorted in place so
+  every folder contains only its named character (a long-standing
+  peppi-external-vs-libmelee-value ID scramble was fixed; see
+  `docs/research-notes-2026-06-15.md` and
+  [[project_ranked_dataset_mixed_labeling]]). The old combined
+  `ZELDA_SHEIK` bucket is now split into separate **`SHEIK`** and
+  **`ZELDA`** folders (`ZELDA` = games that are majority-Zelda-frames
+  only; ~3.4k games, diamond/platinum-skewed). The old scrambled
+  `metadata/metadata_a{N}.json` sidecars were deleted in the fix and
+  not yet regenerated.
 - **`erickfm/slippi-public-dataset-v3.7`** — legacy. 95K replays by
   character; Fox folder has 45,854 .slp. `tools/download_fox.py` is
   hardcoded to this source.
@@ -367,9 +377,35 @@ M > D > P). HF layout `{CHAR}/{CHAR}_{rank_pair}_a{N}.tar.gz` plus
 tarballs; if `extracted/` still exists from a prior run, pass
 `--skip-extract`.
 
-Character mapping notes: Zelda+Sheik collapsed to bucket
-`ZELDA_SHEIK`; Popo+Nana to `ICE_CLIMBERS`; debug chars
-(WIREFRAME/GIGA/SANDBAG) rejected.
+**peppi external-ID remap (the root-cause fix).** peppi returns
+EXTERNAL (CSS-order) character IDs (Falcon=0, Fox=2, Samus=16) while
+libmelee's `Character` enum uses different VALUES (Falcon=2, Fox=1,
+Samus=13). The original code indexed the libmelee-value name table
+with peppi's external id, scrambling every bucket (real Pikachu →
+"SAMUS" folder, etc.). Fixed 2026-06-15: `PEPPI_TO_LIBMELEE` remaps
+external→libmelee value before naming (`_parse_one`). Do NOT drop
+that remap — it's the same verified table as
+`rlvr/state/peppi_adapter.py`.
+
+Character mapping notes: Popo+Nana collapsed to `ICE_CLIMBERS`; debug
+chars (WIREFRAME/GIGA/SANDBAG) rejected. Zelda+Sheik are still
+collapsed to a single `ZELDA_SHEIK` bucket at header-parse time (this
+script can't tell them apart without frame data); the canonical
+dataset splits them into separate `SHEIK`/`ZELDA` folders as a
+post-step keyed on majority in-game form via
+`tools/classify_zelda_sheik.py` + `tools/classify_marth_zelda.py`.
+
+**Dataset-fix toolchain** (used for the 2026-06-15 in-place
+correction; reusable if the dataset is ever rebuilt and re-scrambled):
+`tools/build_ranked_index.py` (reverse the bug from metadata → true
+chars), `tools/validate_ranked_index.py` (check vs libmelee),
+`tools/resolve_ambiguous.py` (split collapsed labels by parse),
+`tools/execute_dataset_fix.py` (phases `renames`/`retar`/`swap` —
+server-side `CommitOperationCopy` for clean renames, re-tar only the
+entangled buckets; `commit_robust` wraps uploads in a SIGALRM
+timeout+retry because huggingface_hub hangs on dead sockets and the
+home uplink is ~4 MB/s — do NOT use `HF_HUB_ENABLE_HF_TRANSFER`, it
+hangs outright here), `tools/verify_fixed.py`.
 
 ### Building MIMIC-normalized shards
 
@@ -400,15 +436,18 @@ trained on that ⅓ data and early-stopped at 1.6k–7.8k steps before
 the fix. Any model whose data was pulled through the buggy path
 should be considered platinum-only until verified.
 
-Character index + HF bucket map (Zelda/Sheik bucket as `ZELDA_SHEIK`;
-Jigglypuff bucket is the full name):
+Character index + HF bucket map (`idx` = the libmelee `--character`
+value passed to `slp_to_shards.py`). Post-2026-06-15, Sheik and Zelda
+are separate folders (`SHEIK`/`ZELDA`); Jigglypuff bucket is the full
+name `JIGGLYPUFF`:
 
 | char | HF bucket | idx |
 |---|---|---|
 | fox | `FOX` | 1 |
 | falco | `FALCO` | 22 |
 | marth | `MARTH` | 18 |
-| sheik | `ZELDA_SHEIK` | 7 |
+| sheik | `SHEIK` | 7 |
+| zelda | `ZELDA` | 19 |
 | cptfalcon | `CPTFALCON` | 2 |
 | puff | `JIGGLYPUFF` | 15 |
 | luigi | `LUIGI` | 17 |
