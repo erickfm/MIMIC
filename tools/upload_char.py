@@ -49,6 +49,10 @@ CHAR_DISPLAY = {
     "dk": ("Donkey Kong", "DK"),
     "link": ("Link", "LINK"),
     "ness": ("Ness", "NESS"),
+    # rank-specific Fox models (additive; separate folders from base fox)
+    "fox-master": ("Fox (Master)", "FOX"),
+    "fox-diamond": ("Fox (Diamond)", "FOX"),
+    "fox-platinum": ("Fox (Platinum)", "FOX"),
 }
 
 
