@@ -52,6 +52,13 @@ near-equal val (0.733/0.733/0.748) but a clear h2h gradient, and `fox-allranks`
 > training-length variants). Across datasets (ranks/pools/characters), the loss
 > scales aren't comparable — h2h is the only arbiter.
 
+The magnitude tracks the gap, too: the two best models head-to-head (long
+0.7130 vs warm-restart 0.7176, only 0.0046 apart) split **12–9 = 57.1%** for
+the long model (stocks 1.10 vs 0.71). Same direction (lower val wins), but a
+much smaller edge than the 0.016–0.020-apart vs-original gaps — and at N=21
+that 57% is within noise of even. So: lower val ⇒ stronger holds, but tiny val
+differences buy only tiny, noisy edges; don't over-read a 0.005 val improvement.
+
 ## Confound check (the part that almost bit us)
 
 Every h2h above put the new model as A (`--ckpt`) and the original as B. In
