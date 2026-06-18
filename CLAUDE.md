@@ -466,10 +466,20 @@ Set `--run-name` to `{char}-{YYYYMMDD}-{descriptor}`; step suffix is
 appended when promoting the `_best.pt`.
 
 Current per-character production:
+- `fox-master` — `fox-master-20260616-long` (val **0.7130**), master-rank
+  ranked data, ~305k-step long run. Strongest master Fox: 76% h2h vs the
+  prior 0.7334 rank-master, 57% vs the warm-restart 0.7176 (see
+  `docs/research-notes-2026-06-18.md`). On HF at `erickfm/MIMIC/fox-master/`.
+- `fox-diamond` (val 0.7325) / `fox-platinum` (val 0.7479) — the rank ladder
+  (`docs/research-notes-2026-06-16.md`); on HF, not yet wired into the bot.
 - `puff-20260419-mimic-fullfeat-gate01-33k.pt` (val 0.66)
 - `falco-20260412-relpos-28k.pt` (val 0.74)
 - `cptfalcon-20260412-relpos-27k.pt` (val 0.71)
 - `luigi-20260412-relpos-5k.pt` (val ~1.0, early-stopped)
+
+HF `erickfm/MIMIC` also holds folders for `marth`, `peach`, `pikachu`,
+`samus`, `sheik`, `yoshi`, `ganondorf` (older promotions); audit val/run-name
+against `tools/discord_bot.py:CHARACTERS` before relying on them.
 
 ### Promotion policy
 
