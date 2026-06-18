@@ -393,19 +393,21 @@ collapsed to a single `ZELDA_SHEIK` bucket at header-parse time (this
 script can't tell them apart without frame data); the canonical
 dataset splits them into separate `SHEIK`/`ZELDA` folders as a
 post-step keyed on majority in-game form via
-`tools/classify_zelda_sheik.py` + `tools/classify_marth_zelda.py`.
+`tools/legacy/classify_zelda_sheik.py` + `tools/legacy/classify_marth_zelda.py`.
 
 **Dataset-fix toolchain** (used for the 2026-06-15 in-place
-correction; reusable if the dataset is ever rebuilt and re-scrambled):
-`tools/build_ranked_index.py` (reverse the bug from metadata → true
-chars), `tools/validate_ranked_index.py` (check vs libmelee),
-`tools/resolve_ambiguous.py` (split collapsed labels by parse),
-`tools/execute_dataset_fix.py` (phases `renames`/`retar`/`swap` —
+correction; reusable if the dataset is ever rebuilt and re-scrambled —
+archived under `tools/legacy/` since the root cause is now fixed in
+`shard_and_upload_ranked.py`):
+`tools/legacy/build_ranked_index.py` (reverse the bug from metadata → true
+chars), `tools/legacy/validate_ranked_index.py` (check vs libmelee),
+`tools/legacy/resolve_ambiguous.py` (split collapsed labels by parse),
+`tools/legacy/execute_dataset_fix.py` (phases `renames`/`retar`/`swap` —
 server-side `CommitOperationCopy` for clean renames, re-tar only the
 entangled buckets; `commit_robust` wraps uploads in a SIGALRM
 timeout+retry because huggingface_hub hangs on dead sockets and the
 home uplink is ~4 MB/s — do NOT use `HF_HUB_ENABLE_HF_TRANSFER`, it
-hangs outright here), `tools/verify_fixed.py`.
+hangs outright here), `tools/legacy/verify_fixed.py`.
 
 ### Building MIMIC-normalized shards
 
