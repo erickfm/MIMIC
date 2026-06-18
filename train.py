@@ -621,6 +621,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           nccl_timeout: int = 1800,
           grad_clip_norm: float = None,
           no_load_optim: bool = False,
+          warm_restart: bool = False,
           si_drop_start: float = None, si_drop_end: float = None,
           si_drop_max: float = 1.0,
           plain_ce: bool = False,
@@ -875,27 +876,26 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         factor = (_eta_min / actual_lr) if actual_lr > 0 else 1.0
         return optim.lr_scheduler.ConstantLR(optimiser, factor=factor, total_iters=max(n, 1))
 
-    if warmup_steps > 0:
-        warmup  = optim.lr_scheduler.LinearLR(
-            optimiser, start_factor=0.01, total_iters=warmup_steps)
-        cosine_phase_len = max(_decay_steps - warmup_steps, 1)
-        cosine  = _build_cosine(cosine_phase_len)
-        if _use_flat_tail:
-            flat = _build_flat_tail(max_steps - _decay_steps)
-            scheduler = optim.lr_scheduler.SequentialLR(
-                optimiser, [warmup, cosine, flat],
-                milestones=[warmup_steps, _decay_steps])
-        else:
-            scheduler = optim.lr_scheduler.SequentialLR(
+    def _make_scheduler():
+        if warmup_steps > 0:
+            warmup  = optim.lr_scheduler.LinearLR(
+                optimiser, start_factor=0.01, total_iters=warmup_steps)
+            cosine_phase_len = max(_decay_steps - warmup_steps, 1)
+            cosine  = _build_cosine(cosine_phase_len)
+            if _use_flat_tail:
+                flat = _build_flat_tail(max_steps - _decay_steps)
+                return optim.lr_scheduler.SequentialLR(
+                    optimiser, [warmup, cosine, flat],
+                    milestones=[warmup_steps, _decay_steps])
+            return optim.lr_scheduler.SequentialLR(
                 optimiser, [warmup, cosine], milestones=[warmup_steps])
-    else:
         cosine = _build_cosine(_decay_steps)
         if _use_flat_tail:
             flat = _build_flat_tail(max_steps - _decay_steps)
-            scheduler = optim.lr_scheduler.SequentialLR(
+            return optim.lr_scheduler.SequentialLR(
                 optimiser, [cosine, flat], milestones=[_decay_steps])
-        else:
-            scheduler = cosine
+        return cosine
+    scheduler = _make_scheduler()
     if _use_flat_tail:
         _log(f"  LR schedule: cosine to eta_min={_eta_min:g} over {_decay_steps} steps, "
              f"then flat at eta_min for the remaining {max_steps - _decay_steps} steps")
@@ -906,10 +906,22 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         model.load_state_dict(ckpt['model_state_dict'])
         if not no_load_optim:
             optimiser.load_state_dict(ckpt['optimizer_state_dict'])
-            if ckpt.get("scheduler_state_dict"):
+            # warm-restart: keep Adam momentum but reset the LR schedule (fresh
+            # cosine over the full new horizon from step 0). CosineAnnealingLR
+            # updates recurrently from the optimizer's CURRENT lr, which
+            # load_state_dict just set to the checkpoint's (low, end-of-cosine)
+            # value — so we must reset lr back to the base AND rebuild the
+            # scheduler, else the "fresh" cosine continues from ~eta_min.
+            if warm_restart:
+                for g in optimiser.param_groups:
+                    g['lr'] = actual_lr
+                    g['initial_lr'] = actual_lr
+                scheduler = _make_scheduler()
+            elif ckpt.get("scheduler_state_dict"):
                 scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-        start_step = ckpt.get('global_step', 0)
+        start_step = 0 if warm_restart else ckpt.get('global_step', 0)
         _log(f"Resumed from {resume}, starting at step {start_step}"
+             + (" (warm restart: Adam kept, LR schedule reset)" if warm_restart else "")
              + (f" (fresh optimizer, lr={actual_lr})" if no_load_optim else ""))
 
     # --- DDP wrapping (after compile, optimizer, and checkpoint load) ---
@@ -1469,6 +1481,9 @@ if __name__ == "__main__":
                         help="Gradient clipping norm (default: 1.0)")
     parser.add_argument("--no-load-optim", action="store_true",
                         help="Skip loading optimizer/scheduler state on resume (fresh LR)")
+    parser.add_argument("--warm-restart", action="store_true",
+                        help="On resume: keep Adam optimizer state but reset the LR "
+                             "schedule + step counter (fresh cosine from the warm weights)")
     parser.add_argument("--plain-ce", action="store_true",
                         help="Use plain cross-entropy instead of focal loss for all heads")
     parser.add_argument("--n-heads", type=int, default=None,
@@ -1561,6 +1576,7 @@ if __name__ == "__main__":
         nccl_timeout=args.nccl_timeout,
         grad_clip_norm=args.grad_clip_norm,
         no_load_optim=args.no_load_optim,
+        warm_restart=args.warm_restart,
         si_drop_start=args.si_drop_start,
         si_drop_end=args.si_drop_end,
         si_drop_max=args.si_drop_max,
