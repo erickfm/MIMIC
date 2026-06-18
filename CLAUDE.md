@@ -392,22 +392,23 @@ chars (WIREFRAME/GIGA/SANDBAG) rejected. Zelda+Sheik are still
 collapsed to a single `ZELDA_SHEIK` bucket at header-parse time (this
 script can't tell them apart without frame data); the canonical
 dataset splits them into separate `SHEIK`/`ZELDA` folders as a
-post-step keyed on majority in-game form via
-`tools/legacy/classify_zelda_sheik.py` + `tools/legacy/classify_marth_zelda.py`.
+post-step keyed on majority in-game form via the `classify_zelda_sheik` /
+`classify_marth_zelda` scripts.
 
-**Dataset-fix toolchain** (used for the 2026-06-15 in-place
-correction; reusable if the dataset is ever rebuilt and re-scrambled —
-archived under `tools/legacy/` since the root cause is now fixed in
-`shard_and_upload_ranked.py`):
-`tools/legacy/build_ranked_index.py` (reverse the bug from metadata → true
-chars), `tools/legacy/validate_ranked_index.py` (check vs libmelee),
-`tools/legacy/resolve_ambiguous.py` (split collapsed labels by parse),
-`tools/legacy/execute_dataset_fix.py` (phases `renames`/`retar`/`swap` —
+**Dataset-fix toolchain** (used for the 2026-06-15 in-place correction).
+The scripts were **deleted once the fix shipped** — the root cause is now
+fixed upstream in `shard_and_upload_ranked.py`, so they only matter if the
+dataset is ever rebuilt and re-scrambled. Recover them from git history
+(commit `f08df05`, under `tools/`) if needed:
+`build_ranked_index.py` (reverse the bug from metadata → true chars),
+`validate_ranked_index.py` (check vs libmelee),
+`resolve_ambiguous.py` (split collapsed labels by parse),
+`execute_dataset_fix.py` (phases `renames`/`retar`/`swap` —
 server-side `CommitOperationCopy` for clean renames, re-tar only the
 entangled buckets; `commit_robust` wraps uploads in a SIGALRM
 timeout+retry because huggingface_hub hangs on dead sockets and the
 home uplink is ~4 MB/s — do NOT use `HF_HUB_ENABLE_HF_TRANSFER`, it
-hangs outright here), `tools/legacy/verify_fixed.py`.
+hangs outright here), `verify_fixed.py`.
 
 ### Building MIMIC-normalized shards
 

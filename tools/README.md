@@ -1,7 +1,8 @@
 # `tools/` — index
 
-Utilities around the MIMIC training/inference pipeline. The active set is the
-durable infrastructure; spent single-use scripts live in `legacy/`. Canonical
+Utilities around the MIMIC training/inference pipeline — the durable
+infrastructure only. Spent single-use scripts are removed once their job is
+done (recoverable from git history), not archived in-tree. Canonical
 orientation is `../CLAUDE.md`; this file is just a map.
 
 ## Data pipeline (raw replays → training shards)
@@ -40,16 +41,11 @@ orientation is `../CLAUDE.md`; this file is just a map.
 - `extract_wavedashes.py` — wavedash-only windows for overfit checks.
 - `plot_val_vs_winrate.py` — val loss vs h2h win rate scatter (master-Fox thread).
 
-## `legacy/`
-Spent single-use scripts kept for history; nothing in the active path references
-them. Two clusters worth knowing:
-- **Ranked-dataset fix toolchain** (2026-06-15 in-place correction; reusable only
-  if the dataset is ever rebuilt and re-scrambled — see
-  `../docs/research-notes-2026-06-15.md`): `build_ranked_index`,
-  `validate_ranked_index`, `resolve_ambiguous`, `classify_zelda_sheik`,
-  `classify_marth_zelda`, `execute_dataset_fix`, `verify_fixed`, `fix_ranked_dataset`.
-- **Rank-Fox experiment** (2026-06-16/18 — shipped): `run_rank_fox`,
-  `finish_rank_fox`, `bench_rank_fox`, `partition_fox_by_rank`, `run_long_fox`,
-  `chain_warmrestart`, `run_allranks_fox`.
-- Plus older character-specific finish/continue/queue runners and
-  `gameplay_health.py` / `slp_to_ranked_shards.py`.
+## Removed (recoverable from git history)
+Two spent one-off clusters were deleted once their work shipped — pull them
+from git history if a rebuild ever needs them:
+- **Ranked-dataset fix toolchain** (2026-06-15 in-place correction; root cause
+  now lives in `shard_and_upload_ranked.py`) — see
+  `../docs/research-notes-2026-06-15.md`.
+- **Rank-Fox experiment runners** (2026-06-16/18 — shipped) — see
+  `../docs/research-notes-2026-06-16.md` / `-2026-06-18.md`.
