@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 POINTS = [
     ("original (self-play control)", 0.7334, "reports/selfplay_control.json", "baseline"),
     ("warm-restart",                 0.7176, "reports/warmrestart_vs_original.json", "keep Adam, reset LR"),
-    ("long run (~305k steps)",       0.7130, "reports/long_vs_original.json", "shipped"),
+    ("long run (~442k steps)",       0.7130, "reports/long_vs_original.json", "shipped"),
 ]
 
 xs, ys, labels, notes = [], [], [], []

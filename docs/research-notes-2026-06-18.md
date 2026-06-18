@@ -16,8 +16,9 @@ had lots of room. Sequence:
    0.7334 → **0.7267**. (Predicted it'd plateau; it didn't — undertrained.)
 2. **Warm-restart** (resume the 0.7267 best, keep Adam, **reset LR**): →
    **0.7176**.
-3. **Long run** (fresh, ~480k steps ≈ 1 epoch, single long cosine): reached
-   **0.7130** by step ~305k before being stopped at ~64%. New champion.
+3. **Long run** (fresh, ~480k steps ≈ 1 epoch, single long cosine): best val
+   **0.7130** recorded at step **441,600** (~92% of the 480k target) before
+   being stopped. New champion. (The `_bestloss.pt` global_step is 441,600.)
 
 ## `train.py --warm-restart` + the LR bug it exposed
 

@@ -474,7 +474,14 @@ Current per-character production:
   prior 0.7334 rank-master, 57% vs the warm-restart 0.7176 (see
   `docs/research-notes-2026-06-18.md`). On HF at `erickfm/MIMIC/fox-master/`.
 - `fox-diamond` (val 0.7325) / `fox-platinum` (val 0.7479) — the rank ladder
-  (`docs/research-notes-2026-06-16.md`); on HF, not yet wired into the bot.
+  (`docs/research-notes-2026-06-16.md`).
+
+All three load into the Discord bot automatically — it has no hardcoded
+character list; `_sync_hf_to_local` discovers every `erickfm/MIMIC/{dir}/`
+with a `model.pt` + `metadata.json:melee_enum`, so the rank dirs surface as
+`!fox-master` / `!fox-diamond` / `!fox-platinum` (and `!play fox-master CODE`)
+after a `!reload` or restart. `upload_char.py` already writes `melee_enum:
+"FOX"` and bundles each dir's norm files, which is what makes this work.
 - `puff-20260419-mimic-fullfeat-gate01-33k.pt` (val 0.66)
 - `falco-20260412-relpos-28k.pt` (val 0.74)
 - `cptfalcon-20260412-relpos-27k.pt` (val 0.71)
