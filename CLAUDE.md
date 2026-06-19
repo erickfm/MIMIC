@@ -803,6 +803,26 @@ references to the slippistats functions used. Past notes:
     UDP** — RunPod-style container pods drop it (STUN falsely reports "cone");
     use a real VM (e.g. GCP).
 
+20. **"required update available" on netplay = a stale Slippi build, NOT a
+    Dolphin-fork problem.** Slippi gates Online on a server-side *minimum
+    version*. When the bundled build falls behind (the 3.6.x Ishiiruka line
+    shipped after our 3.5.2 and became required), Online is hard-gated. Fix =
+    update the build **in place** to the current Slippi release — download
+    `Slippi_Online-x86_64.AppImage` from the latest `project-slippi/Ishiiruka`
+    release, `--appimage-extract` it over `emulator/squashfs-root`. Do **not**
+    chase mainline beta to dodge this: mainline `beta.19` *crashes* under our
+    `libmelee 0.45.1` EXI protocol (`EnetDisconnected`), and `beta.17` runs but
+    is itself gate-rejected. **To watch a netplay session on a GUI box** (e.g.
+    supervising the PHAI#591/Phillip benchmark), pass `--gfx-backend OGL`
+    (Ishiiruka rejects the mainline-only `Null`; the flag defaults to `Null` so
+    the headless deployment is unchanged); Ishiiruka opens its own window — no
+    `--platform` (mainline-only; its Qt X11 plugin is named `xcb`, not `x11`).
+    **Debugging trap:** a launch script that runs `pkill -f play_netplay.py`
+    SIGKILLs its *own* shell (the script's argv contains that string), dies
+    before launching, and leaves a stale log you'll misread as a bot crash. Only
+    `pkill -x dolphin-emu` (exact NAME) is safe. See the memory note
+    `reference_netplay_slippi_setup` for the full recipe.
+
 ## Research notes
 
 The chronological dev journal lives in `docs/research-notes-*.md`,

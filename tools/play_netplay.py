@@ -74,6 +74,10 @@ parser.add_argument("--connect-code", required=True,
                     help="Opponent's Slippi direct connect code (e.g. WAVE#666)")
 parser.add_argument("--temperature", type=float, default=1.0)
 parser.add_argument("--costume", type=int, default=0)
+parser.add_argument("--gfx-backend", default="Null",
+                    help="Dolphin video backend. Default 'Null' (headless mainline, "
+                         "no rendering). Use 'OGL'/'Vulkan' with a real DISPLAY to "
+                         "watch on a GUI box (Ishiiruka requires a real backend).")
 parser.add_argument("--no-opponent-timeout", type=float, default=120.0,
                     help="Seconds to wait for the opponent to connect before giving up")
 parser.add_argument("--opponent-lost-timeout", type=float, default=10.0,
@@ -282,7 +286,7 @@ console_kwargs = dict(
     online_delay=2,  # matches standard Slippi direct connect default
     setup_gecko_codes=True,
     fullscreen=False,
-    gfx_backend="Null",  # mainline Dolphin headless: no rendering. Ishiiruka needs "Vulkan" (see CLAUDE.md)
+    gfx_backend=args.gfx_backend,  # 'Null' headless (mainline); 'OGL'/'Vulkan' to watch on a GUI box
     disable_audio=False,
     use_exi_inputs=False,
     enable_ffw=False,
