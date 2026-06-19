@@ -622,6 +622,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           grad_clip_norm: float = None,
           no_load_optim: bool = False,
           warm_restart: bool = False,
+          ema_decay: float = 0.0,
+          eval_only: str = None,
           si_drop_start: float = None, si_drop_end: float = None,
           si_drop_max: float = 1.0,
           plain_ce: bool = False,
@@ -929,6 +931,22 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         model = DDP(model, device_ids=[local_rank])
     _raw_model = model.module if is_distributed else model
 
+    # --- EMA: exponential moving average of weights. When enabled, validation
+    # and the promoted (best) checkpoint use the EMA weights; training continues
+    # on the raw weights. Captures the cosine-decay-equivalent val earlier. ---
+    _ema = None
+    _ema_backup = None
+    if ema_decay and ema_decay > 0.0:
+        _ema = {n: p.detach().clone().float()
+                for n, p in _raw_model.named_parameters()}
+        if resume and not warm_restart and isinstance(ckpt, dict) and ckpt.get("ema_state_dict"):
+            for n, t in ckpt["ema_state_dict"].items():
+                if n in _ema:
+                    _ema[n].copy_(t.to(_ema[n].device).float())
+            _log(f"  EMA: resumed {len(_ema)} averaged tensors from checkpoint")
+        else:
+            _log(f"  EMA enabled (decay={ema_decay}); initialized from current weights")
+
     # -- Self-input curriculum schedule --
     _si_schedule = None
     if si_drop_start is not None and si_drop_end is not None:
@@ -1010,10 +1028,56 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     _oom_retries = 0
     best_val_f1 = -1.0
     best_val_loss = float("inf")
+    best_ema_loss = float("inf")
     best_val_loss_step = 0
     evals_since_improve = 0
     _log(f"\n=== Training {max_steps} steps ===")
     _target_hit = False
+    # --- Eval-only: load a checkpoint, score it with the EXACT training val loop
+    # (same compute_loss / flags / MAX_VAL_BATCHES), print val/total, and exit. ---
+    if eval_only:
+        _ec = torch.load(eval_only, map_location=DEVICE, weights_only=False)
+        _sd = _ec["model_state_dict"] if isinstance(_ec, dict) and "model_state_dict" in _ec else _ec
+        _msd = _raw_model.state_dict()
+        _want = any(k.startswith("_orig_mod.") for k in _msd)
+        _have = any(k.startswith("_orig_mod.") for k in _sd)
+        if _want and not _have:
+            _sd = {f"_orig_mod.{k}": v for k, v in _sd.items()}
+        elif _have and not _want:
+            _sd = {k[len("_orig_mod."):]: v for k, v in _sd.items()}
+        _raw_model.load_state_dict(_sd)
+        model.eval()
+        if _si_schedule:
+            _raw_model.encoder.si_drop_prob = 0.0
+        _EK = ["total", "main_f1", "btn_f1", "shldr_f1", "cdir_f1"]
+        _s = {k: 0.0 for k in _EK}; _c = 0
+        with torch.no_grad():
+            for vs, vt in val_dl:
+                for k, v in vs.items(): vs[k] = v.to(DEVICE, non_blocking=True)
+                for k, v in vt.items(): vt[k] = v.to(DEVICE, non_blocking=True)
+                if _recluster_sticks and "main_x" in vt:
+                    xy = torch.stack([vt["main_x"], vt["main_y"]], dim=-1)
+                    dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
+                    vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
+                with autocast("cuda", dtype=AMP_DTYPE):
+                    vpreds = _raw_model(vs)
+                vm, vtl = compute_loss(vpreds, vt, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
+                                       hal_mode=hal_mode,
+                                       shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                                       n_cdir=cfg.num_c_dirs)
+                _bt = sum(t.item() for t in vtl)
+                if math.isfinite(_bt):
+                    _s["total"] += _bt
+                    for _k in _EK:
+                        if _k != "total": _s[_k] += vm[_k]
+                    _c += 1
+                if _c >= MAX_VAL_BATCHES: break
+        _res = {k: _s[k] / max(_c, 1) for k in _EK}
+        print(f"EVAL_ONLY ckpt={eval_only} val/total={_res['total']:.4f} "
+              f"main_f1={_res['main_f1']:.4f} btn_f1={_res['btn_f1']:.4f} batches={_c}", flush=True)
+        _log(f"EVAL_ONLY {os.path.basename(eval_only)}: val/total={_res['total']:.4f} (batches={_c})")
+        return
+
     for step in range(start_step + 1, max_steps + 1):
         if max_wall_time and (time.time() - t0) > max_wall_time:
             _log(f"WALL TIME LIMIT ({max_wall_time}s) exceeded at step {step}")
@@ -1110,6 +1174,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
         optimiser.step()
         scheduler.step()
+        if _ema is not None:
+            with torch.no_grad():
+                for n, p in _raw_model.named_parameters():
+                    _ema[n].mul_(ema_decay).add_(p.detach().float(), alpha=1.0 - ema_decay)
 
         total_loss_val = accum_loss.item() if isinstance(accum_loss, torch.Tensor) else accum_loss
         if math.isfinite(total_loss_val):
@@ -1176,34 +1244,60 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                          "cdir_f1", "cdir_precision", "cdir_recall",
                          "cdir_active_acc",
                          "main_top1_acc", "shoulder_top1_acc"]
-            val_sums = {k: 0.0 for k in _VAL_KEYS}
-            val_ct = 0
-            with torch.no_grad():
-                for vs, vt in val_dl:
-                    for k, v in vs.items():
-                        vs[k] = v.to(DEVICE, non_blocking=True)
-                    for k, v in vt.items():
-                        vt[k] = v.to(DEVICE, non_blocking=True)
-                    if _recluster_sticks and "main_x" in vt:
-                        xy = torch.stack([vt["main_x"], vt["main_y"]], dim=-1)
-                        dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
-                        vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
-                    with autocast("cuda", dtype=AMP_DTYPE):
-                        vpreds = _raw_model(vs)  # unwrapped — no DDP collectives during eval
-                    vm, vtl = compute_loss(vpreds, vt,
-                                           btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                                           hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
-                                           n_cdir=cfg.num_c_dirs)
-                    batch_total = sum(t.item() for t in vtl)
-                    if math.isfinite(batch_total):
-                        val_sums["total"] += batch_total
-                        for _vk in _VAL_KEYS:
-                            if _vk != "total":
-                                val_sums[_vk] += vm[_vk]
-                        val_ct += 1
-                    if val_ct >= MAX_VAL_BATCHES:
-                        break
 
+            # One val pass over up to MAX_VAL_BATCHES on _raw_model's CURRENT weights.
+            # Caller swaps EMA weights in/out around it for the EMA pass.
+            def _val_pass():
+                _sums = {k: 0.0 for k in _VAL_KEYS}
+                _ct = 0
+                with torch.no_grad():
+                    for vs, vt in val_dl:
+                        for k, v in vs.items():
+                            vs[k] = v.to(DEVICE, non_blocking=True)
+                        for k, v in vt.items():
+                            vt[k] = v.to(DEVICE, non_blocking=True)
+                        if _recluster_sticks and "main_x" in vt:
+                            xy = torch.stack([vt["main_x"], vt["main_y"]], dim=-1)
+                            dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
+                            vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
+                        with autocast("cuda", dtype=AMP_DTYPE):
+                            vpreds = _raw_model(vs)  # unwrapped — no DDP collectives during eval
+                        vm, vtl = compute_loss(vpreds, vt,
+                                               btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
+                                               hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                                               n_cdir=cfg.num_c_dirs)
+                        batch_total = sum(t.item() for t in vtl)
+                        if math.isfinite(batch_total):
+                            _sums["total"] += batch_total
+                            for _vk in _VAL_KEYS:
+                                if _vk != "total":
+                                    _sums[_vk] += vm[_vk]
+                            _ct += 1
+                        if _ct >= MAX_VAL_BATCHES:
+                            break
+                return _sums, _ct
+
+            def _build_best_ckpt():
+                _cfg_save = {**cfg.__dict__, "model_preset": model_preset, "run_name": run_name}
+                c = {
+                    "global_step":          step,
+                    "model_state_dict":     _raw_model.state_dict(),
+                    "optimizer_state_dict": optimiser.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "loss_weights":         loss_weights.cpu(),
+                    "norm_stats":           ds.norm_stats,
+                    "config":               _cfg_save,
+                }
+                if stick_centers_np is not None:
+                    c["stick_centers"] = stick_centers_np.tolist()
+                if shoulder_centers_np is not None:
+                    c["shoulder_centers"] = shoulder_centers_np.tolist()
+                if hal_controller_encoding and _combo_map:
+                    c["controller_combos"] = [list(c_) for c_ in sorted(_combo_map.keys(), key=_combo_map.get)]
+                return c
+
+            # --- Primary val on RAW (training) weights ---
+            val_sums, val_ct = _val_pass()
             if val_ct > 0:
                 val_avg = {f"val/{k}": val_sums[k] / val_ct for k in _VAL_KEYS}
                 # Generalization gap: val_total / rolling_train_total.
@@ -1232,25 +1326,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                      + _ratio_str)
                 cur_val_f1 = val_avg.get('val/btn_f1', 0.0)
                 cur_val_loss = val_avg.get('val/total', float("inf"))
-                # Helper so we save the same ckpt dict for both criteria
-                def _build_best_ckpt():
-                    _cfg_save = {**cfg.__dict__, "model_preset": model_preset, "run_name": run_name}
-                    c = {
-                        "global_step":          step,
-                        "model_state_dict":     _raw_model.state_dict(),
-                        "optimizer_state_dict": optimiser.state_dict(),
-                        "scheduler_state_dict": scheduler.state_dict(),
-                        "loss_weights":         loss_weights.cpu(),
-                        "norm_stats":           ds.norm_stats,
-                        "config":               _cfg_save,
-                    }
-                    if stick_centers_np is not None:
-                        c["stick_centers"] = stick_centers_np.tolist()
-                    if shoulder_centers_np is not None:
-                        c["shoulder_centers"] = shoulder_centers_np.tolist()
-                    if hal_controller_encoding and _combo_map:
-                        c["controller_combos"] = [list(c_) for c_ in sorted(_combo_map.keys(), key=_combo_map.get)]
-                    return c
                 if cur_val_f1 > best_val_f1:
                     best_val_f1 = cur_val_f1
                     if _is_main:
@@ -1279,6 +1354,32 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 _log("  -- val: no valid batches")
             if is_distributed:
                 dist.barrier()
+
+            # --- EMA val pass: swap EMA weights in, eval (same si_drop=0 regime as
+            # the raw primary val), log val_ema/*, save a SEPARATE ema bestloss, swap
+            # raw weights back. EMA never affects training — this is a clean A/B. ---
+            if _ema is not None:
+                _bk = {n: p.detach().clone() for n, p in _raw_model.named_parameters()}
+                with torch.no_grad():
+                    for n, p in _raw_model.named_parameters():
+                        p.copy_(_ema[n].to(p.dtype))
+                _ema_sums, _ema_ct = _val_pass()
+                if _ema_ct > 0:
+                    ema_avg = {f"val_ema/{k}": _ema_sums[k] / _ema_ct for k in _VAL_KEYS}
+                    wandb.log(ema_avg, step=step)
+                    _cur_ema = ema_avg["val_ema/total"]
+                    _log(f"  -- val_ema total={_cur_ema:.4f}  "
+                         f"mf1={ema_avg['val_ema/main_f1']:.1%}  (raw best {best_val_loss:.4f})")
+                    if _cur_ema < best_ema_loss:
+                        best_ema_loss = _cur_ema
+                        if _is_main:
+                            os.makedirs("checkpoints", exist_ok=True)
+                            _p = f"checkpoints/{run_name}_ema_bestloss.pt"
+                            torch.save(_build_best_ckpt(), _p)
+                            _log(f"  -- new best EMA val loss={_cur_ema:.4f} → {_p}")
+                with torch.no_grad():
+                    for n, p in _raw_model.named_parameters():
+                        p.copy_(_bk[n])
 
             # Restore si_drop_prob after normal val
             if _si_schedule:
@@ -1341,6 +1442,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     ckpt_data["shoulder_centers"] = shoulder_centers_np.tolist()
                 if hal_controller_encoding and _combo_map:
                     ckpt_data["controller_combos"] = [list(c) for c in sorted(_combo_map.keys(), key=_combo_map.get)]
+                if _ema is not None:
+                    ckpt_data["ema_state_dict"] = {n: t.detach().cpu() for n, t in _ema.items()}
                 torch.save(ckpt_data, ckpt_path)
                 _log(f"  -- saved {ckpt_path}")
             if is_distributed:
@@ -1484,6 +1587,14 @@ if __name__ == "__main__":
     parser.add_argument("--warm-restart", action="store_true",
                         help="On resume: keep Adam optimizer state but reset the LR "
                              "schedule + step counter (fresh cosine from the warm weights)")
+    parser.add_argument("--ema-decay", type=float, default=0.0,
+                        help="If >0, maintain an EMA of weights (e.g. 0.999) and "
+                             "log val_ema/* alongside the raw val (dual-logged); "
+                             "saves {run}_ema_bestloss.pt separately. Off by default.")
+    parser.add_argument("--eval-only", default=None,
+                        help="Path to a checkpoint: score it with the exact training "
+                             "val loop (val/total), print EVAL_ONLY ..., and exit. "
+                             "For scoring averaged/loaded checkpoints reproducibly.")
     parser.add_argument("--plain-ce", action="store_true",
                         help="Use plain cross-entropy instead of focal loss for all heads")
     parser.add_argument("--n-heads", type=int, default=None,
@@ -1577,6 +1688,8 @@ if __name__ == "__main__":
         grad_clip_norm=args.grad_clip_norm,
         no_load_optim=args.no_load_optim,
         warm_restart=args.warm_restart,
+        ema_decay=args.ema_decay,
+        eval_only=args.eval_only,
         si_drop_start=args.si_drop_start,
         si_drop_end=args.si_drop_end,
         si_drop_max=args.si_drop_max,
