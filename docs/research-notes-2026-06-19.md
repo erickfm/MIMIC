@@ -74,8 +74,11 @@ and the original warm-restart bestloss by **−0.0086 to −0.0087**, on every s
 | 123 | 0.7237 | 0.7183 | **0.7151** | −0.0086 |
 | 7   | 0.7230 | 0.7176 | **0.7143** | −0.0087 |
 
-(R4 = a *fresh* less-reg run trained at seed 123 confirms robustness to training
-order, not just val subset — results appended on completion.)
+**Gold standard — robust to *training* order too.** R4 = a fresh less-reg run
+trained at **seed 123** (R3 was trained at seed 42). Its SWA scores
+**0.7183 / 0.7152 / 0.7144** at eval-seeds 42 / 123 / 7 — within 0.0001 of R3's
+0.7183 / 0.7151 / 0.7143. So a different *training* seed reproduces the result
+exactly; the recipe is not a seed-42 fluke.
 
 ## Recipe
 
