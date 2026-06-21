@@ -99,6 +99,10 @@ warm-restart's badly-selected (selection-biased) bestloss.
 - `tools/average_checkpoints.py`: SWA/LAWA averaging of N checkpoints (`--run … --last K`).
 
 ## Open / next
-- Verify the SWA win in-game with one h2h vs the warm-restart bestloss (the
-  +6.5 pp projection).
+- **Resolved (in-game) → see `research-notes-2026-06-20.md`.** The recipe ties the
+  442k long run vs a common opponent (76.5% vs 76.2%) at ~14× fewer steps, but the
+  *direct* recipe-vs-warm-restart h2h is a coin flip (42.9%, 9–12). The ~+11 pp
+  projection overpredicted: the 1.3 pp/0.001 slope is far-field only and h2h isn't
+  transitive. Recipe's value = **training efficiency**, not out-dueling the
+  warm-restart.
 - The SWA recipe is free and general — apply it to every promoted model.
