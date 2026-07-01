@@ -164,6 +164,41 @@ higher val loss because the model can no longer cheat via
 action→button memorization. A v2 val loss of ~1.0 can correspond to
 better gameplay than 0.74 on old shards.
 
+### Why val loss is a weak proxy for strength (error consequence is non-uniform)
+
+The deeper reason val loss keeps failing to predict head-to-head
+strength (empirically confirmed repeatedly — see the 2026-06 h2h runs
+where −0.012 val "wins" were in-game washes): **cross-entropy weights
+each frame's error by how *often/confidently* it occurs, never by how
+much that input *matters to winning*.** But human input consequence is
+wildly non-uniform:
+
+- On the vast majority of frames the exact input barely matters — a
+  slightly-off stick angle, a **missed L-cancel** (minor tempo loss).
+  These dominate the loss (they're common) but are nearly free in-game.
+- A tiny fraction of inputs are **decisive**, and among those some
+  mistakes are **catastrophic**: pressing **L/R off-stage** (airdodge
+  into the blastzone = a free stock), a missed tech (comboed to death),
+  an SD. These are rare, so they barely move the loss — but they can
+  lose the game outright.
+
+So a minuscule val-loss difference (0.001) can correspond to *anything*
+from "nothing" (a few L-cancels) to "loses the match" (a few off-stage
+shoulder presses). The loss literally cannot tell them apart. Two
+corollaries:
+
+1. **Don't trust small val deltas as strength.** Confirm with h2h. This
+   is why the promotion/eval discipline leans on head-to-head, not val.
+2. **This is a core argument for RL.** A game-outcome reward
+   (stock/win) is *consequence-weighted by construction* — it learns
+   that pressing L off-stage costs a stock no matter how rare, an
+   asymmetry cross-entropy can never see. (A future BC direction:
+   consequence-weight the loss near critical states — edge, high-%,
+   tech situations.) It also explains the determinism fragility: near
+   the edge, the *modal* action can itself be the SD, so argmax/low-T
+   walks off and dies (see the 2026-06-27 decode sweep: T<1.0 →
+   4-stocked).
+
 ## Training
 
 ### Current best command (v2 shards, full features)
@@ -346,9 +381,35 @@ Two sources of raw replays. Ranked is canonical for new training.
   `platinum-*`. Higher-rank token first (M>D>P). Per-char
   master-tier training pulls all three `master-*` pairs
   (master-master has both players master; master-diamond/platinum
-  mixes in games where the other player is sub-master and we can't
-  tell from the .slp which port is master — accepted as a
-  data-quality/quantity tradeoff). **Folders are now correctly
+  mixes in games where the *other* player is sub-master). **Per-port
+  rank IS recoverable from the .slp** — the dataset's anonymizer wrote
+  each player's rank into the netplay name field
+  (`start.players[i].netplay.name` = `"Master Player"` /
+  `"Diamond Player"` / `"Platinum Player"`; connect codes are blanked).
+  So we can tell exactly which port is which rank — for any character and
+  any rank tier; nothing below is Fox-specific (Fox is just the current
+  test char). **Think in *perspectives*, not games.** `slp_to_shards.py`
+  extracts both players of every game and keeps each perspective where
+  `self` is the target char (the `character_filter` at
+  slp_to_shards.py:1215): a target-vs-other game yields **one** perspective;
+  a same-char ditto yields **two** — and those two are *different humans*,
+  distinct trajectories, **not** a double-count. Every distinct target-char
+  perspective is extracted exactly once. The rank gotcha: in a mixed-rank
+  pair (e.g. master-diamond) we keep whichever player is the target char,
+  and that player is the *higher*-ranked one only ~half the time — the
+  named "master" is often the *opponent* we discard. Measured 2026-06-25 for
+  Fox over the master-* pool: only **61.6%** of Fox perspectives are
+  master-rank (100% in master-master; ~51-52% in master-diamond/platinum).
+  The same dilution applies to any char pulled from mixed-rank tiers.
+  `tools/filter_masterfox.py` filters to perspectives where the target
+  player is master (keep a game iff every target-char port is master, so no
+  sub-master perspective survives and mixed-rank dittos are dropped whole);
+  it hardcodes Fox (`FOX_EXT=2`) but the approach generalizes — swap the
+  char id / rank. `tools/build_masterfox_train_box.sh` does the full
+  filter→reshard→train, `tools/build_full_masterfox_box.sh` does it uncapped
+  (all ~102k master-Fox perspectives). The earlier "can't tell which port is
+  master" claim was wrong.
+  **Folders are now correctly
   labeled** — as of 2026-06-15 the dataset was re-sorted in place so
   every folder contains only its named character (a long-standing
   peppi-external-vs-libmelee-value ID scramble was fixed; see
@@ -469,10 +530,19 @@ Set `--run-name` to `{char}-{YYYYMMDD}-{descriptor}`; step suffix is
 appended when promoting the `_best.pt`.
 
 Current per-character production:
-- `fox-master` — `fox-master-20260616-long` (val **0.7130**), master-rank
-  ranked data, ~305k-step long run. Strongest master Fox: 76% h2h vs the
-  prior 0.7334 rank-master, 57% vs the warm-restart 0.7176 (see
-  `docs/research-notes-2026-06-18.md`). On HF at `erickfm/MIMIC/fox-master/`.
+- `fox-master` — `fox-mastfox-20260625` (tail-SWA, 280k-step / 3-GPU run),
+  promoted 2026-06-26. Trained on the **rank-filtered** master-Fox set (100%
+  master Fox via `filter_masterfox.py`, ~77k games), mirror aug. **Same
+  playing strength as the prior champ, not stronger** — 10–10 h2h vs
+  `fox-master-20260616-long` over 20 realtime matches — but cleaner/verified
+  data provenance, which is why it was promoted. It does win on val (−0.012
+  on its own held-out set, −0.036 on the prior champ's master_v2 val), but
+  that didn't translate to a gameplay edge. Prior champ
+  `fox-master-20260616-long` (val 0.7130, ~305k-step long run, 76% h2h vs the
+  0.7334 rank-master) retained on disk as the validated-equal fallback. On HF
+  at `erickfm/MIMIC/fox-master/`. NOTE: its `metadata.json:val_loss` (0.6821)
+  is on the master-Fox val set and is NOT comparable to the 0.7130 figure
+  (different val data).
 - `fox-diamond` (val 0.7325) / `fox-platinum` (val 0.7479) — the rank ladder
   (`docs/research-notes-2026-06-16.md`).
 
@@ -571,6 +641,21 @@ fullfeat checkpoints work — minimal encoder slices internally.
 `tools/extract_wavedashes.py` (wavedash-only windows for overfit
 checks), `tools/validate_checkpoint.py` (per-head CE on val),
 `tools/diagnose.py` (train-vs-inference tensor compare).
+
+**Inference-faithfulness canaries** (cheap, dense, replay-only behavioral
+checks against the training corpus — confirm the live Dolphin pipeline isn't
+silently mistimed/corrupt; see `docs/research-notes-2026-06-29.md`):
+`tools/lcancel_analysis.py` (per-move L-cancel rate, healthy ~88%; catches
+systematic timing), `tools/ctrl_canary.py` (center-stick %, ~34% healthy →
+100% broken, catches dropped/idle inputs; + stick-dist JS for general
+corruption), `tools/state_canary.py` (action-state distribution JS). Bot is
+isolated by player type (model = `type=0` human-controller, CPU = `type=1`).
+Validate any canary with `tools/play.py --drop-prob P` (overwrites the bot's
+input with neutral on fraction P of frames; P=1.0 = known-broken control).
+The L-cancel target is **realized avoidable lag** = `max(0, realized_landing_lag
+− cancelled_min[move])` (`cancelled_min` {NAIR:7,FAIR:11,BAIR:10,UAIR:9,DAIR:9}),
+NOT the binary `post.l_cancel` flag (which counts ledge-cancels/early-hits as
+misses) and NOT the old offset=−4 press proxy (which diverged from the truth).
 
 **Data**: `tools/slp_to_shards.py` (.slp → v2 .pt shards with
 `target[i] = buttons[i+1]` alignment); `tools/shard_and_upload_ranked.py`
@@ -776,19 +861,35 @@ references to the slippistats functions used. Past notes:
     and the `ENABLE_HEADLESS` cmake flag is broken on this fork
     anyway (project-slippi/Ishiiruka#209).
 
-18. **FFW (`emulator_ffw/` + `--use-exi-inputs --enable-ffw`) is not
-    gameplay-faithful.** It produces matches ~4× shorter than realtime
-    from the same models (h2h: ~2,400 vs ~9,700 frames/match) — the bots
-    lose stocks ~4× faster, likely the EXI input path mistiming
-    controller inputs under fast-forward. Do NOT use FFW for RL training
-    or h2h eval; run realtime (`emulator/`). A win-rate that looks
-    consistent FFW-vs-realtime is a false positive — win-rate survives
-    *symmetric* degradation (both bots equally hobbled); compare **match
-    length** (frame count) to detect emulator-fidelity problems. The
-    separate inter-update PPO-pause disconnect (`EnetDisconnected`, enet
-    unserviced > ~20 s) is fixed by the `dolphin_actor.py` keepalive
-    thread, but that fix is moot while FFW gameplay is unfaithful. See
-    `docs/research-notes-2026-05-18.md`.
+18. **FFW (`emulator_ffw/` + `--use-exi-inputs --enable-ffw`) IS
+    gameplay-faithful — the old "unfaithful" claim was a misdiagnosis
+    (corrected 2026-06-30).** With `blocking_input=True` (our default,
+    pitfall #8) the canary suite passes: L-cancel rate **91.5%** (n=588)
+    vs realtime 88% / corpus 90.4%, match length **normal** (~6,400
+    frames), at **~2.9× realtime**. Faithful by construction: Fizzi's
+    `AI/LoopMainEngine/*` gecko codes run the *real* engine loop N× per
+    video frame (NOT frame-skipping), and blocking input makes Dolphin
+    wait for the bot on every engine frame → one decision per game
+    frame, just faster wall-clock. Our setup is byte-for-byte
+    slippi-ai's (`use_exi_inputs + enable_ffw + blocking_input`, same
+    Fizzi codeset in `emulator_ffw/.../GALE01r2.ini`). The 2026-05-18
+    "matches ~4× short" result was inferred from **match length in a
+    bot-vs-bot run** — the symmetric-degradation trap (both bots equally
+    hobbled → faster mutual deaths → short matches, no actual
+    infidelity; most likely that run wasn't blocking-input). **Do NOT
+    diagnose emulator fidelity from match length or win-rate** (both
+    survive symmetric degradation) — use the canaries
+    (`tools/lcancel_analysis.py` etc.), which measure input timing
+    directly. **Parallel caveat:** N independent `play.py` processes do
+    NOT scale (GPU-bound on batch-1 inference — 1→4 instances buys only
+    2.9→3.5× total, GPU pins at 90% while CPU idles). Real throughput
+    needs **batched multi-env inference** (one process, N Dolphins, one
+    batched forward) = slippi-ai's `AsyncBatchedEnvironment` = the RLVR
+    rollout harness. The inter-update PPO-pause disconnect
+    (`EnetDisconnected`, enet unserviced > ~20 s) is fixed by the
+    `dolphin_actor.py` keepalive thread. See
+    `docs/research-notes-2026-06-30.md` (supersedes the FFW claims in
+    `docs/research-notes-2026-05-18.md`).
 
 19. **Netplay headless: use the *mainline* Slippi Dolphin + `gfx_backend="Null"`,
     NOT the bundled Ishiiruka.** libmelee's `choose_direct_online` only selects
@@ -867,8 +968,19 @@ canonical checkpoint is `hal/checkpoints/000005242880.pt`; **use
 
 | Machine | Host | Port | User | GPU | Storage | Status |
 |---------|------|------|------|-----|---------|--------|
-| A | 194.14.47.19 | 22877 | root | RTX 5090 | 3 TB SSD | Active |
+| A | 74.2.96.39 | 11639 | root | 2× RTX 5090 (32 GB ea) | 2 TB `/workspace` | Active |
 
 ```bash
-ssh -p 22877 root@194.14.47.19   # Machine A
+ssh mimic-train                       # Machine A (alias in ~/.ssh/config)
+ssh -p 11639 root@74.2.96.39          # Machine A (2× RTX 5090)
 ```
+
+Port changes on each reprovision; the box also needs your SSH **public key**
+re-added to `~/.ssh/authorized_keys` after a fresh provision (publickey auth
+fails otherwise).
+
+**Persistent storage is `/workspace` ONLY** — everything outside `/workspace`
+(e.g. `/root`, `/tmp`) is **ephemeral** and wiped on container restart. Clone the
+repo, store data, checkpoints, and logs under `/workspace/MIMIC`. On a fresh box,
+CUDA may report "unknown error" / `is_available()=False` until `nvidia-uvm` is
+loaded — run `nvidia-modprobe -u -c=0` (creates `/dev/nvidia-uvm`).
