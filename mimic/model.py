@@ -125,6 +125,18 @@ MODEL_PRESETS = {
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
+    # "Simply wider" variants of `mimic`: ONLY d_model scaled (nhead held at
+    # head_dim=64, FFN held at the 4x ratio, depth=6 unchanged). For the
+    # does-extra-width-help width sweep (512 baseline / 768 / 1024). Everything
+    # else (relpos, GELU, LN, dropout, seq_len, categorical dims) is identical.
+    "mimic-w768":   dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
+                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "mimic-w1024":  dict(d_model=1024, nhead=16, num_layers=6, dim_feedforward=4096,
+                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
     "mimic-learned":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=180, pos_enc="learned",
                          num_stages=6, num_characters=27, num_actions=396,

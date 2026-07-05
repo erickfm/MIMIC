@@ -450,7 +450,8 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
                   rank=0, world_size=1, controller_offset=False,
                   hal_controller_encoding=False,
                   controller_combo_map=None, n_controller_combos=5,
-                  character_filter=None, random_perspective=False):
+                  character_filter=None, random_perspective=False,
+                  mirror_aug=0.0):
     _log(f"  Using streaming dataset from {data_dir}")
     if character_filter is not None:
         _log(f"  Character filter: self_character={character_filter}")
@@ -477,8 +478,11 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         controller_offset=controller_offset,
         character_filter=character_filter,
         random_perspective=random_perspective,
+        mirror_aug=mirror_aug,
         **ctrl_kw,
     )
+    if mirror_aug > 0.0:
+        _log(f"  Mirror augmentation: p={mirror_aug} (train split only)")
     train_ds._state_keys = _HAL_STATE_KEYS
     val_ds = StreamingMeleeDataset(
         data_dir=data_dir,
@@ -641,7 +645,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           hal_controller_encoding: bool = False,
           character_filter: int = None,
           random_perspective: bool = False,
-          input_gate_l1: float = 0.0):
+          input_gate_l1: float = 0.0,
+          optimizer: str = "adamw",
+          muon_lr: float = 0.02,
+          soap_lr: float = 3e-3,
+          mirror_aug: float = 0.0):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -717,7 +725,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                               controller_combo_map=_combo_map,
                               n_controller_combos=_n_combos,
                               character_filter=character_filter,
-                              random_perspective=random_perspective)
+                              random_perspective=random_perspective,
+                              mirror_aug=mirror_aug)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
@@ -845,19 +854,81 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     loss_weights = torch.ones(len(TASK_NAMES), device=DEVICE)
 
-    decay, no_decay = [], []
-    for n, p in model.named_parameters():
-        if not p.requires_grad:
-            continue
-        (no_decay if n.endswith("bias") or "norm" in n.lower()
-                  else decay).append(p)
-    optimiser = optim.AdamW(
-        [{"params": decay,    "weight_decay": WEIGHT_DECAY},
-         {"params": no_decay, "weight_decay": 0.0}],
-        lr=actual_lr,
-        betas=(0.9, 0.999),
-        fused=True,
-    )
+    if optimizer == "adamw":
+        decay, no_decay = [], []
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            (no_decay if n.endswith("bias") or "norm" in n.lower()
+                      else decay).append(p)
+        optimiser = optim.AdamW(
+            [{"params": decay,    "weight_decay": WEIGHT_DECAY},
+             {"params": no_decay, "weight_decay": 0.0}],
+            lr=actual_lr,
+            betas=(0.9, 0.999),
+            fused=True,
+        )
+    elif optimizer == "muon":
+        # Muon on the hidden 2D weight matrices; aux-AdamW on embeddings, the
+        # relpos tables, the output heads, and all norms/biases (Muon convention).
+        # SingleDeviceMuonWithAuxAdam is one optimizer with standard param_groups,
+        # so the existing LR scheduler / step / clip / save paths are untouched.
+        from mimic.muon import SingleDeviceMuonWithAuxAdam
+        _emb_names = set()
+        for _mn, _mod in model.named_modules():
+            if isinstance(_mod, torch.nn.Embedding):
+                for _pn, _ in _mod.named_parameters(recurse=False):
+                    _emb_names.add(f"{_mn}.{_pn}" if _mn else _pn)
+
+        def _is_matrix(n, p):
+            # Names are `_orig_mod.`-prefixed when torch.compile is on; strip it
+            # so the heads/embeds/relpos exclusions match in both cases.
+            base = n[len("_orig_mod."):] if n.startswith("_orig_mod.") else n
+            return (p.ndim == 2 and n not in _emb_names
+                    and not base.endswith(".Er") and not base.endswith(".queries")
+                    and not base.startswith("heads."))
+
+        muon_p, decay, no_decay = [], [], []
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if _is_matrix(n, p):
+                muon_p.append(p)
+            elif n.endswith("bias") or "norm" in n.lower():
+                no_decay.append(p)
+            else:
+                decay.append(p)
+        # Muon group: weight_decay=0 (canonical — the orthogonalized, spectral-
+        # norm-bounded update makes heavy decay redundant; LR-coupling would make
+        # WEIGHT_DECAY ~60x stronger here than on the AdamW group).
+        optimiser = SingleDeviceMuonWithAuxAdam([
+            dict(params=muon_p, use_muon=True, lr=muon_lr, momentum=0.95,
+                 weight_decay=0.0),
+            dict(params=decay, use_muon=False, lr=actual_lr, betas=(0.9, 0.999),
+                 eps=1e-8, weight_decay=WEIGHT_DECAY),
+            dict(params=no_decay, use_muon=False, lr=actual_lr, betas=(0.9, 0.999),
+                 eps=1e-8, weight_decay=0.0),
+        ])
+        _log(f"  Muon: {len(muon_p)} hidden matrices @ lr={muon_lr}; "
+             f"aux-AdamW: {len(decay)+len(no_decay)} tensors @ lr={actual_lr}")
+    elif optimizer == "soap":
+        from mimic.soap import SOAP
+        decay, no_decay = [], []
+        for n, p in model.named_parameters():
+            if not p.requires_grad:
+                continue
+            (no_decay if n.endswith("bias") or "norm" in n.lower()
+                      else decay).append(p)
+        optimiser = SOAP(
+            [{"params": decay,    "weight_decay": WEIGHT_DECAY},
+             {"params": no_decay, "weight_decay": 0.0}],
+            lr=soap_lr, betas=(0.95, 0.95), weight_decay=WEIGHT_DECAY,
+            precondition_frequency=10,
+        )
+        _log(f"  SOAP: {len(decay)+len(no_decay)} params @ lr={soap_lr} "
+             f"(precond_freq=10)")
+    else:
+        raise ValueError(f"unknown --optimizer {optimizer!r}")
 
     _eta_min = cosine_min_lr if cosine_min_lr is not None else 0.0
     # Decouple the cosine decay length from the total training length so a
@@ -1595,6 +1666,22 @@ if __name__ == "__main__":
                         help="Path to a checkpoint: score it with the exact training "
                              "val loop (val/total), print EVAL_ONLY ..., and exit. "
                              "For scoring averaged/loaded checkpoints reproducibly.")
+    parser.add_argument("--optimizer", choices=["adamw", "muon", "soap"],
+                        default="adamw",
+                        help="Optimizer for hidden matrices. 'adamw' (default) is "
+                             "the existing path, byte-identical. 'muon' runs Muon on "
+                             "2D weight matrices + aux-AdamW on embeddings/heads/"
+                             "norms/biases. 'soap' runs SOAP (Adam in the Shampoo "
+                             "eigenbasis) on all params.")
+    parser.add_argument("--muon-lr", type=float, default=0.02,
+                        help="LR for the Muon group (2D hidden matrices) when "
+                             "--optimizer muon; the aux-AdamW group keeps --lr.")
+    parser.add_argument("--soap-lr", type=float, default=3e-3,
+                        help="LR for SOAP when --optimizer soap (Adam-scale, ~3e-3).")
+    parser.add_argument("--mirror-aug", type=float, default=0.0,
+                        help="Left-right mirror augmentation probability per train "
+                             "window (e.g. 0.5). Exploits Melee's L-R symmetry to "
+                             "double unique signal. Val stays un-mirrored. 0=off.")
     parser.add_argument("--plain-ce", action="store_true",
                         help="Use plain cross-entropy instead of focal loss for all heads")
     parser.add_argument("--n-heads", type=int, default=None,
@@ -1709,4 +1796,8 @@ if __name__ == "__main__":
         character_filter=args.character_filter,
         random_perspective=args.random_perspective,
         input_gate_l1=args.input_gate_l1,
+        optimizer=args.optimizer,
+        muon_lr=args.muon_lr,
+        soap_lr=args.soap_lr,
+        mirror_aug=args.mirror_aug,
     )

@@ -341,6 +341,76 @@ MIMIC_SHOULDER_CLUSTERS_3 = np.array([0.0, 0.4, 1.0], dtype=np.float32)
 #   0(neutral)→0, 1(up)→4, 2(down)→3, 3(left)→2, 4(right)→1
 CDIR_5_TO_9_MAP = np.array([0, 4, 3, 2, 1], dtype=np.int64)
 
+
+# ---------------------------------------------------------------------------
+# Left-right mirror augmentation
+# ---------------------------------------------------------------------------
+# Melee is exactly left-right symmetric: a horizontally-mirrored game is a valid
+# game. The 37 main-stick and 9 c-stick clusters are symmetric about x=0.5, so
+# reflecting a cluster center (x -> 1-x) lands exactly on another center — the
+# mirror is an exact involution permutation. See docs/research-notes-2026-06-22*.
+def _mirror_perm(centers: np.ndarray) -> np.ndarray:
+    m = centers.copy()
+    m[:, 0] = 1.0 - m[:, 0]                       # reflect x about 0.5
+    d = ((m[:, None, :] - centers[None, :, :]) ** 2).sum(-1)
+    return d.argmin(1).astype(np.int64)
+
+MIRROR37 = _mirror_perm(MIMIC_STICK_CLUSTERS_37)   # e.g. 0->0, 9(right)->11(left)
+MIRROR9  = _mirror_perm(MIMIC_CSTICK_CLUSTERS_9)    # 0->0, 1(right)<->2(left)
+_MIRROR37_T = torch.as_tensor(MIRROR37, dtype=torch.long)
+_MIRROR9_T  = torch.as_tensor(MIRROR9,  dtype=torch.long)
+
+# Per-player numeric columns that are X-quantities (negate under mirror):
+#   [0] pos_x, [5] speed_air_x_self, [6] speed_ground_x_self, [7] speed_x_attack.
+# pos_x uses `standardize` and the velocities use `tanh_scale` — both ODD, so
+# negating the *normalized* value equals negating the raw value. Flags col [2] is
+# `facing`, stored as +-1 by normalize(0,1), so negation flips L/R.
+_MIRROR_XCOLS = [0, 5, 6, 7]
+
+
+def mirror_window(state: dict, target: dict):
+    """Left-right mirror one training window IN THE DICT (clone-on-write).
+
+    Operates on per-window torch tensors (shape (T, ...)). NEVER mutates the
+    input tensors in place — they are views into cached/mmapped shards, so every
+    modified tensor is cloned/replaced. Mirrors BOTH players' X-position, X-
+    velocities, and facing; permutes the self-controller main/c-stick one-hots
+    and the stick targets; leaves buttons/shoulder, Y-quantities, distance,
+    stage geometry (symmetric stages), and action IDs unchanged. Returns
+    (state, target) for convenience; mutation is on the passed dicts.
+
+    Requires `self_controller` to be present (the --mimic-controller-encoding
+    path); otherwise the input controller history would not match the mirrored
+    world. Raises if it is absent so a config mismatch fails loudly.
+    """
+    for k in ("self_numeric", "opp_numeric"):
+        if k in state:
+            t = state[k].clone()
+            t[..., _MIRROR_XCOLS] = -t[..., _MIRROR_XCOLS]
+            state[k] = t
+    for k in ("self_flags", "opp_flags"):
+        if k in state:
+            t = state[k].clone()
+            t[..., 2] = -t[..., 2]                 # facing (+-1)
+            state[k] = t
+
+    if "self_controller" not in state:
+        raise RuntimeError(
+            "mirror_window requires self_controller (use "
+            "--mimic-controller-encoding); raw-analog mirroring is not supported.")
+    c = state["self_controller"]
+    W = c.shape[-1]                                # 37 + 9 + n_combos + 3
+    perm = torch.cat([_MIRROR37_T, 37 + _MIRROR9_T, torch.arange(46, W)])
+    state["self_controller"] = c.index_select(-1, perm)
+
+    if "main_cluster" in target:
+        target["main_cluster"] = _MIRROR37_T[target["main_cluster"].long()]
+    if "c_dir" in target:                          # (T, 9) one-hot
+        target["c_dir"] = target["c_dir"].index_select(-1, _MIRROR9_T)
+    if "main_x" in target:                         # denormalized [0,1] analog
+        target["main_x"] = 1.0 - target["main_x"]
+    return state, target
+
 # Backwards-compat aliases
 HAL_STICK_CLUSTERS_37 = MIMIC_STICK_CLUSTERS_37
 HAL_CSTICK_CLUSTERS_9 = MIMIC_CSTICK_CLUSTERS_9

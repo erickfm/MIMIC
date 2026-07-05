@@ -57,6 +57,8 @@ class StreamingMeleeDataset(IterableDataset):
         self._distributed    = kwargs.pop("distributed", True)
         self._char_filter    = kwargs.pop("character_filter", None)  # e.g. 1 for Fox
         self._random_perspective = kwargs.pop("random_perspective", False)
+        # Left-right mirror augmentation probability (train split only); 0 = off.
+        self._mirror_aug     = float(kwargs.pop("mirror_aug", 0.0))
         self._controller_offset = controller_offset
         self._hal_ctrl_enc   = hal_controller_encoding
         self._combo_map      = controller_combo_map
@@ -255,7 +257,17 @@ class StreamingMeleeDataset(IterableDataset):
 
     # ------------------------------------------------------------------
     def __iter__(self):
-        if self._mode == "prewindowed":
-            yield from self._iter_prewindowed()
-        else:
-            yield from self._iter_pergame()
+        src = (self._iter_prewindowed() if self._mode == "prewindowed"
+               else self._iter_pergame())
+        if self._mirror_aug <= 0.0:
+            yield from src
+            return
+        # Per-window left-right mirror with prob _mirror_aug. Dedicated RNG seeded
+        # per DataLoader worker so the coin stream is reproducible + independent.
+        from .features import mirror_window
+        wi = get_worker_info()
+        mrng = random.Random(982451653 + (wi.id if wi is not None else 0))
+        for state, target in src:
+            if mrng.random() < self._mirror_aug:
+                mirror_window(state, target)
+            yield state, target
