@@ -73,6 +73,10 @@ parser.add_argument("--stage", default="FINAL_DESTINATION")
 parser.add_argument("--connect-code", required=True,
                     help="Opponent's Slippi direct connect code (e.g. WAVE#666)")
 parser.add_argument("--temperature", type=float, default=1.0)
+parser.add_argument("--top-k", type=int, default=0,
+                    help="Top-k truncation (0=off, 1=greedy argmax).")
+parser.add_argument("--top-p", type=float, default=0.0,
+                    help="Top-p / nucleus truncation (0=off).")
 parser.add_argument("--costume", type=int, default=0)
 parser.add_argument("--gfx-backend", default="Null",
                     help="Dolphin video backend. Default 'Null' (headless mainline, "
@@ -547,6 +551,7 @@ try:
 
             new_sent, pressed, btn_names = decode_and_press(
                 bot_ctrl, preds, player_state.prev_sent, temperature=args.temperature,
+                top_k=args.top_k, top_p=args.top_p,
             )
             player_state.prev_sent = new_sent
 

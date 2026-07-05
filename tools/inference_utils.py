@@ -459,39 +459,61 @@ class PlayerState:
             return self.model(batch)
 
 
-def _safe_sample(logits, temperature: float = 1.0) -> int:
-    """Sample from softmax(logits / T), falling back to argmax if the
-    logits are NaN/Inf (undertrained XXL models hit this). Prevents a
-    `torch.multinomial` device-side assert from killing the session."""
+def _safe_sample(logits, temperature: float = 1.0,
+                 top_k: int = 0, top_p: float = 0.0) -> int:
+    """Sample from softmax(logits / T) with optional top-k / top-p (nucleus)
+    truncation, falling back to argmax if the logits are NaN/Inf (undertrained
+    XXL models hit this). Prevents a `torch.multinomial` device-side assert from
+    killing the session.
+
+    `temperature <= 0` or `top_k == 1` => greedy argmax (deterministic). `top_k`
+    keeps the k highest-prob classes; `top_p` keeps the smallest nucleus whose
+    cumulative prob >= top_p. Both default off (full-distribution multinomial),
+    so the historical temperature=1.0 behavior is unchanged."""
     logits = logits.float()
     if not torch.isfinite(logits).all():
         # Undertrained / broken model. argmax on raw logits is at least
         # deterministic; if those are all NaN too, fall back to 0.
         safe = torch.nan_to_num(logits, nan=-1e9, posinf=1e9, neginf=-1e9)
         return int(torch.argmax(safe).item())
+    if temperature <= 0.0 or top_k == 1:
+        return int(torch.argmax(logits).item())
     probs = Fn.softmax(logits / temperature, dim=-1)
     if not torch.isfinite(probs).all() or float(probs.sum()) <= 0:
         return int(torch.argmax(logits).item())
-    return int(torch.multinomial(probs, 1).item())
+    if top_k and top_k < probs.numel():
+        topv, topi = torch.topk(probs, top_k)
+        probs = torch.zeros_like(probs).scatter_(0, topi, topv)
+    if top_p and 0.0 < top_p < 1.0:
+        sv, si = torch.sort(probs, descending=True)
+        # keep classes up to and including the one that crosses the top_p mass
+        keep = (torch.cumsum(sv, dim=-1) - sv) < top_p
+        probs = torch.zeros_like(probs).scatter_(0, si, sv * keep)
+    s = float(probs.sum())
+    if not (s > 0):
+        return int(torch.argmax(logits).item())
+    return int(torch.multinomial(probs / s, 1).item())
 
 
-def decode_and_press(ctrl, preds, prev_sent, temperature=1.0):
+def decode_and_press(ctrl, preds, prev_sent, temperature=1.0, top_k=0, top_p=0.0):
     """Decode model predictions, press controller, return updated prev_sent.
 
-    Works for both 5-class and 7-class button heads.
+    Works for both 5-class and 7-class button heads. `temperature`/`top_k`/`top_p`
+    control the per-head sampling (see `_safe_sample`); defaults reproduce the
+    historical full-distribution temperature=1.0 behavior.
 
     Returns: (prev_sent dict, pressed list, btn_names list)
     """
-    main_idx = _safe_sample(preds["main_xy"][0, -1], temperature)
+    main_idx = _safe_sample(preds["main_xy"][0, -1], temperature, top_k, top_p)
     mx = float(HAL_STICK_CLUSTERS_37[main_idx][0])
     my = float(HAL_STICK_CLUSTERS_37[main_idx][1])
 
-    shldr_idx = _safe_sample(preds["shoulder_val"][0, -1], temperature)
+    shldr_idx = _safe_sample(preds["shoulder_val"][0, -1], temperature, top_k, top_p)
     shldr = [0.0, 0.4, 1.0][shldr_idx]
 
     n_cdir = preds["c_dir_logits"].size(-1)
     if n_cdir == 9:
-        c_idx = _safe_sample(preds["c_dir_logits"][0, -1], temperature)
+        c_idx = _safe_sample(preds["c_dir_logits"][0, -1], temperature, top_k, top_p)
         cx = float(HAL_CSTICK_CLUSTERS_9[c_idx][0])
         cy = float(HAL_CSTICK_CLUSTERS_9[c_idx][1])
     else:
@@ -500,7 +522,7 @@ def decode_and_press(ctrl, preds, prev_sent, temperature=1.0):
                   3: (0.0, 0.5), 4: (1.0, 0.5)}
         cx, cy = _C_DIR.get(dir_idx, (0.5, 0.5))
 
-    btn_idx = _safe_sample(preds["btn_logits"][0, -1], temperature)
+    btn_idx = _safe_sample(preds["btn_logits"][0, -1], temperature, top_k, top_p)
     n_btn = preds["btn_logits"].size(-1)
 
     # Analog sticks

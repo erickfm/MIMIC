@@ -45,6 +45,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import random
 import signal
 import sys
 import time
@@ -152,7 +153,14 @@ def run(
     character: str = "FOX",
     opponent_character: str = "FOX",
     stage: str = "FINAL_DESTINATION",
+    stages: str = None,
+    drop_prob: float = 0.0,
     temperature: float = 1.0,
+    top_k: int = 0,
+    top_p: float = 0.0,
+    opp_temperature: float = None,
+    opp_top_k: int = None,
+    opp_top_p: float = None,
     use_exi_inputs: bool = False,
     enable_ffw: bool = False,
     gfx_backend: str = "",
@@ -227,6 +235,10 @@ def run(
     A_CHAR = melee.Character[character]
     B_CHAR = melee.Character[opponent_character]
     STAGE = melee.Stage[stage]
+    # Optional per-match stage cycling: --stages FD,DREAMLAND,YOSHIS_STORY,...
+    STAGES_LIST = ([melee.Stage[s.strip()] for s in stages.split(",") if s.strip()]
+                   if stages else None)
+    cur_stage = STAGES_LIST[0] if STAGES_LIST else STAGE
 
     results = []
     matches_started = 0
@@ -284,6 +296,7 @@ def run(
                 "character": character,
                 "opponent_character": opponent_character,
                 "stage": stage, "temperature": temperature,
+                "top_k": top_k, "top_p": top_p,
                 "use_exi_inputs": use_exi_inputs, "enable_ffw": enable_ffw,
                 "gfx_backend": gfx_backend, "alternate_ports": alternate_ports,
                 "port_a": port_a, "port_b": port_b,
@@ -324,6 +337,7 @@ def run(
                     "a_stocks": a_stocks, "b_stocks": b_stocks,
                     "frames": last_frame,
                     "wall_seconds": round(t_match_end - t_match_start, 1),
+                    "stage": cur_stage.name,
                 }
                 results.append(meta)
                 _emit_report()  # incremental: survive a later crash/freeze
@@ -350,10 +364,12 @@ def run(
             else:
                 pa = (B_CHAR, b_costume, cpu_level if opp_is_cpu else 0)
                 pb = (A_CHAR, a_costume, 0)
-            menu_pa.menu_helper_simple(gs, ctrl_pa, pa[0], STAGE,
+            if STAGES_LIST:
+                cur_stage = STAGES_LIST[matches_started % len(STAGES_LIST)]
+            menu_pa.menu_helper_simple(gs, ctrl_pa, pa[0], cur_stage,
                                        cpu_level=pa[2], autostart=False,
                                        costume=pa[1])
-            menu_pb.menu_helper_simple(gs, ctrl_pb, pb[0], STAGE,
+            menu_pb.menu_helper_simple(gs, ctrl_pb, pb[0], cur_stage,
                                        cpu_level=pb[2], autostart=True,
                                        costume=pb[1])
             ctrl_pa.flush()
@@ -414,15 +430,28 @@ def run(
         a_state.push_frame(frame_a)
         preds_a = a_state.predict()
         new_sent_a, pressed_a, btn_a = decode_and_press(
-            ctrl_a, preds_a, a_state.prev_sent, temperature=temperature)
+            ctrl_a, preds_a, a_state.prev_sent,
+            temperature=temperature, top_k=top_k, top_p=top_p)
         a_state.prev_sent = new_sent_a
+        # Fault injection: with prob drop_prob, the bot's input for this frame is
+        # "lost in transit" — overwrite with neutral. The model's prev_sent is
+        # left as-is (it doesn't know the drop happened), mimicking a real frame
+        # drop. Used to validate the L-cancel sentinel can detect degradation.
+        if drop_prob and random.random() < drop_prob:
+            ctrl_a.release_all()
+            ctrl_a.tilt_analog(melee.enums.Button.BUTTON_MAIN, 0.5, 0.5)
+            ctrl_a.tilt_analog(melee.enums.Button.BUTTON_C, 0.5, 0.5)
+            ctrl_a.flush()
 
         new_sent_b = None
         if b_state is not None:
             b_state.push_frame(frame_b)
             preds_b = b_state.predict()
             new_sent_b, _, _ = decode_and_press(
-                ctrl_b, preds_b, b_state.prev_sent, temperature=temperature)
+                ctrl_b, preds_b, b_state.prev_sent,
+                temperature=(opp_temperature if opp_temperature is not None else temperature),
+                top_k=(opp_top_k if opp_top_k is not None else top_k),
+                top_p=(opp_top_p if opp_top_p is not None else top_p))
             b_state.prev_sent = new_sent_b
         # When B is a CPU it is driven by the game; we never press ctrl_b.
 
@@ -491,8 +520,28 @@ def main():
     ap.add_argument("--character", default="FOX", help="Character for A.")
     ap.add_argument("--opponent-character", default="FOX",
                     help="Character for B (CPU or policy).")
+    ap.add_argument("--drop-prob", type=float, default=0.0,
+                    help="Fault injection: probability each frame that the bot's "
+                         "(policy A) input is dropped (overwritten neutral). For "
+                         "validating the L-cancel sentinel detects degradation.")
     ap.add_argument("--stage", default="FINAL_DESTINATION")
-    ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--stages", default=None,
+                    help="Comma-separated stages to cycle per match (balanced), "
+                         "e.g. FINAL_DESTINATION,BATTLEFIELD,DREAMLAND,YOSHIS_STORY,"
+                         "FOUNTAIN_OF_DREAMS,POKEMON_STADIUM. Overrides --stage.")
+    ap.add_argument("--temperature", type=float, default=1.0,
+                    help="Sampling temperature for A's heads (<=0 => greedy argmax).")
+    ap.add_argument("--top-k", type=int, default=0,
+                    help="Top-k truncation for A (0=off, 1=greedy argmax).")
+    ap.add_argument("--top-p", type=float, default=0.0,
+                    help="Top-p / nucleus truncation for A (0=off).")
+    ap.add_argument("--opp-temperature", type=float, default=None,
+                    help="Decode temperature for B; default = same as A. Set to "
+                         "pin the opponent's decode while sweeping A's.")
+    ap.add_argument("--opp-top-k", type=int, default=None,
+                    help="Top-k for B; default = same as A.")
+    ap.add_argument("--opp-top-p", type=float, default=None,
+                    help="Top-p for B; default = same as A.")
     ap.add_argument("--use-exi-inputs", action="store_true",
                     help="Required for --enable-ffw. Use emulator_ffw/ build.")
     ap.add_argument("--enable-ffw", action="store_true",
@@ -537,7 +586,11 @@ def main():
         dolphin_path=args.dolphin_path, iso_path=args.iso_path,
         n_matches=args.n_matches,
         character=args.character, opponent_character=args.opponent_character,
-        stage=args.stage, temperature=args.temperature,
+        stage=args.stage, stages=args.stages, drop_prob=args.drop_prob,
+        temperature=args.temperature,
+        top_k=args.top_k, top_p=args.top_p,
+        opp_temperature=args.opp_temperature, opp_top_k=args.opp_top_k,
+        opp_top_p=args.opp_top_p,
         use_exi_inputs=args.use_exi_inputs, enable_ffw=args.enable_ffw,
         gfx_backend=args.gfx_backend, disable_audio=args.disable_audio,
         alternate_ports=args.alternate_ports,
