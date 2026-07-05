@@ -909,7 +909,7 @@ def _extract_replay_inner(
 # --- Sharding ----------------------------------------------------------------
 
 def flush_shard(buf_states, buf_targets, buf_offsets, prefix, shard_idx,
-                out_dir):
+                out_dir, tag=""):
     """Concatenate buffered games and save a shard .pt file."""
     offsets = torch.tensor(buf_offsets, dtype=torch.int64)
     states = {k: torch.cat([s[k] for s in buf_states], dim=0)
@@ -917,7 +917,7 @@ def flush_shard(buf_states, buf_targets, buf_offsets, prefix, shard_idx,
     targets = {k: torch.cat([t[k] for t in buf_targets], dim=0)
                for k in buf_targets[0]}
 
-    fname = f"{prefix}_shard_{shard_idx:03d}.pt"
+    fname = f"{prefix}_shard_{tag}{shard_idx:03d}.pt"
     torch.save({
         "states": states,
         "targets": targets,
@@ -1188,7 +1188,7 @@ def create_tensor_shards(
 def _tensorize_split(
     split_files, split, out_dir, shard_bytes,
     schema, norm_stats, cat_maps, stick_centers, shoulder_centers, n_workers,
-    hal_norm=None, combo_map=None, n_combos=5, character_filter=None,
+    hal_norm=None, combo_map=None, n_combos=5, character_filter=None, tag="",
 ):
     buf_states: List = []
     buf_targets: List = []
@@ -1229,7 +1229,7 @@ def _tensorize_split(
 
                 if buf_bytes >= shard_bytes:
                     info = flush_shard(buf_states, buf_targets, buf_offsets,
-                                       split, shard_idx, out_dir)
+                                       split, shard_idx, out_dir, tag=tag)
                     infos.append(info)
                     shard_idx += 1
                     buf_states, buf_targets = [], []
@@ -1241,10 +1241,76 @@ def _tensorize_split(
 
         if buf_states:
             info = flush_shard(buf_states, buf_targets, buf_offsets,
-                               split, shard_idx, out_dir)
+                               split, shard_idx, out_dir, tag=tag)
             infos.append(info)
 
     return infos
+
+
+# --- Parallel sharding (no single-consumer IPC funnel) -----------------------
+
+def _shard_chunk_task(task):
+    """Top-level (picklable) worker: tensorize one file-chunk fully in-process
+    and write its own uniquely-tagged shards. Only metadata is returned to the
+    parent — the big tensors are written straight to disk, never piped."""
+    (split, chunk_idx, files, meta_dir, staging_dir, shard_bytes,
+     hal_norm, combo_map, n_combos, character_filter) = task
+    schema, norm_stats, cat_maps, stick_centers, shoulder_centers = (
+        _load_prereqs(Path(meta_dir)))
+    infos = _tensorize_split(
+        files, split, Path(staging_dir), shard_bytes,
+        schema, norm_stats, cat_maps, stick_centers, shoulder_centers,
+        0,  # in-process parse: no nested pool, no tensor IPC
+        hal_norm, combo_map, n_combos,
+        character_filter=character_filter, tag=f"{chunk_idx:03d}_",
+    )
+    return split, infos
+
+
+def create_tensor_shards_parallel(
+    slp_files, meta_dir, staging_dir, shard_gb, val_frac, seed,
+    n_procs, hal_norm=None, character_filter=None,
+):
+    """N independent processes each parse a file-chunk and write their own
+    shards. Identical data to the serial path (same global train/val split,
+    same per-game tensors) — only the shard file grouping differs. ~Nx the
+    consumer throughput; peak RAM ~= n_procs * shard_gb."""
+    from concurrent.futures import ProcessPoolExecutor
+    splits = _get_split_files(slp_files, val_frac, seed)
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    shard_bytes = int(shard_gb * 1e9)
+
+    combo_map_local, n_combos_local = None, 5
+    if hal_norm is not None:
+        cc_path = Path(meta_dir) / "controller_combos.json"
+        if cc_path.exists():
+            from mimic.features import load_controller_combos
+            _, combo_map_local, n_combos_local = load_controller_combos(Path(meta_dir))
+            print(f"  Controller encoding: {n_combos_local} combos from {cc_path}")
+
+    tasks = []
+    for split, sfiles in splits.items():
+        if not sfiles:
+            continue
+        for ci in range(n_procs):
+            chunk = sfiles[ci::n_procs]   # round-robin = balanced chunks
+            if chunk:
+                tasks.append((split, ci, chunk, str(meta_dir), str(staging_dir),
+                              shard_bytes, hal_norm, combo_map_local,
+                              n_combos_local, character_filter))
+    print(f"\n  Parallel tensorize: {len(tasks)} chunk-tasks on {n_procs} "
+          f"processes (peak RAM ~{n_procs * shard_gb:.0f}GB) ...", flush=True)
+
+    results = {"train": [], "val": []}
+    with ProcessPoolExecutor(max_workers=n_procs) as ex:
+        for split, infos in ex.map(_shard_chunk_task, tasks):
+            results.setdefault(split, []).extend(infos)
+
+    manifest = _build_manifest(results, val_frac, seed)
+    with open(staging_dir / "tensor_manifest.json", "w") as fh:
+        json.dump(manifest, fh, indent=2)
+    _print_summary(manifest)
+    return manifest
 
 
 # --- Streaming mode ----------------------------------------------------------
@@ -1503,6 +1569,12 @@ def main():
                         help="Upload each shard immediately after creation")
     parser.add_argument("--resume", action="store_true",
                         help="Resume an interrupted --stream run")
+    parser.add_argument("--shard-procs", type=int, default=0,
+                        help="Parallel sharding: N independent processes each "
+                             "parse a file-chunk and write their own shards "
+                             "(no single-consumer IPC funnel; ~Nx faster on "
+                             "many-core boxes). Peak RAM ~= N*shard_gb. "
+                             "0 = legacy single-consumer path.")
     parser.add_argument("--workers", type=int, default=0,
                         help="Parallel workers (0=auto)")
     parser.add_argument("--mimic-norm", "--hal-norm", dest="mimic_norm", type=str, default=None,
@@ -1566,11 +1638,18 @@ def main():
             )
         else:
             print(f"\n=== Creating tensor shards ===")
-            manifest = create_tensor_shards(
-                slp_files, meta_dir, staging_dir, args.shard_gb,
-                args.val_frac, args.seed, n_workers, hal_norm,
-                character_filter=args.character,
-            )
+            if args.shard_procs and args.shard_procs > 0:
+                manifest = create_tensor_shards_parallel(
+                    slp_files, meta_dir, staging_dir, args.shard_gb,
+                    args.val_frac, args.seed, args.shard_procs, hal_norm,
+                    character_filter=args.character,
+                )
+            else:
+                manifest = create_tensor_shards(
+                    slp_files, meta_dir, staging_dir, args.shard_gb,
+                    args.val_frac, args.seed, n_workers, hal_norm,
+                    character_filter=args.character,
+                )
             print(f"\n=== Staging metadata ===")
             stage_metadata(meta_dir, staging_dir)
 
