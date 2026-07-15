@@ -297,6 +297,38 @@ reach 96.8% and plateaued — no visible path to 99.
   discard).
 - `tools/ffw_batch_mp.py --ckpt` for endpoint A/B evals.
 
+### Next direction: miss-targeted savestate drilling
+
+Uniform rollouts collect signal at the miss rate — at 99.2% a miss appears
+once per ~130 landings, so holding ~5 misses per batch means b≈650
+(~9 min/update), doubling for every further halving. The fix is to target
+the failures: harvest savestates ~1–2 s before each detected miss, then
+roll **N stochastic completions per savestate** — which forms a
+matched-context GRPO group (same state, advantage = reward − group mean;
+the LLM N-completions-per-prompt structure), far lower-variance credit
+than z-scoring across heterogeneous episodes. Mix drilled mini-episodes
+with regular rollouts; h2h gate adjudicates as usual.
+
+This is the roadmap's "Option C" savestate harness (designed 2026-04-21,
+never built) in miss-prioritized form. The real payoff is the next
+objectives: tech/recovery trigger states occur a handful of times per
+match (vs ~25 aerial landings), so uniform collection is near-hopeless
+there — the savestate harness is the enabling infrastructure for the
+high-consequence skills. Untested prerequisites: savestate behavior under
+the FFW/EXI headless build, and save/restore of the policy's 180-frame
+context + controller state.
+
+### Loose ends
+
+- h2h `fox-lcancel-rlvr-20260715j-long-b192_update0025.pt` vs BC
+  (two-sided promotion gate) — not run.
+- ~15 intermediate RLVR checkpoints in `checkpoints/` (runs
+  `20260714{,b,c,d,e}-`, `20260715{h,i,j}-`) — prune once a champion is
+  picked.
+- Recommended-default verification: the winning path was stitched
+  (r2→r5→r7); whether a single from-BC run at lr 3e-5 / kl 3e-3 /
+  epochs 4 / b192 reproduces 99+ in one shot is untested.
+
 (Work spans 2026-07-14 evening through 2026-07-15 early morning.)
 
 
