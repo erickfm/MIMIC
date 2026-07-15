@@ -206,6 +206,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=15.0)
     ap.add_argument("--replay-dir", type=str, default=None,
                     help="If set, all envs save .slp here (for L-cancel analysis).")
+    ap.add_argument("--ckpt", type=str, default=CKPT,
+                    help="Checkpoint to roll out (default: production AVG_mastfox).")
     args = ap.parse_args()
     if args.replay_dir:
         import os
@@ -214,7 +216,7 @@ def main():
     import torch
     from tools.inference_utils import load_mimic_model, load_inference_context
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, cfg = load_mimic_model(CKPT, device); model.eval()
+    model, cfg = load_mimic_model(args.ckpt, device); model.eval()
     ctx = dict(load_inference_context(DATA_DIR))
     ctx["combo_map"] = {}; ctx["n_combos"] = cfg.n_controller_combos
     print(f"model loaded seq_len={cfg.max_seq_len} combos={cfg.n_controller_combos} device={device}", flush=True)

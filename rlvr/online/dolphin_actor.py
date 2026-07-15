@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import signal
 import sys
@@ -56,6 +57,12 @@ from tools.inference_utils import (
 
 
 log = logging.getLogger("rlvr.online.actor")
+
+
+def default_replay_dir() -> str:
+    """Fallback replay dir when ActorConfig.replay_dir is None."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "replays_online")
 
 ALL_ACTION_BUTTONS = [
     melee.enums.Button.BUTTON_A, melee.enums.Button.BUTTON_B,
@@ -96,6 +103,15 @@ class ActorConfig:
     replay_dir: Optional[str] = None
     state_history_len: int = 256       # long enough for any task's episode
     max_episode_frames: int = 600      # safety: kill runaway episodes
+    # Train only on the LAST K frames of each episode (None = all).
+    # Credit concentration for terminal-reward scenario tasks whose
+    # decision is temporally local (l_cancel: the trigger press lives in
+    # the ~7 frames before landing). Truncating the trained window keeps
+    # the {0,1} advantage structure balanced (unlike lowering gamma,
+    # which under whole-batch z-scoring gives the EARLY frames of
+    # successful episodes negative advantage and suppresses aerial
+    # starts — measured: batch success 96→91% within 15 updates).
+    episode_tail_frames: Optional[int] = None
     # Whole-match episode mode (CompositeVRTask / the VR suite): one
     # episode == one whole match. Disables the max_episode_frames cap;
     # the match-end transition scores (not drops) the open episode.
@@ -444,6 +460,9 @@ class DolphinActor:
         # Path of the most recently-closed replay (set by libmelee's
         # Console when it writes the .slp).
         self._last_replay_path: Optional[Path] = None
+        # Wall-clock at the most recent menu->game transition; used to
+        # reject stale (previous-match) replays in _find_latest_replay.
+        self._match_start_wall: float = 0.0
         # Last in-game stocks (for emitting win/loss on match-end). The
         # menu-transition frame doesn't have player stocks reliably, so
         # we snapshot them every in-game frame and read them on close.
@@ -451,10 +470,7 @@ class DolphinActor:
         self._last_opp_stocks: int = 0
 
     def start(self):
-        replay_dir = self.cfg.replay_dir or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "replays_online",
-        )
+        replay_dir = self.cfg.replay_dir or default_replay_dir()
         os.makedirs(replay_dir, exist_ok=True)
         # Always-headless: route Dolphin to the Xvfb buffer (:99) when no
         # display is inherited. setdefault, so an explicit DISPLAY (e.g. a
@@ -697,6 +713,12 @@ class DolphinActor:
             self.cpu_ctrl.flush()
             return
 
+        if not self._in_game:
+            # Menu -> game transition: stamp wall-clock so
+            # _find_latest_replay can reject replays that predate this
+            # match (i.e. the previous match's .slp when the new one
+            # failed to save).
+            self._match_start_wall = time.time()
         self._in_game = True
         self.step_count += 1
         _perf_t0 = time.perf_counter()
@@ -890,9 +912,31 @@ class DolphinActor:
         outcome = self.task.compute_outcome(
             self._state_history, self._episode_open_idx
         )
+        # Unscoreable episode: NaN terminal WITHOUT pending=True means
+        # the task says there is no training signal here (e.g.
+        # l_cancel_online 'ineligible' — an autocancel or an
+        # opponent-interrupted aerial). Discard now so it neither
+        # reaches PPO nor counts toward the collect quota. (NaN WITH
+        # pending=True is different: reward deferred to post-match
+        # .slp enrichment — those are buffered as usual below.)
+        _meta = outcome.metadata or {}
+        if (math.isnan(float(outcome.terminal_reward))
+                and not _meta.get("pending")):
+            log.info("EVT_EP actor=%d frame=%d result=%s discarded=unscoreable",
+                     self._actor_id,
+                     self._pending[-1].game_frame_id if self._pending else -1,
+                     _meta.get("result", "?"))
+            self._pending = []
+            self._episode_open_idx = None
+            return
         if outcome.per_frame_reward is not None:
             for i, r in enumerate(outcome.per_frame_reward[:len(self._pending)]):
                 self._pending[i].reward = float(r)
+        # Credit concentration: keep only the trailing window (after
+        # per-frame rewards are attached, so alignment is preserved).
+        k = self.cfg.episode_tail_frames
+        if k is not None and len(self._pending) > k:
+            self._pending = self._pending[-k:]
         metadata = dict(outcome.metadata or {})
         # Composite-VR per-episode event for the live HUD: one JSON blob,
         # parsed with json.loads (no brittle regex). `vrs` maps each VR id
@@ -939,10 +983,7 @@ class DolphinActor:
         "I/O error: failed to fill whole buffer" and drops every
         pending episode in the match (deadly for tasks like l_cancel
         whose rewards are all post-match)."""
-        replay_dir = self.cfg.replay_dir or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)),
-            "..", "..", "replays_online",
-        )
+        replay_dir = self.cfg.replay_dir or default_replay_dir()
         p = Path(replay_dir)
         if not p.exists():
             return
@@ -950,6 +991,16 @@ class DolphinActor:
         if not slps:
             return
         latest = slps[-1]
+        # Stale-replay guard: if the newest .slp predates this match's
+        # start, the match's replay wasn't saved. Leave the path unset
+        # so enrichment DROPS pending episodes instead of silently
+        # scoring them against the previous match's frames (frame ids
+        # restart every match, so the lookup would 'succeed').
+        if latest.stat().st_mtime < self._match_start_wall - 1.0:
+            log.warning("newest replay %s predates match start; "
+                        "no replay saved for this match?", latest)
+            self._last_replay_path = None
+            return
         # Wait for size to stabilize.
         import time as _t
         last_size = -1
@@ -977,13 +1028,29 @@ class DolphinActor:
             log.warning("no replay path found; skipping enrichment for %d eps",
                         len(episodes))
             # Drop pending-reward eps we can't score.
-            import math as _m
             return [ep for ep in episodes
-                    if not _m.isnan(ep.terminal_reward)]
+                    if not math.isnan(ep.terminal_reward)]
         enrich = getattr(self.task, "enrich_with_replay", None)
         if enrich is None:
             return episodes
         return enrich(episodes, self._last_replay_path, self.self_port)
+
+    def _drain_ready_episodes(self) -> List[Episode]:
+        """Surface buffered episodes whose reward is already final.
+
+        Mid-match drains must use THIS, not _finalize_match_episodes().
+        Episodes with terminal_reward == NaN (deferred-reward tasks like
+        l_cancel_online) stay buffered: their ground truth lives in the
+        match's .slp, which doesn't exist until match end. Finalizing
+        them mid-match enriches against the PREVIOUS match's replay —
+        frame ids restart every match, so the landing-frame lookup
+        'succeeds' in the wrong game and scores silently garbage — or
+        drops them all (first match, no replay yet)."""
+        ready = [ep for ep in self._match_episodes
+                 if not math.isnan(ep.terminal_reward)]
+        self._match_episodes = [ep for ep in self._match_episodes
+                                if math.isnan(ep.terminal_reward)]
+        return ready
 
     def collect(self, n_episodes: int) -> List[Episode]:
         """Run Dolphin until `n_episodes` episodes have been finished
@@ -1034,9 +1101,10 @@ class DolphinActor:
                     # in continuous mode (no match-end ever fires) the
                     # match-end branch above never extracts, episodes
                     # pile up in self._match_episodes, and collect()
-                    # returns empty → PPO never gets data.
-                    finalized = self._finalize_match_episodes()
-                    collected.extend(finalized)
+                    # returns empty → PPO never gets data. NaN-reward
+                    # (pending-enrichment) episodes stay buffered until
+                    # the match-end finalize — see _drain_ready_episodes.
+                    collected.extend(self._drain_ready_episodes())
                     continue
 
         if len(collected) < n_episodes:

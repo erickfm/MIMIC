@@ -5,6 +5,18 @@ Loop:
   PPO update on those episodes ->
   checkpoint + eval periodically ->
   repeat until max steps.
+
+Tuned recipe (from the 2026-07-14/15 L-cancel search — see
+docs/research-notes-2026-07-14.md for what each lever bought):
+  --lr 3e-5 --kl-beta 0.003 --ppo-epochs 4 --n-actors 8
+  --episodes-per-update 64   (scale toward 192 as success saturates:
+                              batch must grow ~1/miss-rate to keep
+                              negative examples per update constant)
+  --checkpoint-every 5-10 and ALWAYS endpoint-eval the checkpoint
+  LADDER, not just the final — success is non-monotonic in KL and the
+  in-run success rate is too noisy to steer by. Steer by clip_frac
+  (~0 = lr headroom, sustained >0.3 = back off) and KL trajectory;
+  canaries (match length, center-stick) adjudicate drift at eval.
 """
 from __future__ import annotations
 
@@ -69,11 +81,15 @@ def train(
     task_id: Optional[str],
     run_name: str,
     episodes_per_update: int = 32,
-    lr: float = 1e-6,
+    # 1e-6 (old default) barely moves the policy in 50 updates; 1e-5 is
+    # the working floor and 3e-5 was stable through the whole L-cancel
+    # recipe search (clip_frac never exceeded ~0.15).
+    lr: float = 1e-5,
     temperature: float = 1.0,
     clip_eps: float = 0.2,
     kl_beta: float = 0.01,
     gamma: float = 0.998,
+    ppo_epochs: int = 1,
     vrs: Optional[list] = None,
     vr_weights: Optional[list] = None,
     max_updates: int = 100,
@@ -96,6 +112,7 @@ def train(
     seed: int = 0,
     n_actors: int = 1,
     episode_frames: Optional[int] = None,
+    episode_tail_frames: Optional[int] = None,
     whole_match_episode_override: Optional[bool] = None,
     infinite_time: bool = False,
 ) -> None:
@@ -170,6 +187,7 @@ def train(
                              else bool(vrs)),
         max_episode_frames=(episode_frames if episode_frames is not None
                             else 600),
+        episode_tail_frames=episode_tail_frames,
         gfx_backend=gfx_backend,
         # FFW: needs both use_exi_inputs and enable_ffw, plus the
         # emulator_ffw/ Exi-AI build (not emulator/).
@@ -318,8 +336,15 @@ def train(
                     continue
 
                 t_ppo = time.time()
-                metrics = ppo_update(model, valid, optimizer, ppo_cfg,
-                                     device=device, ref_model=ref_model)
+                # Multi-epoch PPO: each pass re-forwards the policy and
+                # takes one clipped step against the SAME logprob_old
+                # (stored at rollout time), which is exactly PPO's
+                # data-reuse mechanism — the clip bounds the staleness.
+                # Collection dominates wall time, so extra epochs are
+                # nearly free sample efficiency.
+                for _epoch in range(max(1, ppo_epochs)):
+                    metrics = ppo_update(model, valid, optimizer, ppo_cfg,
+                                         device=device, ref_model=ref_model)
                 t_ppo = time.time() - t_ppo
 
                 log.info(
@@ -426,10 +451,20 @@ def main():
     ap.add_argument("--episodes-per-update", type=int, default=None,
                     help="Episodes per PPO update (matches, for --vrs). "
                          "Default 6 for --vrs, 32 for --task.")
-    ap.add_argument("--lr", type=float, default=1e-6)
+    ap.add_argument("--lr", type=float, default=1e-5,
+                    help="1e-5 is the working floor (1e-6 barely moves "
+                         "the policy); 3e-5 stable in the L-cancel "
+                         "recipe search.")
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--clip-eps", type=float, default=0.2)
     ap.add_argument("--kl-beta", type=float, default=0.01)
+    ap.add_argument("--ppo-epochs", type=int, default=1,
+                    help="Gradient passes over each collected batch "
+                         "(multi-epoch PPO; logprob_old stays fixed, the "
+                         "clip bounds staleness). Collection dominates "
+                         "wall time, so >1 is nearly free sample "
+                         "efficiency. Watch clip_frac: ~0 means headroom, "
+                         "sustained >0.3 means back off.")
     ap.add_argument("--max-updates", type=int, default=100)
     ap.add_argument("--checkpoint-every", type=int, default=10)
     ap.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
@@ -468,6 +503,13 @@ def main():
                          "inference across N actors. ~N x throughput "
                          "vs single-actor (each Dolphin still caps at "
                          "60 fps realtime).")
+    ap.add_argument("--episode-tail-frames", type=int, default=None,
+                    help="Train only on the last K frames of each episode "
+                         "(credit concentration for temporally-local "
+                         "terminal rewards like l_cancel; the trigger "
+                         "press lives ~7 frames before landing). Keeps "
+                         "gamma/advantage structure balanced, unlike "
+                         "lowering gamma.")
     ap.add_argument("--episode-frames", type=int, default=None,
                     help="Cap each episode at N frames (mid-match close + "
                          "immediate reopen at the cap). Default: 600 for "
@@ -505,6 +547,7 @@ def main():
         episodes_per_update=epu, gamma=args.gamma,
         lr=args.lr, temperature=args.temperature,
         clip_eps=args.clip_eps, kl_beta=args.kl_beta,
+        ppo_epochs=args.ppo_epochs,
         max_updates=args.max_updates,
         checkpoint_every=args.checkpoint_every,
         checkpoint_dir=args.checkpoint_dir,
@@ -522,6 +565,7 @@ def main():
         use_wandb=args.wandb, seed=args.seed,
         n_actors=args.n_actors,
         episode_frames=args.episode_frames,
+        episode_tail_frames=args.episode_tail_frames,
         whole_match_episode_override=args.whole_match_episode,
         infinite_time=args.infinite_time,
     )

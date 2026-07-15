@@ -7,10 +7,11 @@ GPU forward kernels. The shared model + opp_model live as single
 instances; only the per-actor state (Dolphin process, controller,
 policy cache) differs.
 
-Speedup target: ~N× over a single-actor pipeline. Each Dolphin is still
-hard-capped at 60 fps realtime emulation (CLAUDE.md pitfall #18 — FFW
-is unfaithful), so the only path to faster training is concurrent
-realtime sessions.
+Speedup target: ~N× over a single-actor pipeline. With FFW enabled
+(vs a CPU opponent — the faithful 1-injected-bot mode, CLAUDE.md
+pitfall #18 as corrected 2026-06-30) each Dolphin also runs faster
+than realtime, and this pool is exactly the batched multi-env
+inference that lets N FFW Dolphins share one GPU forward per tick.
 
 Lockstep batching strategy: the coordinator waits up to `max_wait_ms`
 for N submissions to arrive, then fires whatever it has. Under normal
@@ -23,6 +24,7 @@ batch goes ahead with whoever's ready.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from copy import copy
@@ -30,7 +32,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import torch
 
-from rlvr.online.dolphin_actor import ActorConfig, DolphinActor
+from rlvr.online.dolphin_actor import (ActorConfig, DolphinActor,
+                                       default_replay_dir)
 from rlvr.online.episode import OnlineTask
 from rlvr.online.trajectory import Episode
 
@@ -221,10 +224,17 @@ class ActorPool:
         self.n = n
         self.coord = BatchCoordinator(n, model, opp_model, device)
         self.actors: List[DolphinActor] = []
+        base_replay_dir = cfg.replay_dir or default_replay_dir()
         for i in range(n):
-            # Per-actor cfg with distinct actor_id (for log prefix).
+            # Per-actor cfg with distinct actor_id (for log prefix)
+            # and a PRIVATE replay subdir. All actors sharing one dir
+            # breaks _find_latest_replay (it grabs the globally newest
+            # .slp, i.e. often ANOTHER actor's match) — deferred-reward
+            # enrichment (l_cancel_online) then scores against the
+            # wrong game's frames.
             acfg = copy(cfg)
             acfg.actor_id = i
+            acfg.replay_dir = os.path.join(base_replay_dir, f"actor{i:02d}")
             actor = DolphinActor(
                 cfg=acfg, task=task_factory(),
                 model=model, ref_model=ref_model,
@@ -351,7 +361,10 @@ class ActorPool:
                     # list. Without this, in continuous mode (no
                     # match-end ever fires) episodes pile up in the
                     # actor's _match_episodes and never reach PPO.
-                    finalized = actor._finalize_match_episodes()
+                    # NaN-reward (pending-enrichment) episodes stay
+                    # buffered until the match-end finalize above —
+                    # see DolphinActor._drain_ready_episodes.
+                    finalized = actor._drain_ready_episodes()
                     if finalized:
                         with self._episodes_lock:
                             self._episodes.extend(finalized)
