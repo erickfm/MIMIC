@@ -33,9 +33,12 @@
 # The bundled libusb must be built WITHOUT udev (its cmake glue mislinks
 # netlink symbols when libudev is found) — handled below.
 
-FORK_URL=https://github.com/vladfi1/slippi-Ishiiruka.git
-FORK_BRANCH=exi-ai-rebase
-# Pinned commit the patch is known to apply to (2026-07-16).
+# Our fork carries the patch already applied (branch mimic-savestates,
+# forked from vladfi1/slippi-Ishiiruka @ exi-ai-rebase). Unmaintained —
+# pinned by the commit file; tools/patches/*.patch is the same diff kept
+# as documentation/backup should the fork ever disappear.
+FORK_URL=https://github.com/erickfm/slippi-Ishiiruka.git
+FORK_BRANCH=mimic-savestates
 FORK_COMMIT=$(cat "$(dirname "$0")/patches/slippi-ishiiruka-commit.txt")
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -49,11 +52,9 @@ if [ ! -d "$SRC" ]; then
 fi
 
 cd "$SRC"
-if ! git diff --quiet; then
-    echo "note: $SRC has local changes; assuming patch already applied"
-else
-    git apply "$PATCH"
-fi
+# Patch already in the fork branch; apply manually only when building from
+# the upstream branch instead: git apply "$PATCH"
+
 
 COMMON_FLAGS="-DLINUX_LOCAL_DEV=true -DDISABLE_WX=true -DENABLE_HEADLESS=true
   -DENABLE_ALSA=false -DENABLE_PULSEAUDIO=false -DENABLE_EVDEV=false

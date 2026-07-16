@@ -42,8 +42,10 @@ bundled libusb must build WITHOUT udev
 netlink symbols when libudev-dev is present); the deps are
 libudev-dev + libasound2-dev + cargo.
 
-Decision: **kept local, bundled in-repo** (patch + pinned commit + build
-script), not upstreamed — per owner preference.
+Decision: **bundled in-repo + published as an unmaintained fork**
+(`erickfm/slippi-Ishiiruka` branch `mimic-savestates`, commit `b9a0cfa`) —
+no upstream PR, no maintenance intent; the fork exists for reproducible
+builds and provenance. The .patch file stays in-repo as backup.
 
 ### Python-side usage
 
