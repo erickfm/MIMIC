@@ -221,3 +221,6 @@ user.json
 slippi_home/
 emulator_ss/
 emulator_pb/
+
+# savestate drill library (large .sav blobs + context tensors)
+states/
