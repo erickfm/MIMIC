@@ -318,10 +318,86 @@ high-consequence skills. Untested prerequisites: savestate behavior under
 the FFW/EXI headless build, and save/restore of the policy's 180-frame
 context + controller state.
 
+### H2h vs BC (2026-07-15 afternoon): skill transfers, strength collapses
+
+r7-u25 vs `AVG_mastfox`, realtime `tools/play.py`, fixed ports (RLVR p1 /
+BC p2), stopped after 9 games — the verdict didn't need 17:
+
+- **Strength: catastrophic.** 0 wins, **0 stocks taken in 9 games** (BC
+  won 3-0/3-0/2-0/4-0/3-0/4-0/3-0/3-0/…). The vs-CPU eval showed none of
+  this (r7-u25 beat CPU-9 every match with near-normal canaries) —
+  vs-CPU strength saturates and cannot adjudicate (the roadmap's
+  two-sided h2h gate exists precisely for this).
+- **L-cancel: the gain is real and context-robust.** In those same games:
+  RLVR **98.8%** (n=162, CI ±1.7) vs BC **92.7%** (n=179) — a +6.1-pt gap
+  under real pressure. BC's h2h rate matches its vs-CPU rate (92.7 vs
+  94.2), validating the metric across contexts. The skill gain and the
+  strength loss are separable facts.
+
+### How much drift bought this (parameter-space ladder from BC)
+
+Relative L2 `‖θ−θ_BC‖/‖θ_BC‖` per checkpoint (state-dict note: BC saves
+carry `_orig_mod.` compile prefixes; strip before comparing — a silent
+key mismatch reads as 0 drift):
+
+| ckpt | rel-L2 from BC | L-cancel (vs-CPU eval) | h2h strength |
+|---|---|---|---|
+| r1_final | 0.00028 | 96.8% | not tested |
+| r2_u30 | 0.00134 | 98.1% | pending |
+| r5_u10 | 0.00154 | 98.5% | pending |
+| r7_u25 | 0.00199 | 99.2% | **0 stocks in 9 games** |
+| r7_u30 | 0.00207 | 99.3% | (canaries already broken) |
+
+Two lessons: **(1) 0.2% relative parameter movement is enough to erase
+head-to-head strength** while vs-CPU play still looks normal; **(2)
+behavior is violently non-linear in parameter distance** — u25 (clean
+vs-CPU canaries) and u30 (broken) differ by only ~4% of an already tiny
+distance. No parameter-norm or KL threshold substitutes for playing the
+pre-patch model. The practical promotion recipe for RLVR checkpoints is
+therefore three-tiered: engine metric (cheap, every ladder step) →
+canaries (cheap, every ladder step) → **h2h vs base (mandatory before
+promotion; canaries under-detect strength loss)**.
+
+### The full ladder (h2h complete)
+
+r2-u30 (17 games) and r5-u10 (stopped at 9 — verdict clear) vs BC, same
+realtime rig:
+
+| ckpt | rel-L2 from BC | L-cancel h2h (n) | h2h W-L | verdict |
+|---|---|---|---|---|
+| BC | — | 92.7–94.5% per set | — | baseline |
+| **r2-u30** | 0.00134 | **96.9%** (523) | **7–10 (41%)** | parity (rig control 47.6%); skill gain intact |
+| r5-u10 | 0.00154 | 97.3% (186) | 1–7 (12%) | degraded — mostly swept |
+| r7-u25 | 0.00199 | 98.8% (162) | 0–9, **zero stocks** | collapsed |
+
+Findings:
+- **The strength cliff is razor-sharp in parameter space:** +15% more
+  distance (0.00134→0.00154) took win rate from parity to 12%; +30% more
+  to zero. No smooth trade-off curve to ride — the usable region ends
+  abruptly, and only h2h sees the edge (vs-CPU play and canaries looked
+  near-normal well past it).
+- **The L-cancel gain survives at every rung** (96.9/97.3/98.8 vs BC's
+  ~93), including in games the policy loses badly — skill acquisition
+  and strength retention are fully decoupled along the RLVR path.
+- BC's h2h L-cancel (92.7–94.5 across three replay sets) matches its
+  vs-CPU 94.2 — the avoidable-lag metric is stable across contexts.
+
+**Promotable profile: r2-u30** (`fox-lcancel-rlvr-20260714e-fast_
+update0030.pt`) — the 25-minute checkpoint: +2.4-pt L-cancel under
+pressure (96.9 vs 94.5 in-game paired), strength at parity within n=17
+noise. Confirming "not down" more tightly would need a larger h2h (n≈50
+for ±14%). r5-u10/r7-u25 are research artifacts, not candidates.
+
+RLVR validation status: reward works, transfers to real opponents,
+strength cost is measurable and localized on the drift ladder — the loop
+plus its three-tier eval (metric → canaries → h2h) is validated
+end-to-end.
+
 ### Loose ends
 
-- h2h `fox-lcancel-rlvr-20260715j-long-b192_update0025.pt` vs BC
-  (two-sided promotion gate) — not run.
+- h2h gate: DONE for r7-u25 / r5-u10 / r2-u30 (see "The full ladder").
+  Remaining: a larger-n h2h on r2-u30 (n≈50) before any promotion, and
+  the promotion itself is a user decision.
 - ~15 intermediate RLVR checkpoints in `checkpoints/` (runs
   `20260714{,b,c,d,e}-`, `20260715{h,i,j}-`) — prune once a champion is
   picked.
