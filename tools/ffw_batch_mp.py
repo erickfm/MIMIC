@@ -30,7 +30,7 @@ HEADS = ["main_xy", "shoulder_val", "c_dir_logits", "btn_logits"]
 
 # ----------------------------- env process -----------------------------
 def env_proc(env_id, conn, n_combos, slippi_port, stop_ev, counts, warmup=180,
-             replay_dir=None):
+             replay_dir=None, dolphin_path=DOLPHIN):
     import melee
     from tools.inference_utils import (
         load_inference_context, build_frame, decode_and_press)
@@ -41,7 +41,7 @@ def env_proc(env_id, conn, n_combos, slippi_port, stop_ev, counts, warmup=180,
     ctx["n_combos"] = n_combos
 
     con = melee.Console(
-        path=DOLPHIN, is_dolphin=True, tmp_home_directory=True,
+        path=dolphin_path, is_dolphin=True, tmp_home_directory=True,
         copy_home_directory=False, blocking_input=True, online_delay=0,
         setup_gecko_codes=True, fullscreen=False, gfx_backend="Null",
         disable_audio=True, use_exi_inputs=True, enable_ffw=True,
@@ -99,7 +99,8 @@ def env_proc(env_id, conn, n_combos, slippi_port, stop_ev, counts, warmup=180,
 
 
 # ----------------------------- central --------------------------------
-def run(n_envs, seconds, model, cfg, ctx, device, replay_dir=None):
+def run(n_envs, seconds, model, cfg, ctx, device, replay_dir=None,
+        dolphin_path=DOLPHIN):
     import torch
     from tools.inference_utils import build_mock_frame
     seq_len = cfg.max_seq_len
@@ -113,7 +114,7 @@ def run(n_envs, seconds, model, cfg, ctx, device, replay_dir=None):
         pc, cc = ctxmp.Pipe()
         p = ctxmp.Process(target=env_proc,
                           args=(i, cc, n_combos, 51441 + i, stop_ev, counts, 180,
-                                replay_dir))
+                                replay_dir, dolphin_path))
         p.start(); parent_conns.append(pc); procs.append(p)
 
     # per-env rolling window buffers: {key: (seq_len, *F)} tensor, shifted in
@@ -206,6 +207,8 @@ def main():
     ap.add_argument("--seconds", type=float, default=15.0)
     ap.add_argument("--replay-dir", type=str, default=None,
                     help="If set, all envs save .slp here (for L-cancel analysis).")
+    ap.add_argument("--dolphin", type=str, default=DOLPHIN,
+                    help="Dolphin binary (default: stock emulator_ffw build).")
     ap.add_argument("--ckpt", type=str, default=CKPT,
                     help="Checkpoint to roll out (default: production AVG_mastfox).")
     args = ap.parse_args()
@@ -222,7 +225,8 @@ def main():
     print(f"model loaded seq_len={cfg.max_seq_len} combos={cfg.n_controller_combos} device={device}", flush=True)
 
     Ns = [int(x) for x in args.sweep.split(",")]
-    results = [run(n, args.seconds, model, cfg, ctx, device, args.replay_dir) for n in Ns]
+    results = [run(n, args.seconds, model, cfg, ctx, device, args.replay_dir,
+                   args.dolphin) for n in Ns]
     print("\n=== SCALING (multiprocess async batched) ===", flush=True)
     for r in results:
         print(f"  N={r['n']:2d}: {r['agg_fps']:5.0f} fps agg ({r['agg_fps']/60:.1f}x)  "

@@ -219,3 +219,5 @@ _hf_staging/
 user.json
 **/SlippiOnline/**
 slippi_home/
+emulator_ss/
+emulator_pb/
