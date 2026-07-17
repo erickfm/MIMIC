@@ -102,6 +102,17 @@ z-score; regenerate norm to pick up the new transforms.
 Controller one-hot: main_stick(37) + c_stick(9) + buttons(7) +
 shoulder(3) = 56 dims.
 
+**C-stick history encoding provenance:** shards built from 2026-07-17
+onward encode the c-stick *history* one-hot as nearest-of-9 clusters
+from raw coords (`encode_controller_onehot(c_xy=...)`), matching both
+the c_dir targets and inference. Shards built earlier used a 5-class
+direction collapse (deadzone 0.15, cardinals only) mapped into the 9
+slots — their history never activates the 4 diagonal slots, so models
+trained on them see a small OOD input at inference whenever the bot
+samples a diagonal c-stick (~0.7% of frames). Fixed by rebuilding
+shards; the 5-class path survives only as the fallback for old shards
+without raw c coords.
+
 ### Preset variants (`mimic/model.py:MODEL_PRESETS`)
 
 - **`mimic`** — production. d_model=512, 6 layers, 8 heads, relpos
@@ -271,9 +282,9 @@ would train 8× the requested sample budget and severely overfit.
 
 `train.py` sets the global `SEQUENCE_LENGTH` for the dataset by
 reading `MODEL_PRESETS[model_preset]["max_seq_len"]`. The `mimic`
-preset sets 256; presets without `max_seq_len` (the legacy generic
+preset sets 180; presets without `max_seq_len` (the legacy generic
 presets — `tiny`, `small`, etc.) fall back to the module default
-`SEQUENCE_LENGTH = 60`, a 4.3× reduction in temporal context per
+`SEQUENCE_LENGTH = 60`, a 3× reduction in temporal context per
 sample.
 
 **Do not add `if model_preset == "X"` gates in this lookup.** Read
@@ -454,7 +465,8 @@ collapsed to a single `ZELDA_SHEIK` bucket at header-parse time (this
 script can't tell them apart without frame data); the canonical
 dataset splits them into separate `SHEIK`/`ZELDA` folders as a
 post-step keyed on majority in-game form via the `classify_zelda_sheik` /
-`classify_marth_zelda` scripts.
+`classify_marth_zelda` scripts (deleted with `tools/legacy/` in commit
+`5ecd366` — recover from git history if the split ever needs redoing).
 
 **Dataset-fix toolchain** (used for the 2026-06-15 in-place correction).
 The scripts were **deleted once the fix shipped** — the root cause is now
@@ -493,12 +505,15 @@ training, uploads in the background). Per-char wall time on 2×RTX
 
 **`hf download --include` gotcha:** repeating the `--include` flag
 overwrites earlier patterns (argparse `nargs='*'`) — all glob
-patterns must follow a SINGLE `--include`. `run_all_chars.sh` has
-the repeated-flag bug and silently fetched only `master-platinum`
-(6 of 18 tarballs per char); the 2026-06-12 local runs initially
-trained on that ⅓ data and early-stopped at 1.6k–7.8k steps before
-the fix. Any model whose data was pulled through the buggy path
-should be considered platinum-only until verified.
+patterns must follow a SINGLE `--include`. Both shell scripts now use
+the single-flag form, but `run_all_chars.sh` HAD the repeated-flag bug
+and silently fetched only `master-platinum` (6 of 18 tarballs per
+char); the 2026-06-12 local runs initially trained on that ⅓ data and
+early-stopped at 1.6k–7.8k steps before the fix. Any model whose data
+was pulled through the buggy path should be considered platinum-only
+until verified. (Also note `run_all_chars.sh` still trains
+`--mimic-minimal-features`; `run_local_chars.sh` trains fullfeat —
+their outputs are not comparable.)
 
 Character index + HF bucket map (`idx` = the libmelee `--character`
 value passed to `slp_to_shards.py`). Post-2026-06-15, Sheik and Zelda
@@ -558,27 +573,29 @@ after a `!reload` or restart. `upload_char.py` already writes `melee_enum:
 - `luigi-20260412-relpos-5k.pt` (val ~1.0, early-stopped)
 
 HF `erickfm/MIMIC` also holds folders for `marth`, `peach`, `pikachu`,
-`samus`, `sheik`, `yoshi`, `ganondorf` (older promotions); audit val/run-name
-against `tools/discord_bot.py:CHARACTERS` before relying on them.
+`samus`, `sheik`, `yoshi`, `ganondorf` (older promotions); audit their
+`metadata.json` (`run_name`/`val_loss`) before relying on them.
 
 ### Promotion policy
 
 When a finished wandb run beats current val for its character: pull
-the `.pt`, rename to the convention, upload to `erickfm/MIMIC` on HF,
-update `tools/discord_bot.py:CHARACTERS`. **Skip names starting with
-`SWEEP-`/`DBG-`/`DEBUG-`/`FIX-`/`BENCH-`** — infra/debug runs aren't
-production candidates regardless of val. **Always confirm with user
-before pushing** — never auto-promote.
+the `.pt`, rename to the convention, upload via `tools/upload_char.py`
+(bundles the norm JSONs + `metadata.json:melee_enum` that the bot's
+autodiscovery needs — there is no dict to edit; the runtime-populated
+`CHARACTERS` picks the new dir up on `!reload`/restart). **Skip names
+starting with `SWEEP-`/`DBG-`/`DEBUG-`/`FIX-`/`BENCH-`** — infra/debug
+runs aren't production candidates regardless of val. **Always confirm
+with user before pushing** — never auto-promote.
 
 ### Discord-bot (re)start: audit + orphan sweep
 
 Before `bot.run()`:
 1. **Promotion audit.** List `erickfm/MIMIC` via `HfApi.list_repo_files`,
    read each char's `metadata.json` (`run_name`/`global_step`/`val_loss`),
-   compare to the `CHARACTERS` dict in `tools/discord_bot.py`. Flag any
-   HF entry newer than what's wired up + any HF char the bot doesn't
-   know about (needs new alias). Report to user, get approval, then
-   `snapshot_download` + copy into `checkpoints/` + edit the dict.
+   compare to what the bot's `_sync_hf_to_local` autodiscovery will load
+   from `hf_checkpoints/`. Flag any HF entry newer than the local copy.
+   Report to user, get approval — the sync itself is automatic (the
+   `CHARACTERS` dict is populated at runtime, nothing to edit).
 2. **Orphan sweep.** `_cleanup_orphan_processes()` already runs before
    `bot.run()` and SIGTERMs (then SIGKILLs) leftover `play_netplay.py`
    and our-path `dolphin-emu` processes. Without it they reparent to
@@ -659,7 +676,7 @@ misses) and NOT the old offset=−4 press proxy (which diverged from the truth).
 
 **Data**: `tools/slp_to_shards.py` (.slp → v2 .pt shards with
 `target[i] = buttons[i+1]` alignment); `tools/shard_and_upload_ranked.py`
-(ranked .slp archive → HF tarballs); `tools/split_by_character.py`.
+(ranked .slp archive → HF tarballs).
 
 ## Porting slippistats logic (live-streaming variants)
 
@@ -724,8 +741,8 @@ Specific gotchas already found while porting the combo logic into
   `stock_delta`'s SD-gate — every kill scored as an opponent
   self-destruct, inverting the reward. Gate hit-recency *statefully*
   (`OppHitRecencyTracker`: a decay counter that DEAD frames pass through
-  untouched), not with a backward scan. `low_percent_kill` still has
-  this bug in both its SD-gate and its death-percent peak.
+  untouched), not with a backward scan. (`low_percent_kill` has since
+  been fixed the same way — streaming tracker + regression tests.)
 
 When porting new slippistats logic (edgeguard, shield-escape,
 pressure, etc.), file a research note specifically calling out
@@ -891,18 +908,19 @@ references to the slippistats functions used. Past notes:
     `docs/research-notes-2026-06-30.md` (supersedes the FFW claims in
     `docs/research-notes-2026-05-18.md`).
 
-19. **Netplay headless: use the *mainline* Slippi Dolphin + `gfx_backend="Null"`,
-    NOT the bundled Ishiiruka.** libmelee's `choose_direct_online` only selects
-    Direct when `menu_selection` is 2/3 (mainline's online-submenu layout); the
-    Ishiiruka 3.5.2 build reports `sel=6` there, so the bot stalls forever at
-    `MAIN_MENU/ONLINE_PLAY_SUBMENU` and never goes online (zero matchmaking
-    traffic). `setup.sh` now also fetches mainline into `emulator_mainline/` and
-    `DOLPHIN_PATH` defaults to it. Mainline supports `Null` video → no rendering,
-    so #16/#17 (Xvfb/Vulkan) don't apply to the netplay bot. `play_netplay.py`
-    also forces the `fork` mp start-method (macOS/Windows `spawn` re-imports the
-    unguarded script and double-runs it). And the host must pass **inbound P2P
-    UDP** — RunPod-style container pods drop it (STUN falsely reports "cone");
-    use a real VM (e.g. GCP).
+19. **Netplay runs on the CURRENT Slippi Ishiiruka in `emulator/`** —
+    `setup.sh` downloads the latest release at install time (the old vendored
+    `emulator.tar.gz` was removed 2026-07-17) and `DOLPHIN_PATH` defaults to
+    `emulator/squashfs-root/usr/bin/dolphin-emu`. Historical note: an earlier
+    version of this pitfall recommended *mainline* Dolphin because the stale
+    Ishiiruka 3.5.2 build stalled libmelee's `choose_direct_online` menu
+    navigation — that advice is dead (see #20: mainline crashes under our
+    libmelee EXI protocol or is gate-rejected; current Ishiiruka navigates
+    fine and is what the Phillip benchmark ran on). Still true:
+    `play_netplay.py` forces the `fork` mp start-method (macOS/Windows
+    `spawn` re-imports the unguarded script and double-runs it), and the host
+    must pass **inbound P2P UDP** — RunPod-style container pods drop it
+    (STUN falsely reports "cone"); use a real VM (e.g. GCP).
 
 20. **"required update available" on netplay = a stale Slippi build, NOT a
     Dolphin-fork problem.** Slippi gates Online on a server-side *minimum

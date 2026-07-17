@@ -206,6 +206,7 @@ logs/
 *_log*.txt
 emulator/
 emulator_ffw/
+emulator_mainline/
 melee.iso
 melee.zip
 mimic_best_checkpoints.zip

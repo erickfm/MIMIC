@@ -72,7 +72,7 @@ DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
 BOT_SLIPPI_CODE = os.environ.get("BOT_SLIPPI_CODE", "MIMIC#000").strip()
 DOLPHIN_PATH = _resolve_path(
     os.environ.get("DOLPHIN_PATH", ""),
-    "emulator_mainline/squashfs-root/usr/bin/dolphin-emu",
+    "emulator/squashfs-root/usr/bin/dolphin-emu",
 )
 ISO_PATH = _resolve_path(
     os.environ.get("ISO_PATH", ""),
@@ -1009,7 +1009,9 @@ def _cleanup_orphan_processes() -> None:
     # Sweep any Dolphin instances from our emulator path. play_netplay's
     # shutdown_handler should cascade into Dolphin via console.stop(), but
     # we've seen cases where Dolphin keeps running after the parent dies.
-    dolphin_pat = str(_REPO_ROOT / "emulator/squashfs-root/usr/bin/dolphin-emu")
+    # Match the path the bot actually spawns from (DOLPHIN_PATH), not a
+    # hardcoded dir — otherwise orphans from a non-default build survive.
+    dolphin_pat = str(DOLPHIN_PATH)
     dolphin_pids = _pgrep(dolphin_pat)
     if dolphin_pids:
         log.warning("Found orphan dolphin-emu processes: %s — killing", dolphin_pids)

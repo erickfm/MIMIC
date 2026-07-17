@@ -481,6 +481,15 @@ def preprocess_arrays(
             if cdir_col in arrays:
                 _raw_ctrl_data[f"{prefix}_c_dir"] = arrays[cdir_col][:n].copy()
 
+            # Raw c-stick coords so the baked history one-hot can use
+            # nearest-of-9 (same encoding as the c_dir targets and
+            # inference) instead of the legacy 5-class collapse.
+            if f"{prefix}_c_x" in c_tmps:
+                _raw_ctrl_data[f"{prefix}_c_xy"] = np.stack(
+                    [c_tmps[f"{prefix}_c_x"][:n].astype(np.float32),
+                     c_tmps[f"{prefix}_c_y"][:n].astype(np.float32)],
+                    axis=-1)
+
     # 6. Normalization
     for col, (mean, std) in norm_stats.items():
         if col not in schema.col_to_pos:
@@ -887,6 +896,7 @@ def _extract_replay_inner(
                 raw_ctrl["self_c_dir"],
                 _combo_map_local, _n_combos_local,
                 norm_stats=None,  # values are already raw
+                c_xy=raw_ctrl.get("self_c_xy"),
             )
             states["self_controller"] = torch.from_numpy(onehot)
             for k in ("self_buttons", "self_analog", "self_c_dir"):

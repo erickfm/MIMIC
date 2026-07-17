@@ -1,9 +1,10 @@
 # Discord bot setup — MIMIC over Slippi Online Direct Connect
 
 A portable Discord front-end for the MIMIC bot. Users run `!play <character>
-<their_connect_code>` in a Discord channel; the bot spawns a Dolphin instance,
-joins their Slippi Online direct-connect lobby, and plays a match. Replays are
-uploaded back to the channel as attachments.
+<their_connect_code>` (or a `!<character>` shortcut) in a Discord channel;
+the bot runs one persistent Dolphin session, joins their Slippi Online
+direct-connect lobby, and plays N back-to-back matches. Replays are uploaded
+back to the channel as attachments.
 
 ## What you need
 
@@ -11,7 +12,9 @@ uploaded back to the channel as attachments.
   - **NVIDIA GPU** (the bot's inference runs on CUDA; ~3 GB VRAM per active
     match). MIMIC was developed on an RTX 5090; any modern card with bf16
     support should work.
-  - **Slippi Dolphin** installed (download from https://slippi.gg/netplay).
+  - **Slippi Dolphin** — `setup.sh` downloads the current release into
+    `emulator/` automatically (Slippi's version gate rejects stale builds,
+    so don't pin an old one).
   - **Melee 1.02 NTSC ISO** that you legally own. Place the path in `ISO_PATH`.
 - A **Slippi account** for the bot. Create one via the Slippi Launcher
   normally — log in with an email and copy the connect code (`TAG#NUMBER`)
@@ -39,31 +42,28 @@ uploaded back to the channel as attachments.
   **Enable the "Message Content Intent"** under
   Bot → Privileged Gateway Intents — the bot uses prefix commands which
   require reading message content.
-- **Checkpoints + per-character data dirs.** The easiest way to get both is
-  `bash setup.sh --models`, which pulls [erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC)
-  from HuggingFace and symlinks each character's `model.pt` into
-  `checkpoints/<name>.pt` and each character's metadata JSONs
-  (`mimic_norm.json`, `controller_combos.json`, `cat_maps.json`,
-  `stick_clusters.json`, `norm_stats.json`) into `data/<char>_v2/`.
-  The `.pt` shard files are NOT needed for inference — only the metadata
-  JSONs, which HF ships in the bundle. If you trained on this machine the
-  `data/*_v2/` dirs are already there with the same layout.
+- **Checkpoints.** `bash setup.sh --models` pulls
+  [erickfm/MIMIC](https://huggingface.co/erickfm/MIMIC) into
+  `hf_checkpoints/`. Each character dir there is self-contained
+  (`model.pt` + all metadata JSONs) — the bot autodiscovers every dir with
+  a `model.pt` + `metadata.json` and registers a `!<dir>` command for it;
+  no wiring or renaming needed. Training shard `.pt` files are NOT needed
+  for inference.
 
 ## Install
 
 The easiest path is to run the repo's `setup.sh` — it installs all Python
-deps (including `discord.py` and `python-dotenv`), extracts Dolphin, downloads
-the Melee ISO, installs Xvfb for headless display, and copies `.env.example`
-to `.env` for you:
+deps (including `discord.py` and `python-dotenv`), downloads the current
+Slippi Dolphin, downloads the Melee ISO, installs Xvfb for headless display,
+and copies `.env.example` to `.env` for you:
 
 ```bash
 bash setup.sh
 ```
 
-If you prefer to install manually:
+If you prefer to install the Discord-specific deps manually:
 
 ```bash
-pip install -r requirements.txt
 pip install -r requirements-discord.txt
 ```
 
@@ -99,10 +99,10 @@ same machine). Pick a connect code (your personal one, e.g. `WAVE#666`):
 
 ```bash
 python3 tools/play_netplay.py \
-  --checkpoint checkpoints/falco-20260412-relpos-28k.pt \
-  --dolphin-path /path/to/dolphin-emu \
-  --iso-path /path/to/melee.iso \
-  --data-dir data/falco_v2 \
+  --checkpoint hf_checkpoints/falco/model.pt \
+  --dolphin-path ./emulator/squashfs-root/usr/bin/dolphin-emu \
+  --iso-path ./melee.iso \
+  --data-dir hf_checkpoints/falco \
   --character FALCO \
   --connect-code WAVE#666
 ```
@@ -123,8 +123,11 @@ The bot logs to stderr. In your Discord server:
 
 - `!info` — show the bot's connect code and character list
 - `!play falco WAVE#666` — queue a Falco match against your lobby
+- `!fox-master WAVE#666` — per-character shortcut (one exists for every
+  loaded character; the list is discovered from HuggingFace, not hardcoded)
 - `!queue` — show queue state
 - `!cancel` — remove your queued match
+- `!reload` — re-sync characters from HuggingFace without a restart
 
 When your turn comes, the bot posts `▶️ Match starting` and starts its
 Dolphin. Enter the bot's connect code (shown in `!info`) on your side
@@ -155,10 +158,18 @@ within 2 minutes or the bot will give up with `no-opponent`.
     `copy_home_directory=True`. If that doesn't pick it up, set
     `dolphin_home_path` explicitly in `play_netplay.py`.
 
+**"required update available" when going online**
+  → The Dolphin build is older than Slippi's server-side minimum version.
+    Delete `emulator/` and re-run `setup.sh` (it always fetches the current
+    release). Do not switch to mainline Dolphin to dodge this — it crashes
+    under libmelee's EXI protocol or is itself gate-rejected
+    (CLAUDE.md pitfalls #19/#20).
+
 **Bot's Dolphin launches but stays at the main menu**
-  → Menu navigation in libmelee relies on specific `SubMenu` IDs. If Slippi
-    updates add a new main menu layout, `MenuHelper.menu_helper_simple` may
-    need to be updated in libmelee itself.
+  → First suspect a stale Dolphin build (see the item above — an outdated
+    build can also stall menu navigation). If the build is current: menu
+    navigation in libmelee relies on specific `SubMenu` IDs, and a new
+    Slippi menu layout may need a libmelee update.
 
 **Match starts but bot controls the opponent's character (inverted
 perspective)**

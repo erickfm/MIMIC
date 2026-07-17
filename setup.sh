@@ -30,38 +30,33 @@ done
 
 echo "=== MIMIC setup ==="
 
-# ── 0. Git LFS ─────────────────────────────────────────────────────────────
-echo ""
-echo "── Ensuring Git LFS files are pulled ──"
-if ! command -v git-lfs &>/dev/null && ! git lfs version &>/dev/null 2>&1; then
-    echo "  Installing git-lfs ..."
-    (curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | bash && \
-     apt-get install -y -qq git-lfs) 2>&1 | tail -1
-fi
-git lfs install --skip-smudge 2>/dev/null || true
-git lfs pull 2>/dev/null || true
-echo "  LFS files ready."
-
 # ── 1. Python deps ──────────────────────────────────────────────────────────
 echo ""
 echo "── Installing Python dependencies ──"
-PYDEPS="torch numpy pandas pyarrow wandb tensordict huggingface_hub melee==0.45.1 discord.py python-dotenv py-slippi"
+PYDEPS="torch numpy pandas pyarrow wandb huggingface_hub melee==0.45.1 discord.py python-dotenv"
 pip install $PYDEPS --quiet 2>/dev/null \
   || pip install $PYDEPS --quiet --break-system-packages
 
 # ── 2. Dolphin emulator (online netplay build) ─────────────────────────────
+# Always the CURRENT Slippi Ishiiruka release: Slippi gates Online behind a
+# server-side minimum version, so a pinned/vendored build goes stale and gets
+# hard-rejected with "required update available" (CLAUDE.md pitfall #20).
+# Do NOT switch this to mainline — mainline crashes under libmelee's EXI
+# protocol (beta.19) or is itself gate-rejected (beta.17).
+EMULATOR_URL="https://github.com/project-slippi/Ishiiruka/releases/latest/download/Slippi_Online-x86_64.AppImage"
 echo ""
 echo "── Setting up Dolphin emulator (online play) ──"
 if [[ -x "$EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu" ]]; then
     echo "  Dolphin already extracted."
+    echo "  (If netplay reports 'required update available', delete $EMULATOR_DIR/ and re-run setup.sh.)"
 else
-    if [[ ! -f emulator.tar.gz ]]; then
-        echo "  ERROR: emulator.tar.gz not found. Run: git lfs pull"
-        exit 1
-    fi
-    echo "  Extracting emulator.tar.gz ..."
     mkdir -p "$EMULATOR_DIR"
-    tar xzf emulator.tar.gz -C "$EMULATOR_DIR" --strip-components=0
+    echo "  Downloading latest Slippi Online AppImage ..."
+    curl -sSL -o "$EMULATOR_DIR/Slippi_Online-x86_64.AppImage" "$EMULATOR_URL"
+    chmod +x "$EMULATOR_DIR/Slippi_Online-x86_64.AppImage"
+    echo "  Extracting AppImage ..."
+    (cd "$EMULATOR_DIR" && ./Slippi_Online-x86_64.AppImage --appimage-extract >/dev/null)
+    rm -f "$EMULATOR_DIR/Slippi_Online-x86_64.AppImage"
     echo "  Dolphin ready at $EMULATOR_DIR/squashfs-root/usr/bin/dolphin-emu"
 fi
 
@@ -90,29 +85,10 @@ else
     echo "  Exi-AI Dolphin ready at $EMULATOR_FFW_DIR/squashfs-root/usr/bin/dolphin-emu"
 fi
 
-# ── 2c. Mainline Slippi Dolphin (netplay build — used by play_netplay.py) ──
-# libmelee's menu navigation targets the *mainline* Slippi online-submenu
-# layout; the bundled Ishiiruka build indexes it differently and stalls the
-# bot at MAIN_MENU/ONLINE_PLAY_SUBMENU (never goes online). Mainline also
-# supports gfx_backend="Null" (no rendering) — no GPU/Xvfb needed. See CLAUDE.md #19.
-EMULATOR_MAINLINE_DIR="emulator_mainline"
-EMULATOR_MAINLINE_URL="https://github.com/project-slippi/dolphin/releases/download/v4.0.0-mainline-beta.17/Slippi_Netplay_Mainline-x86_64.AppImage"
-echo ""
-echo "── Setting up mainline Slippi Dolphin (netplay) ──"
-if [[ -x "$EMULATOR_MAINLINE_DIR/squashfs-root/usr/bin/dolphin-emu" ]]; then
-    echo "  Mainline Dolphin already extracted."
-else
-    mkdir -p "$EMULATOR_MAINLINE_DIR"
-    if [[ ! -f "$EMULATOR_MAINLINE_DIR/mainline.AppImage" ]]; then
-        echo "  Downloading mainline Slippi AppImage (~150 MB)..."
-        curl -sSL -o "$EMULATOR_MAINLINE_DIR/mainline.AppImage" "$EMULATOR_MAINLINE_URL"
-        chmod +x "$EMULATOR_MAINLINE_DIR/mainline.AppImage"
-    fi
-    echo "  Extracting mainline AppImage ..."
-    (cd "$EMULATOR_MAINLINE_DIR" && ./mainline.AppImage --appimage-extract >/dev/null)
-    rm -f "$EMULATOR_MAINLINE_DIR/mainline.AppImage"
-    echo "  Mainline Dolphin ready at $EMULATOR_MAINLINE_DIR/squashfs-root/usr/bin/dolphin-emu"
-fi
+# (RLVR only: the patched savestate fork — SAVESTATE/LOADSTATE pipe verbs +
+# the dual-pad FFW fix — is built from source into emulator_ss/ + emulator_pb/
+# by tools/build_savestate_dolphin.sh. Not needed for netplay or the Discord
+# bot, so it is not fetched here.)
 
 # Dolphin runtime libs — missing any of these makes the binary fail with
 # exit code 127, which libmelee surfaces as "Unexpected return code 127
@@ -327,38 +303,17 @@ from huggingface_hub import snapshot_download
 snapshot_download('erickfm/MIMIC', local_dir='hf_checkpoints')
 " || { echo "  ❌ HF download failed — check your network connection"; exit 1; }
 
-    mkdir -p checkpoints
-    # character → (checkpoint filename, data dir)
-    declare -A CP_NAMES=(
-      [fox]="fox-20260413-rope-32k.pt"
-      [falco]="falco-20260412-relpos-28k.pt"
-      [cptfalcon]="cptfalcon-20260412-relpos-27k.pt"
-      [luigi]="luigi-20260412-relpos-5k.pt"
-    )
-    declare -A DATA_DIRS=(
-      [fox]="data/fox_v2"
-      [falco]="data/falco_v2"
-      [cptfalcon]="data/cptfalcon_v2"
-      [luigi]="data/luigi_v2"
-    )
-    for char in fox falco cptfalcon luigi; do
-        src="hf_checkpoints/$char"
-        cp_name="${CP_NAMES[$char]}"
-        data_dir="${DATA_DIRS[$char]}"
-        if [[ -f "$src/model.pt" ]]; then
-            ln -sf "../$src/model.pt" "checkpoints/$cp_name"
-            mkdir -p "$data_dir"
-            for f in mimic_norm.json controller_combos.json cat_maps.json stick_clusters.json norm_stats.json; do
-                if [[ -f "$src/$f" ]]; then
-                    ln -sf "../../$src/$f" "$data_dir/$f"
-                fi
-            done
-            echo "  $char → checkpoints/$cp_name + $data_dir/"
-        else
-            echo "  ⚠ $src/model.pt missing, skipping $char"
-        fi
+    # Each hf_checkpoints/<char>/ dir bundles model.pt + all norm/metadata
+    # JSONs (upload_char.py writes them together), so it works directly as
+    # both --ckpt source and --data-dir. The Discord bot autodiscovers every
+    # dir with a model.pt + metadata.json:melee_enum — no wiring needed.
+    echo "  Models ready under hf_checkpoints/:"
+    for src in hf_checkpoints/*/; do
+        [[ -f "$src/model.pt" ]] && echo "    ${src%/}"
     done
-    echo "  Models ready — Discord bot and play_netplay.py can find them via the symlinks."
+    echo "  Use directly, e.g.:"
+    echo "    python3 tools/play.py --ckpt hf_checkpoints/fox-master/model.pt \\"
+    echo "        --data-dir hf_checkpoints/fox-master --opponent cpu:9 ..."
 fi
 
 echo ""
@@ -368,7 +323,7 @@ echo "  ISO:      $ISO_PATH"
 echo "  Data:     $DATA_DIR"
 echo "  Display:  \$DISPLAY=$DISPLAY"
 if $PULL_MODELS; then
-    echo "  Models:  hf_checkpoints/ (symlinked into checkpoints/ + data/*_v2/)"
+    echo "  Models:  hf_checkpoints/ (self-contained per-character dirs)"
 fi
 echo ""
 echo "Next steps:"
@@ -377,7 +332,7 @@ if ! $PULL_MODELS; then
 fi
 echo "  • Make sure .env is filled in  (scp from another machine is fastest)"
 echo "  • Run the Discord bot:         python3 tools/discord_bot.py"
-echo "  • Or play vs a CPU locally:    python3 tools/play_vs_cpu.py --help"
+echo "  • Or play vs a CPU locally:    python3 tools/play.py --help"
 
 # ── 12. Optionally start training ───────────────────────────────────────────
 if $RUN_AFTER; then

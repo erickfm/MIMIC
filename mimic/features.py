@@ -644,16 +644,23 @@ def encode_controller_onehot(
     combo_to_idx: dict,
     n_combos: int,
     norm_stats: dict = None,
+    c_xy: np.ndarray = None,
 ) -> np.ndarray:
     """Encode controller state as HAL-style one-hot vector.
 
     Args:
         buttons: (T, 12) binary float — raw button states
         analog: (T, 4) float — [main_x, main_y, l_shldr, r_shldr], possibly normalized
-        c_dir: (T,) int64 — 5-class c-stick direction
+        c_dir: (T,) int64 — 5-class c-stick direction (legacy fallback; ignored
+            when c_xy is given)
         combo_to_idx: dict mapping (int,...) tuples to class indices
         n_combos: total number of button combo classes
         norm_stats: if provided, denormalize analog cols {col_name: (mean, std)}
+        c_xy: (T, 2) float raw c-stick [0, 1] — when given, the c one-hot uses
+            nearest-of-9 clusters, matching both the c_dir *targets* and
+            inference-time history (encode_controller_onehot_single). The
+            5-class c_dir path exists only for old shards that never stored
+            raw c coordinates.
 
     Returns:
         (T, 37 + 9 + n_combos + 3) float32 one-hot vector
@@ -673,8 +680,11 @@ def encode_controller_onehot(
     main_idx = _nearest_2d(main_xy, HAL_STICK_CLUSTERS_37)
     main_onehot = np.eye(37, dtype=np.float32)[main_idx]
 
-    # 2. C-stick → 5-class→9-cluster mapping → 9-dim one-hot
-    c_idx = CDIR_5_TO_9_MAP[c_dir.astype(np.int64)]
+    # 2. C-stick → nearest of 9 clusters (raw coords) or legacy 5→9 map
+    if c_xy is not None:
+        c_idx = _nearest_2d(c_xy.astype(np.float32), HAL_CSTICK_CLUSTERS_9)
+    else:
+        c_idx = CDIR_5_TO_9_MAP[c_dir.astype(np.int64)]
     c_onehot = np.eye(9, dtype=np.float32)[c_idx]
 
     # 3. Buttons → collapse → one-hot
