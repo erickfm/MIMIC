@@ -157,3 +157,106 @@ validated, training efficacy is not, and the v1 finding that N=8
 groups are mostly zero-variance stands. Drill v2 needs bigger N and/or
 mixed-outcome state curation before it produces signal.
 
+
+## Leash post-mortem + direction discussion (owner session, 07-17)
+
+### Drift measurements for run k (rel-L2 vs BC, same metric as the r-series ladder)
+
+| checkpoint | KL (rollout states) | rel-L2 | h2h |
+|---|---|---|---|
+| k-u10 | 0.098 | 0.00075 | — |
+| k-u20 | 0.095 | 0.00106 | 7–10 parity |
+| k-u30 | 0.090 | 0.00131 | — |
+| k-u40 | 0.145 | 0.00150 | 1–11 collapsed |
+| wiseft a75 | — | 0.00113 | 5–12 |
+
+r-series reference: parity at 0.00134, collapse at 0.00199. So run k
+collapsed at *less* weight drift than the r-series collapse rung, and
+a75 underperformed at *less* drift than the r-series parity rung.
+Neither KL-on-rollouts nor weight-space distance transfers across runs
+as a strength threshold — direction of drift matters, not magnitude.
+(Noise caveat: at n=17 matches, only u40's 1–11 clears binomial noise,
+p≈0.006; 7–10 vs 5–12 are not distinguishable from each other or from
+parity. All decode at T=1.0 sampling, fixed ports, FD — the noise
+floor is wide.)
+
+### Owner conclusions
+
+- One run is enough to lose confidence in constraint-style leashes;
+  no need to prove the point further.
+- **Average KL is wrong in principle, not just underpowered**: BC's
+  action span is wide and consequence is non-uniform — drift in a few
+  specific actions (shoulder off-stage, ledge SDs) is catastrophic
+  while most drift is free. A mean over action-probability mass cannot
+  see the difference. This is the action-space twin of the
+  val-loss-vs-strength argument ([[project_error_consequence_nonuniform]]).
+- The same reasoning casts suspicion on full-temperature sampling as
+  the deployment decode; wants a temperature/decode investigation.
+
+### Human-miss mining (owner proposal, adopted direction)
+
+The human replay corpus already contains labeled L-cancel mistakes
+(~10% of landings at the ~90.4% corpus rate). Two uses considered:
+
+1. **RLVR on harvested human-miss windows** (GRPO-style matched-context
+   groups) — the adopted direction. All infrastructure exists: playback
+   harvest (savestate at any human replay frame), the drill loop, and
+   the dual-pad fix for the port-2 frozen-BC driver a restored human
+   state needs. Two advantages over bot-miss drilling: no discovery
+   cost (millions of pre-labeled windows), and human-miss contexts are
+   plausibly hard contexts, so bot success there should sit well below
+   the 95% ceiling that made bot-miss N=8 groups degenerate.
+   **Cheap gate before committing: harvest ~50 human-miss states, roll
+   8 per state, measure group variance.** Caveat: miss-only contexts
+   are a skewed training distribution; mix with regular rollouts.
+2. **"Fix the data" (edit misses into successes, retrain BC)** —
+   rejected. Owner's objection: doesn't generalize to multi-turn
+   skills (edgeguard, punish) with no single fixable window. Stronger
+   objection: the edit is *counterfactual* — the frames after a fixed
+   miss still show the lag animation that actually happened, so the
+   edited buttons contradict the surrounding observed gamestates even
+   for the single-frame task.
+
+### Decode/temperature investigation (queued)
+
+Prior data point: 2026-06-27 sweep, T<1.0 → 4-stocked (near the edge
+the modal action can be the SD; greedy also biases toward the most
+common class — center-stick ~34% — i.e. passive drift). But T=1.0 has
+the mirror problem: it faithfully samples BC's rare catastrophic
+actions at their natural rate. Untested middle ground: nucleus/top-p
+or per-head temperature (buttons low-T, sticks full-T) — cut the
+low-probability disaster tail without collapsing the multimodality
+greedy destroys. The top-k/top-p plumbing was already designed in the
+June decode-tuning plan (never executed); `_safe_sample` in
+`tools/inference_utils.py` is the single place to change; the
+common-opponent h2h rig is the measure. No training required.
+
+Ranked next steps by information value: (1) group-variance probe on
+human-miss states, (2) decode/temp sweep, (3) full human-miss GRPO
+run.
+
+## RL progress snapshot (as of 2026-07-17)
+
+**Proven:**
+- The RLVR mechanism works end-to-end on a real skill: L-cancel
+  94.2% → 99.2% vs CPU (r7), with a tuned recipe (lr 3e-5, kl_beta
+  0.003, 4 PPO epochs, batch ∝ 1/miss-rate) and an
+  engine-confirmed metric (realized avoidable lag).
+- Skill transfers into deployment context and survives strength
+  collapse (u40: +3.6 pts in-context L-cancel while losing 1–11) —
+  skill and strength are decoupled in the weights.
+- Infrastructure: dual-rollout FFW self-play at ~5.7× realtime
+  (8 actors, one 4090), savestate pipe verbs (patched fork, pinned),
+  replay-seeded savestate harvest from human .slp, miss-drilling
+  harness (mechanics validated, reward-corruption bugs found by
+  review and fixed).
+
+**Not solved:**
+- Strength preservation. Every constraint-style leash tried or
+  measured (KL on rollout states, weight-space distance, WiSE-FT
+  recombination, BC-opponent rollouts) failed to predict or prevent
+  h2h collapse. Current working position: train aggressively,
+  checkpoint densely, and *select* by h2h — measurement over
+  constraint.
+- Drill training efficacy (groups degenerate at N=8 on bot misses).
+- Only one objective attempted; multi-RLVR balancing untested.
