@@ -186,10 +186,24 @@ class DrillRunner:
                 self.load_frame_deltas.append(f - capture_frame)
                 restore_policy(self.policy, state.snap, self.device)
                 self.tracker.reset()
-                prev = (dict(self.policy.prev_sent)
-                        if self.policy.prev_sent else neutral_prev_sent())
                 phase = "warmup"
-                # fall through: this frame is the first warmup frame
+                # This frame is the re-delivered capture frame — its obs is
+                # already the last row of the restored window; pushing it
+                # again would duplicate it with a wrong controller-history
+                # feature. Consume it with a neutral press instead; warmup
+                # starts on the next frame.
+                press_neutral(self.session.ego_ctrl)
+                prev = neutral_prev_sent()
+                continue
+
+            # warmup/control: any frame discontinuity means a straggler
+            # LOADSTATE host job (e.g. from a timed-out rollout) fired
+            # mid-episode — the emulator state no longer matches the
+            # restored context and any reward would be misattributed.
+            jump = f - prev_frame
+            prev_frame = f
+            if jump <= 0 or jump > 5:
+                return None, "frame_discontinuity"
 
             if phase == "warmup":
                 frame = build_frame(gs, prev, self.ctx)

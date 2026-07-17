@@ -51,13 +51,16 @@ SLIPPI_PORT_MAX = 52199
 # -- pipe verbs ---------------------------------------------------------------
 
 def send_savestate(ctrl: melee.Controller, path: str) -> None:
+    # No ctrl.flush() here: the dual-pad fix's per-pipe flush ledger counts
+    # FLUSH commands as frame barriers, so a verb-only flush skews input
+    # timing by one frame. The verb line is parsed on read regardless; the
+    # same frame's input flush carries the barrier.
     ctrl._write(f"SAVESTATE {path}\n")
-    ctrl.flush()
 
 
 def send_loadstate(ctrl: melee.Controller, path: str) -> None:
+    # Same flush-ledger rationale as send_savestate.
     ctrl._write(f"LOADSTATE {path}\n")
-    ctrl.flush()
 
 
 # -- neutral controller -------------------------------------------------------
@@ -126,7 +129,6 @@ class LandingRunTracker:
     def reset(self) -> None:
         self._state: Optional[int] = None
         self._start_frame = 0
-        self._len = 0
         self._last_frame: Optional[int] = None
 
     @property
@@ -139,16 +141,21 @@ class LandingRunTracker:
         self._last_frame = frame_id
         if self._state is not None:
             if action == self._state:
-                self._len += 1
                 return None
-            run = LandingRun(self._state, self._start_frame, self._len, action)
+            # Length from frame ids, not delivered-frame count: a dropped
+            # frame inside the run would otherwise undercount realized lag
+            # by 1 and flip a marginal miss (avoidable_lag 1) to reward=1.0
+            # — exactly the near-miss population the drill targets. The
+            # canonical replay rule (l_cancel_online) is a frame-index span.
+            run = LandingRun(self._state, self._start_frame,
+                             frame_id - self._start_frame, action)
             self._state = None
             if action in LANDING_AIR_STATES:
                 # direct landing->landing chain (rare)
-                self._state, self._start_frame, self._len = action, frame_id, 1
+                self._state, self._start_frame = action, frame_id
             return run
         if action in LANDING_AIR_STATES:
-            self._state, self._start_frame, self._len = action, frame_id, 1
+            self._state, self._start_frame = action, frame_id
         return None
 
 
@@ -231,10 +238,16 @@ class SavestateSession:
         self.cpu_ctrl = melee.Controller(
             console=self.console, port=2, type=melee.ControllerType.STANDARD)
         self.console.run(iso_path=self.cfg.iso_path)
-        if not self.console.connect():
-            raise RuntimeError("console.connect() failed")
-        if not self.ego_ctrl.connect() or not self.cpu_ctrl.connect():
-            raise RuntimeError("controller connect failed")
+        try:
+            if not self.console.connect():
+                raise RuntimeError("console.connect() failed")
+            if not self.ego_ctrl.connect() or not self.cpu_ctrl.connect():
+                raise RuntimeError("controller connect failed")
+        except Exception:
+            # Dolphin is already running at this point; without this it
+            # orphans and burns CPU indefinitely.
+            self.stop()
+            raise
         log.info("session up: dolphin=%s slippi_port=%d ffw=%s",
                  self.cfg.dolphin_path, self.cfg.slippi_port,
                  self.cfg.enable_ffw)
@@ -282,6 +295,14 @@ class SavestateSession:
             return
         self._keepalive_stop.set()
         self._keepalive_thread.join(timeout=10.0)
+        if self._keepalive_thread.is_alive():
+            # Stuck inside console.step(). Never resume main-thread
+            # stepping while another thread may still drive the console.
+            log.warning("keepalive thread slow to stop; waiting up to 60 s")
+            self._keepalive_thread.join(timeout=60.0)
+            if self._keepalive_thread.is_alive():
+                raise RuntimeError(
+                    "keepalive thread failed to stop; console unsafe")
         self._keepalive_thread = None
 
     def _keepalive_loop(self) -> None:

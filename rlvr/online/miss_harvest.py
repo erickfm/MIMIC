@@ -263,9 +263,9 @@ def harvest(args) -> dict:
                 "frames_before_landing": run.start_frame - entry.capture_frame,
                 "match_idx": stats["matches"],
                 "cpu_level": args.cpu_level,
-                "character": "FOX",
-                "cpu_character": "FOX",
-                "stage": "FINAL_DESTINATION",
+                "character": session.cfg.character,
+                "cpu_character": session.cfg.cpu_character,
+                "stage": session.cfg.stage,
                 "ckpt": str(args.ckpt),
                 "created": time.strftime("%Y-%m-%dT%H:%M:%S"),
             }
@@ -302,7 +302,7 @@ def main():
                     help="Patched savestate-capable Dolphin (emulator_ss).")
     ap.add_argument("--iso-path", default=str(REPO / "melee.iso"))
     ap.add_argument("--out-dir", default=str(REPO / "states/lcancel_misses"))
-    ap.add_argument("--tmp-dir", default="/tmp/claude-1000/agent_drill")
+    ap.add_argument("--tmp-dir", default="/tmp/mimic_drill_ring")
     ap.add_argument("--max-misses", type=int, default=10,
                     help="Stop after harvesting this many miss states.")
     ap.add_argument("--max-minutes", type=float, default=90.0)
