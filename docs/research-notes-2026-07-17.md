@@ -43,8 +43,14 @@ is "flat until u30, real gain at u40."
   vs BC **93.0%** (n=302) — the skill gain is real and survives into
   the deployment context even while the checkpoint loses the matches.
   Skill/strength decoupling confirmed again, now in-context.
-- k-u20 h2h: in progress (17 matches total). This locates whether the
-  KL~0.095 shelf is inside the parity band.
+- **k-u20: 7–10 over 17 matches — parity** (same record as r2-u30's
+  7–10; two-sided binomial p≈0.63). Per-port L-cancel inside those
+  games: k-u20 **95.7%** (n=513) vs BC **93.6%** (n=471) — +2.1 pts,
+  same direction as u40's +3.6 but not individually significant
+  (CIs ±1.8/±2.2). So within run k the ladder reads: u20 (KL 0.095) =
+  parity strength + marginal skill edge; u40 (KL 0.145) = collapsed
+  strength + clear skill edge. The strength cliff for this run sits
+  between KL 0.095 and 0.145.
 
 ### What this does and doesn't say about the dual-rollout theory
 
@@ -74,7 +80,41 @@ recombination lever is linear interpolation
 `checkpoints/DBG-wiseft-ku40-a{25,50,75}.pt` from u40
 (handling `AVG_mastfox`'s `_orig_mod.` compile-prefix keys); all load
 through `load_mimic_model`. Question: does any α keep most of u40's
-skill gain at h2h parity? Results below when run.
+skill gain at h2h parity?
+
+Skill ladder (same vs-CPU FFW protocol as above):
+
+| checkpoint | L-cancel | n |
+|---|---|---|
+| BC (α=0) | 95.2% | 931 |
+| a25 | 95.3% | 884 |
+| a50 | 95.8% | 925 |
+| a75 | 96.9% | 1037 |
+| u40 (α=1) | 97.8% | 895 |
+
+Skill interpolates smoothly (≈ linear in α). a25/a50 are within noise
+of BC; a75 keeps ~⅔ of u40's gain (+1.7 pts, ~1.8σ).
+
+a75 h2h vs BC (17 realtime matches): **5–12**, in-context L-cancel
+97.1% (n=512) vs 95.7% (n=494). Comparison across the three h2h'd
+points of the α/checkpoint family:
+
+| point | h2h vs BC | in-context L-cancel edge |
+|---|---|---|
+| k-u20 | 7–10 (parity) | +2.1 pts |
+| wiseft a75 | 5–12 (below parity) | +1.4 pts |
+| k-u40 | 1–11 (collapsed) | +3.6 pts |
+
+Verdict: **interpolation moved along the same skill-strength frontier,
+not above it.** a75 recovered some of u40's strength loss but gave up
+skill roughly proportionally, and is dominated (weakly, at these ns) by
+simply taking the u20 training checkpoint. At ~17 matches per point
+none of the pairwise differences among u20/a75 are individually
+significant — the clean claims are only that u40's skill gain is real
+and that u40's strength collapse is real. No free lunch from post-hoc
+recombination at this scale; the cheap-recombination hope from
+[[feedback_rlvr_destroy_and_learn]] is not refuted (one objective, one
+run) but gets no support here.
 
 ## Code review of the drilling harness (4ce353e) — 2 reward-corruption bugs fixed
 
@@ -108,7 +148,12 @@ found and fixed (in that order of severity):
    join that refuses to hand a possibly-still-driven console back to
    the main loop.
 
-The harness's smoke run predates these fixes; re-smoke before any real
-drill run.
+Post-fix re-smoke (2 updates, 6 states, N=8): mechanics pass — 48
+loads, latency p50 0.19 s, rewind frame delta 0 vs sidecar (confirming
+the no-own-flush verbs still fire), zero `frame_discontinuity` aborts
+(no false positives from the new guard). All 6 groups were degenerate
+(all-success or no-landing), so no gradient step ran — mechanics are
+validated, training efficacy is not, and the v1 finding that N=8
+groups are mostly zero-variance stands. Drill v2 needs bigger N and/or
+mixed-outcome state curation before it produces signal.
 
-<!-- PENDING: u20 h2h result, WiSE-FT ladder + h2h -->
