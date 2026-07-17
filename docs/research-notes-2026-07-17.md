@@ -233,7 +233,10 @@ common-opponent h2h rig is the measure. No training required.
 
 Ranked next steps by information value: (1) group-variance probe on
 human-miss states, (2) decode/temp sweep, (3) full human-miss GRPO
-run.
+run. Owner caveat on (3): it inherits the select-by-h2h gate, and h2h
+is wall-time expensive — cheaper now that the dual-pad fix lets h2h
+run under FFW instead of realtime, but still the dominant cost (tens
+of matches per checkpoint for records that clear binomial noise).
 
 ## RL progress snapshot (as of 2026-07-17)
 
