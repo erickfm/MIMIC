@@ -79,14 +79,17 @@ preflight() {
   python3 -c "import melee, peppi_py" 2>/dev/null \
     || { echo "PREFLIGHT: python deps missing (melee/peppi_py)"; ok=1; }
   python3 - <<'PYEOF' || ok=1
-import json, numpy as np, sys
+import numpy as np, sys
+from pathlib import Path
 sys.path.insert(0, "/workspace/MIMIC")
-from mimic.features import HAL_STICK_CLUSTERS_37
-d = json.load(open("/workspace/MIMIC/tools/meta/stick_clusters_hal37.json"))
-arr = np.array(d["centers"] if isinstance(d, dict) and "centers" in d else d, dtype="float32")
-assert arr.shape == (37, 2), f"bad cluster shape {arr.shape}"
-assert np.allclose(np.sort(arr.ravel()), np.sort(HAL_STICK_CLUSTERS_37.ravel()), atol=1e-6), \
+from mimic.features import HAL_STICK_CLUSTERS_37, load_cluster_centers
+sc, sh = load_cluster_centers(
+    clusters_path=Path("/workspace/MIMIC/tools/meta/stick_clusters_hal37.json"))
+assert sc is not None and sc.shape == (37, 2), f"bad stick centers: {None if sc is None else sc.shape}"
+assert np.allclose(np.sort(np.asarray(sc).ravel()),
+                   np.sort(HAL_STICK_CLUSTERS_37.ravel()), atol=1e-6), \
     "stick_clusters file != built-in HAL_STICK_CLUSTERS_37"
+assert sh is not None, "shoulder centers missing from stick_clusters file"
 PYEOF
   return $ok
 }
