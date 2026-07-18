@@ -1,0 +1,5 @@
+{
+    "button_names": ["A", "B", "Z", "JUMP", "TRIG", "A_TRIG", "NONE"],
+    "n_combos": 7,
+    "class_scheme": "melee_7class"
+}

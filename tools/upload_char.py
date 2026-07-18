@@ -49,6 +49,14 @@ CHAR_DISPLAY = {
     "dk": ("Donkey Kong", "DK"),
     "link": ("Link", "LINK"),
     "ness": ("Ness", "NESS"),
+    "ylink": ("Young Link", "YLINK"),
+    "bowser": ("Bowser", "BOWSER"),
+    "gameandwatch": ("Mr. Game & Watch", "GAMEANDWATCH"),
+    "mewtwo": ("Mewtwo", "MEWTWO"),
+    "roy": ("Roy", "ROY"),
+    "pichu": ("Pichu", "PICHU"),
+    "kirby": ("Kirby", "KIRBY"),
+    "zelda": ("Zelda", "ZELDA"),
     # rank-specific Fox models (additive; separate folders from base fox)
     "fox-master": ("Fox (Master)", "FOX"),
     "fox-diamond": ("Fox (Diamond)", "FOX"),
@@ -74,6 +82,11 @@ def _best_val_metrics(log_path: Path) -> dict:
             if v < lowest:
                 lowest = v
                 best_val_line = line
+    # "Best val_loss=" only prints at normal loop end; watchdog-stopped runs
+    # (the expected stop path for early-stopped chars) skip it — fall back to
+    # the lowest per-eval val line so metadata never carries val_loss="?".
+    if best_loss is None and lowest != float("inf"):
+        best_loss = lowest
     metrics = {"val_loss": f"{best_loss:.4f}" if best_loss else "?",
                "best_step": best_step}
     if best_val_line:
