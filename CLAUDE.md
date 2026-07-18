@@ -545,19 +545,21 @@ Set `--run-name` to `{char}-{YYYYMMDD}-{descriptor}`; step suffix is
 appended when promoting the `_best.pt`.
 
 Current per-character production:
-- `fox-master` — `fox-mastfox-20260625` (tail-SWA, 280k-step / 3-GPU run),
-  promoted 2026-06-26. Trained on the **rank-filtered** master-Fox set (100%
-  master Fox via `filter_masterfox.py`, ~77k games), mirror aug. **Same
-  playing strength as the prior champ, not stronger** — 10–10 h2h vs
-  `fox-master-20260616-long` over 20 realtime matches — but cleaner/verified
-  data provenance, which is why it was promoted. It does win on val (−0.012
-  on its own held-out set, −0.036 on the prior champ's master_v2 val), but
-  that didn't translate to a gameplay edge. Prior champ
-  `fox-master-20260616-long` (val 0.7130, ~305k-step long run, 76% h2h vs the
-  0.7334 rank-master) retained on disk as the validated-equal fallback. On HF
-  at `erickfm/MIMIC/fox-master/`. NOTE: its `metadata.json:val_loss` (0.6821)
-  is on the master-Fox val set and is NOT comparable to the 0.7130 figure
-  (different val data).
+- `fox-master` — `fox-mastfox-20260717-cstick9-nomirror` (tail-SWA of steps
+  224k–280k = `AVG_c9nm.pt`), promoted 2026-07-18. Champion recipe (280k
+  steps, eff batch 768, seed 42) on freshly rebuilt v2 shards with the
+  **nearest-of-9 c-stick history encoding** (commit `fb7bb1a`), **no mirror
+  aug** (dropped by owner; also sidesteps the mirror facing-flag bug), and
+  the **full uncapped 102,301-game master-Fox pool** (97,492 train
+  perspectives — the prior ~77k cap was a disk artifact). **Beat the prior
+  champ 16–5 (76.2%, p≈0.026) over 21 realtime matches** — the first h2h in
+  the fox line to clear binomial noise — with clean canaries (93.4%
+  aggregate L-cancel, n=1,103). Attribution caveat: three changes at once
+  (c-stick fix / no mirror / more data); the win is not attributable to any
+  single one. Prior champ `fox-mastfox-20260625` retained on disk as
+  `AVG_mastfox.pt` (the RLVR frozen-BC reference). `metadata.json:val_loss`
+  (0.6788) is in-training best on its own val split — not comparable across
+  data builds; h2h is the cross-build metric.
 - `fox-diamond` (val 0.7325) / `fox-platinum` (val 0.7479) — the rank ladder
   (`docs/research-notes-2026-06-16.md`).
 
