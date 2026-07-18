@@ -555,8 +555,8 @@ def main():
                     help="Flip A/B port assignment every match to remove "
                          "port-handedness bias.")
     ap.add_argument("--a-costume", type=int, default=3,
-                    help="Costume index for A (Fox: 0=default, 1=red, "
-                         "2=black/blue, 3=green). Default 3 (green).")
+                    help="Costume index for A (Fox: 0=default white, "
+                         "1=orange, 2=lavender, 3=green). Default 3 (green).")
     ap.add_argument("--b-costume", type=int, default=0,
                     help="Costume index for B. Default 0 (default Fox).")
     ap.add_argument("--port-a", type=int, default=1,
