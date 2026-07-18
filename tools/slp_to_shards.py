@@ -1222,9 +1222,14 @@ def _tensorize_split(
 
             # Each result is a list of 2 (states, targets, n_frames) tuples
             for states, targets, n_frames in result:
-                # Character filter: only keep perspective where self matches
+                # Character filter: only keep perspective where self matches.
+                # Majority vote over frames, NOT frame 0 — a majority-Sheik
+                # game can spawn as Zelda and transform (and vice versa), so
+                # a frame-0 test silently drops those perspectives. Identical
+                # to the frame-0 test for every non-transforming character.
                 if character_filter is not None:
-                    if states["self_character"][0].item() != character_filter:
+                    chars = states["self_character"]
+                    if int((chars == character_filter).sum()) * 2 <= chars.numel():
                         continue
                 buf_states.append(states)
                 buf_targets.append(targets)
