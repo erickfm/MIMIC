@@ -177,6 +177,7 @@ def run(
     seed: Optional[int] = None,
     trace: Optional[Path] = None,
     verbose: bool = False,
+    data_dir_b: Optional[Path] = None,
 ) -> dict:
     """Play `n_matches` and return a report dict.
 
@@ -205,7 +206,12 @@ def run(
     else:
         log.info("loading B (policy): %s", ckpt_b)
         model_b, cfg_b = load_mimic_model(str(ckpt_b), device)
-        ctx_b = _make_ctx(ctx_base, cfg_b)
+        # B uses its OWN character's norm/combos when --opponent-data-dir is
+        # given (each policy is normalized with its own stats — required for
+        # fair cross-character h2h). Falls back to A's data_dir otherwise.
+        ctx_base_b = (load_inference_context(data_dir_b)
+                      if data_dir_b is not None else ctx_base)
+        ctx_b = _make_ctx(ctx_base_b, cfg_b)
 
     console = melee.Console(
         path=str(dolphin_path), is_dolphin=True,
@@ -366,11 +372,34 @@ def run(
                 pb = (A_CHAR, a_costume, 0)
             if STAGES_LIST:
                 cur_stage = STAGES_LIST[matches_started % len(STAGES_LIST)]
+            # Gate autostart on BOTH ports being locked onto their intended
+            # characters (coin down). After a port flip the previous match's
+            # coins are still down on the OLD characters, and the game's
+            # ready_to_start flag goes 0 the instant both coins are down —
+            # regardless of which character. Without this gate port_b would
+            # press START while a port is mid-switch, launching a match with a
+            # stale/wrong character (~13% of --alternate-ports games came out
+            # as unscheduled mirror matchups). On the stage-select / postgame
+            # screens there is no character to verify, so autostart passes
+            # through unconditionally.
+            css = gs.menu_state in (melee.Menu.CHARACTER_SELECT,
+                                    melee.Menu.SLIPPI_ONLINE_CSS)
+            def _css_locked(port, want_char):
+                ps = gs.players.get(port)
+                if ps is None:
+                    return False
+                # Sheik is picked as Zelda on the CSS (converted at stage select).
+                target = (melee.Character.ZELDA
+                          if want_char is melee.Character.SHEIK else want_char)
+                return ps.character is target and ps.coin_down
+            both_locked = (_css_locked(port_a, pa[0])
+                           and _css_locked(port_b, pb[0]))
+            allow_start = both_locked if css else True
             menu_pa.menu_helper_simple(gs, ctrl_pa, pa[0], cur_stage,
                                        cpu_level=pa[2], autostart=False,
                                        costume=pa[1])
             menu_pb.menu_helper_simple(gs, ctrl_pb, pb[0], cur_stage,
-                                       cpu_level=pb[2], autostart=True,
+                                       cpu_level=pb[2], autostart=allow_start,
                                        costume=pb[1])
             ctrl_pa.flush()
             ctrl_pb.flush()
@@ -510,6 +539,10 @@ def main():
     ap.add_argument("--opponent", default="cpu:9",
                     help="Player B: 'cpu', 'cpu:<level>' (1-9), or a "
                          "checkpoint path. Default: cpu:9.")
+    ap.add_argument("--opponent-data-dir", type=Path, default=None,
+                    help="Inference-context dir for B (the opponent policy). "
+                         "Defaults to --data-dir; set to B's own char dir for "
+                         "fair cross-character h2h normalization.")
     ap.add_argument("--data-dir", required=True, type=Path,
                     help="Inference-context dir (norm/combos); used for "
                          "both policies.")
@@ -598,6 +631,7 @@ def main():
         port_a=args.port_a, port_b=args.port_b, slippi_port=args.slippi_port,
         replay_dir=args.replay_dir, device=args.device,
         out=args.out, seed=args.seed, trace=args.trace, verbose=args.verbose,
+        data_dir_b=args.opponent_data_dir,
     )
 
 
