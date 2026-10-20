@@ -5,10 +5,11 @@ CPU-9 pooled results (eval_results/<char>.json[+_r2]). Fits BT by the standard
 MM iteration, converts to an Elo-like scale, and reports the ranking, each
 char's aggregate h2h win rate + games, the CPU-9 win rate, and the rank shift.
 """
-import json, glob, math, collections
+import json, glob, math, collections, sys
 from pathlib import Path
 
-H2H = "eval_results/h2h"
+# optional argv[1]: a single results dir (default: every run under eval_results/h2h)
+H2H = sys.argv[1] if len(sys.argv) > 1 else "eval_results/h2h"
 E2C = {"MARTH":"marth","FALCO":"falco","CPTFALCON":"cptfalcon","SAMUS":"samus",
  "DOC":"doc","JIGGLYPUFF":"puff","DK":"dk","PEACH":"peach","GANONDORF":"ganondorf",
  "POPO":"ice_climbers","YOSHI":"yoshi","BOWSER":"bowser","ROY":"roy","PIKACHU":"pikachu",
