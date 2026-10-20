@@ -228,4 +228,4 @@ states/
 
 # Native decomp Melee sim (tools/build_native_sim.sh): decompiled game code +
 # binaries built from it. Never commit or upload.
-sim/
+/sim/

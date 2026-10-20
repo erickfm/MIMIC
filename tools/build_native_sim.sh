@@ -6,8 +6,8 @@ set -euo pipefail
 #
 # Source: Hero88go/melee-unlocked (GPL-3.0) pinned by
 # tools/patches/melee-unlocked-commit.txt, its doldecomp/melee submodule, and
-# our Linux --replay host (tools/patches/melee-unlocked-linux-replay.patch,
-# GPL-3.0). Everything is fetched from the public upstreams at build time and
+# our changes (tools/patches/melee-unlocked-mimic.patch, GPL-3.0): the Linux
+# --replay host (fidelity checks) and --env mode (rlvr/sim/melee_sim.py). Everything is fetched from the public upstreams at build time and
 # built against this machine's own melee.iso. NOTHING under sim/ may be
 # committed or uploaded: it holds the decompiled game code and compiled
 # binaries of it (see docs/research-notes-2026-10-20b.md). sim/ is gitignored.
@@ -23,7 +23,7 @@ SIM_DIR="$REPO_DIR/sim"
 SRC="$SIM_DIR/melee-unlocked"
 TC="$SIM_DIR/toolchain"
 COMMIT=$(cat "$REPO_DIR/tools/patches/melee-unlocked-commit.txt")
-PATCH="$REPO_DIR/tools/patches/melee-unlocked-linux-replay.patch"
+PATCH="$REPO_DIR/tools/patches/melee-unlocked-mimic.patch"
 ISO="$REPO_DIR/melee.iso"
 EXE="$SRC/build-linux/port/linux/melee_linux"
 
@@ -58,17 +58,22 @@ if [[ ! -d "$SRC/.git" ]]; then
     git -C "$SRC" init -q
     git -C "$SRC" remote add origin https://github.com/Hero88go/melee-unlocked.git
 fi
-if [[ "$(git -C "$SRC" rev-parse HEAD 2>/dev/null)" != "$COMMIT" ]]; then
-    git -C "$SRC" fetch -q --depth 1 origin "$COMMIT"
+# A changed pin or patch starts again from clean upstream sources (builds are kept, incremental).
+WANT="$COMMIT $(sha1sum "$PATCH" | cut -d' ' -f1)"
+if [[ "$(cat "$SIM_DIR/.applied" 2>/dev/null)" != "$WANT" ]]; then
+    if [[ "$(git -C "$SRC" rev-parse HEAD 2>/dev/null)" != "$COMMIT" ]]; then
+        git -C "$SRC" fetch -q --depth 1 origin "$COMMIT"
+    fi
     git -C "$SRC" checkout -q -f "$COMMIT"
-fi
-git -C "$SRC" submodule update -q --init --depth 1 sourceport/extern/melee
-python3 "$SRC/tools/prepare_native_sources.py"   # their native patch to the decomp
-if git -C "$SRC" apply --reverse --check "$PATCH" 2>/dev/null; then
-    echo "  Linux replay host patch already applied."
-else
+    git -C "$SRC" clean -fdq -e build-linux -e build-linux-game
+    git -C "$SRC" submodule update -q --init --depth 1 sourceport/extern/melee
+    git -C "$SRC/sourceport/extern/melee" checkout -q -f . && git -C "$SRC/sourceport/extern/melee" clean -fdxq
+    python3 "$SRC/tools/prepare_native_sources.py" 2>&1 | grep -v "has type 100755"   # their native patch to the decomp
     git -C "$SRC" apply "$PATCH"
-    echo "  Applied Linux replay host patch."
+    echo "$WANT" > "$SIM_DIR/.applied"
+    echo "  Sources at ${COMMIT:0:7} + MIMIC patch."
+else
+    echo "  Sources up to date (${COMMIT:0:7} + MIMIC patch)."
 fi
 
 # ── build (headless: no SDL/GL needed) ──

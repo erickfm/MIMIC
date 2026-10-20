@@ -1,8 +1,9 @@
-Melee Unlocked Linux host: --replay / --replay-dump (Slippi replay playback, MuHostApi v9),
-for MIMIC's native-sim fidelity check (tools/sim_replay_check.py).
+MIMIC changes to Melee Unlocked (Linux native host + game shim):
+  --replay / --replay-dump: Slippi replay playback for fidelity checks (tools/sim_replay_check.py)
+  --env-template / --env-fds / --env-seed: live-match RL env mode (rlvr/sim/melee_sim.py)
 
 Applies to Hero88go/melee-unlocked at the commit in tools/patches/melee-unlocked-commit.txt.
-Ported from that project's port/app/source_host.cpp, so this patch is a derived work of
+Partly ported from that project's port/app/source_host.cpp, so this patch is a derived work of
 Melee Unlocked and is licensed GPL-3.0-or-later (see that project's LICENSE). It contains no
 decompiled game code. Applied by tools/build_native_sim.sh.
 
@@ -26,7 +27,7 @@ index 98f2225..2c72bb8 100644
  # Keep the host PIE well away from the fixed console RAM and game image.
  set_target_properties(melee_linux PROPERTIES POSITION_INDEPENDENT_CODE ON)
 diff --git a/port/linux/host_services.cpp b/port/linux/host_services.cpp
-index 26670fc..1b73ee1 100644
+index 26670fc..c8afce9 100644
 --- a/port/linux/host_services.cpp
 +++ b/port/linux/host_services.cpp
 @@ -12,6 +12,7 @@
@@ -37,7 +38,15 @@ index 26670fc..1b73ee1 100644
  #endif
  
  #include <algorithm>
-@@ -822,6 +823,7 @@ MuHostApi make_api() {
+@@ -364,6 +365,7 @@ int32_t h_vi_idle() {
+ 
+ void h_pad_read(MuPadStatus out[4]) {
+   if (!out) return;
++  if (replay::env_active()) { replay::env_pads(out); return; }
+   pump_events();
+   if (input_script.active()) {
+     MuStatePod state{};
+@@ -822,6 +824,7 @@ MuHostApi make_api() {
    h.display_options=h_zero_u32; h.music_volume=h_music; h.native_draw_identity=h_zero_i32;
    h.mod_flags=h_zero_u32; h.slippi_command=h_slippi; h.resim_phase=h_resim;
    h.hud_scales=h_hud_scales; h.vi_idle_step=h_vi_idle;
@@ -46,20 +55,25 @@ index 26670fc..1b73ee1 100644
    h.native_pose_capture_enabled=h_pose_enabled;
    h.native_pose_snapshot=h_pose_snapshot;
 diff --git a/port/linux/host_services.h b/port/linux/host_services.h
-index 9aa5fea..212bc90 100644
+index 9aa5fea..42b6f43 100644
 --- a/port/linux/host_services.h
 +++ b/port/linux/host_services.h
-@@ -33,6 +33,8 @@ struct Config {
+@@ -33,6 +33,13 @@ struct Config {
    uint64_t time_base = 0; // GameCube epoch, 40.5 MHz ticks since 2000-01-01.
    bool has_match = false;
    MuMatchOverride match{};
 +  // --replay: play this .slp (resync off) and dump the game's events to replay_dump.
 +  std::string replay_path, replay_dump, sys_dir = "port/slippi_sys_playback";
++  // --env (MIMIC RL env): live match from env_template's game info; pads/events over env_fds.
++  std::string env_template;
++  int env_in = -1, env_out = -1;
++  bool has_env_seed = false, env_online_rng = false;
++  uint32_t env_seed = 0;
  };
  
  struct Counters {
 diff --git a/port/linux/main.cpp b/port/linux/main.cpp
-index ccca855..7583795 100644
+index ccca855..308ac34 100644
 --- a/port/linux/main.cpp
 +++ b/port/linux/main.cpp
 @@ -1,6 +1,7 @@
@@ -70,20 +84,33 @@ index ccca855..7583795 100644
  #include <cerrno>
  #include <cstdio>
  #include <cstdlib>
-@@ -159,6 +160,9 @@ int main(int argc, char** argv) {
+@@ -159,6 +160,18 @@ int main(int argc, char** argv) {
        else if (arg == "--log-file") config.log_path = next();
        else if (arg == "--card-dir") config.card_dir = next();
        else if (arg == "--input-script") config.input_script = next();
 +      else if (arg == "--replay") config.replay_path = next();
 +      else if (arg == "--replay-dump") config.replay_dump = next();
 +      else if (arg == "--sys-dir") config.sys_dir = next();
++      else if (arg == "--env-template") config.env_template = next();
++      else if (arg == "--env-fds") {
++        const std::string v = next();
++        const auto comma = v.find(',');
++        if (comma == std::string::npos) throw std::runtime_error("--env-fds wants IN,OUT");
++        config.env_in = std::stoi(v.substr(0, comma)); config.env_out = std::stoi(v.substr(comma + 1));
++      }
++      else if (arg == "--env-online-rng") config.env_online_rng = true;
++      else if (arg == "--env-seed") { config.has_env_seed = true; config.env_seed = uint32_t(number(next(), "env seed")); }
        else if (arg == "--state-digest") digest_path = next();
        else if (arg == "--frames") {
          const auto frames = number(next(), "frame count");
-@@ -203,6 +207,10 @@ int main(int argc, char** argv) {
+@@ -203,6 +216,14 @@ int main(int argc, char** argv) {
      if (!config.headless) throw std::runtime_error("this build has no graphics; rebuild with MELEE_LINUX_GRAPHICS=ON");
  #endif
      std::string error;
++    if (!config.env_template.empty() &&
++        !linux_host::replay::load_env(config.env_template, config.sys_dir, config.env_in, config.env_out,
++                                      config.has_env_seed, config.env_seed, config.env_online_rng))
++      return 2;
 +    if (!config.replay_path.empty() &&
 +        !linux_host::replay::load(config.replay_path, config.sys_dir,
 +                                  config.replay_dump.empty() ? config.replay_path + ".native.bin" : config.replay_dump))
@@ -93,10 +120,10 @@ index ccca855..7583795 100644
      Presentation presentation;
 diff --git a/port/linux/replay_host.cpp b/port/linux/replay_host.cpp
 new file mode 100644
-index 0000000..ee2ac32
+index 0000000..b6acb23
 --- /dev/null
 +++ b/port/linux/replay_host.cpp
-@@ -0,0 +1,213 @@
+@@ -0,0 +1,372 @@
 +// Linux --replay. See replay_host.h.
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "replay_host.h"
@@ -105,6 +132,7 @@ index 0000000..ee2ac32
 +#include <nlohmann/json.hpp>
 +#include <algorithm>
 +#include <array>
++#include <cerrno>
 +#include <cstdarg>
 +#include <cstdio>
 +#include <cstdlib>
@@ -114,6 +142,7 @@ index 0000000..ee2ac32
 +#include <memory>
 +#include <unordered_map>
 +#include <vector>
++#include <unistd.h>
 +
 +namespace linux_host::replay {
 +namespace {
@@ -121,6 +150,62 @@ index 0000000..ee2ac32
 +MuReplayStart g_start{};
 +std::FILE* g_dump = nullptr;
 +uint64_t g_events = 0;
++
++// --env (MIMIC RL env): a live match. Each engine frame emits frame start, pre-frames and
++// post-frames, then the game's pad alarm reads the pads it will use for the NEXT frame, then the
++// frame's bookend. So at that pad read the frame's state is final: it is published to the
++// controller over fd g_out and the read blocks on fd g_in for the next frame's pads. Inputs sent
++// after observing frame f land on frame f+1, as with Dolphin + libmelee (blocking input); the
++// frame's bookend arrives at the start of the next message. Before the match, the controller
++// sends one set of pads first: the controller state going into the match, which every pre-match
++// read returns (frame -123 consumes the last of them). Wire format, host -> controller: u32 kind (1 frame, 2 done), u32 size,
++// then `size` bytes of events (u8 command, u32 LE size, payload). Controller -> host: 4 x
++// {u16 button, i8 stick_x, stick_y, sub_x, sub_y, u8 trigger_l, trigger_r} (32 bytes, LE).
++bool g_env = false;
++int g_in = -1, g_out = -1;
++std::vector<uint8_t> g_pending;
++bool g_frame_ready = false;   // a post-frame arrived since the last publish
++bool g_env_started = false;   // the match's first frame has been published
++bool g_have_initial = false;  // the pre-match pads have been read
++bool g_has_first_seed = false;   // --env-seed: the RNG state at the match's first frame
++uint32_t g_first_seed = 0;
++// --env-online-rng: Slippi online's per-frame RNG (its netplay codes overwrite the seed every
++// frame with ((frame + 123) << 16) | the match's low 16 bits), instead of the free-running chain.
++bool g_online_rng = false;
++uint32_t g_idle_reads = 0;    // pad reads since the last frame (after the match started)
++constexpr uint32_t kIdleLimit = 600;   // 10 s of game time with no frame: the match is over
++MuPadStatus g_pads[4]{};
++uint8_t g_port_used[4]{};
++
++bool write_all(int fd, const void* data, size_t size) {
++  const uint8_t* p = (const uint8_t*)data;
++  while (size) {
++    const ssize_t n = ::write(fd, p, size);
++    if (n < 0 && errno == EINTR) continue;
++    if (n <= 0) return false;
++    p += n; size -= (size_t)n;
++  }
++  return true;
++}
++
++bool read_all(int fd, void* data, size_t size) {
++  uint8_t* p = (uint8_t*)data;
++  while (size) {
++    const ssize_t n = ::read(fd, p, size);
++    if (n < 0 && errno == EINTR) continue;
++    if (n <= 0) return false;
++    p += n; size -= (size_t)n;
++  }
++  return true;
++}
++
++bool publish(uint32_t kind) {
++  const uint32_t head[2] = {kind, (uint32_t)g_pending.size()};
++  const bool ok = write_all(g_out, head, sizeof head) && write_all(g_out, g_pending.data(), g_pending.size());
++  g_pending.clear();
++  g_frame_ready = false;
++  return ok;
++}
 +
 +void logf(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 +void logf(const char* fmt, ...) {
@@ -226,6 +311,17 @@ index 0000000..ee2ac32
 +
 +void h_frame(int32_t frame, MuReplayFrame* out) {
 +  *out = MuReplayFrame{};
++  if (g_env) {   // live: no recorded frames; the RNG runs free after the optional first-frame seed
++    out->result = MU_REPLAY_CONTINUE;
++    if (g_online_rng) {
++      out->seed_exists = 1;
++      out->seed = ((uint32_t)(frame - Slippi::GAME_FIRST_FRAME) << 16) | (g_first_seed & 0xFFFFu);
++    } else if (frame == Slippi::GAME_FIRST_FRAME && g_has_first_seed) {
++      out->seed_exists = 1;
++      out->seed = g_first_seed;
++    }
++    return;
++  }
 +  if (!g_game || !g_game->DoesFrameExist(frame)) { out->result = MU_REPLAY_TERMINATE; return; }
 +  Slippi::FrameData* f = g_game->GetFrame(frame);
 +  out->result = MU_REPLAY_CONTINUE;
@@ -253,12 +349,24 @@ index 0000000..ee2ac32
 +}
 +
 +int32_t h_stock_steal(int32_t frame, int32_t port) {
++  if (g_env) return 0;
 +  if (!g_game || !g_game->DoesFrameExist(frame)) return 0;
 +  return g_game->GetFrame(frame)->players.count((uint8_t)port) ? 1 : 0;
 +}
 +
 +// Dump format, per event: u8 command, u32 little-endian size, payload. The checker reads it.
 +void h_event(uint8_t command, const uint8_t* payload, uint32_t size) {
++  if (g_env) {
++    static const bool trace = std::getenv("MELEE_ENV_TRACE") != nullptr;
++    if (trace && size >= 4)
++      std::fprintf(stderr, "event %02X frame %d\n", command, (int)((uint32_t)payload[0] << 24 | (uint32_t)payload[1] << 16 | (uint32_t)payload[2] << 8 | payload[3]));
++    g_pending.push_back(command);
++    const uint8_t n[4] = {(uint8_t)size, (uint8_t)(size >> 8), (uint8_t)(size >> 16), (uint8_t)(size >> 24)};
++    g_pending.insert(g_pending.end(), n, n + 4);
++    g_pending.insert(g_pending.end(), payload, payload + size);
++    if (command == 0x38) g_frame_ready = true;
++    return;
++  }
 +  if (!g_dump) return;
 +  std::fputc(command, g_dump);
 +  const uint8_t n[4] = {(uint8_t)size, (uint8_t)(size >> 8), (uint8_t)(size >> 16), (uint8_t)(size >> 24)};
@@ -268,13 +376,18 @@ index 0000000..ee2ac32
 +}
 +
 +void h_finished() {
++  if (g_env) {
++    publish(2);
++    request_stop(0);
++    return;
++  }
 +  logf("playback finished after %llu events", (unsigned long long)g_events);
 +  if (g_dump) { std::fclose(g_dump); g_dump = nullptr; }
 +  request_stop(0);
 +}
 +}  // namespace
 +
-+bool load(const std::string& path, const std::string& sys_dir, const std::string& dump_path) {
++static bool prepare_start(const std::string& path, const std::string& sys_dir) {
 +  g_game = Slippi::SlippiGame::FromFile(path);
 +  if (!g_game || !g_game->AreSettingsLoaded()) { logf("cannot read %s", path.c_str()); g_game.reset(); return false; }
 +  Slippi::GameSettings* s = g_game->GetSettings();
@@ -298,9 +411,82 @@ index 0000000..ee2ac32
 +  logf("%s, Slippi %s, frames %d..%d, stage %u, seed %08X%s", path.c_str(), g_game->GetVersionString().c_str(),
 +       Slippi::GAME_FIRST_FRAME, g_game->GetLatestIndex(), (unsigned)s->stage, s->randomSeed,
 +       g_start.resync ? ", RESYNC ON" : "");
++  return true;
++}
++
++bool load(const std::string& path, const std::string& sys_dir, const std::string& dump_path) {
++  if (!prepare_start(path, sys_dir)) return false;
 +  g_dump = std::fopen(dump_path.c_str(), "wb");
 +  if (!g_dump) { logf("cannot write %s", dump_path.c_str()); g_game.reset(); return false; }
 +  return true;
++}
++
++bool load_env(const std::string& template_slp, const std::string& sys_dir, int fd_in, int fd_out,
++              bool has_seed, uint32_t seed, bool online_rng) {
++  if (!prepare_start(template_slp, sys_dir)) return false;
++  g_start.live = 1;
++  g_start.resync = 0;
++  // START never pauses an env match (a policy pressing it would freeze the episode; Slippi
++  // online disables pausing too). Game info byte 2, bit 3: the rules' disable_pausing.
++  g_start.game_info[2] |= 0x08;
++  g_has_first_seed = has_seed;
++  g_first_seed = seed;
++  g_online_rng = online_rng;
++  for (int i = 0; i < 4; ++i) g_port_used[i] = g_start.game_info[0x60 + 0x24 * i + 1] != 3;   // player type 3: none
++  g_env = true;
++  g_in = fd_in;
++  g_out = fd_out;
++  logf("env: live match from %s, %s RNG, seed %s%08X, ports %d%d%d%d", template_slp.c_str(),
++       online_rng ? "online" : "offline", has_seed ? "" : "(setup's) ", has_seed ? seed : g_start.random_seed,
++       g_port_used[0], g_port_used[1], g_port_used[2], g_port_used[3]);
++  return true;
++}
++
++bool env_active() { return g_env; }
++
++static void read_pads() {
++  uint8_t wire[32];
++  if (!read_all(g_in, wire, sizeof wire)) {
++    logf("env: controller closed the pipe; stopping");
++    request_stop(0);
++    return;
++  }
++  for (int i = 0; i < 4; ++i) {
++    const uint8_t* w = wire + 8 * i;
++    MuPadStatus& p = g_pads[i];
++    p.button = (uint16_t)(w[0] | w[1] << 8);
++    p.stick_x = (int8_t)w[2]; p.stick_y = (int8_t)w[3];
++    p.sub_x = (int8_t)w[4]; p.sub_y = (int8_t)w[5];
++    p.trigger_l = w[6]; p.trigger_r = w[7];
++    p.analog_a = p.analog_b = 0;
++  }
++}
++
++void env_pads(MuPadStatus out[4]) {
++  if (!g_have_initial) { g_have_initial = true; read_pads(); }
++  static const bool trace = std::getenv("MELEE_ENV_TRACE") != nullptr;
++  if (trace) std::fprintf(stderr, "pad_read (frame_ready=%d)\n", (int)g_frame_ready);
++  if (g_env_started && !g_frame_ready && ++g_idle_reads >= kIdleLimit) {
++    // No frame for 10 s of retraces: the match ended without the replay-finished callback (a
++    // post-match scene polling pads), or the game is stuck. Report done instead of hanging.
++    logf("env: no frame for %u pad reads; reporting done", g_idle_reads);
++    publish(2);
++    request_stop(0);
++  }
++  if (g_frame_ready) {
++    g_env_started = true;
++    g_idle_reads = 0;
++    if (!publish(1)) {
++      logf("env: controller closed the pipe; stopping");
++      request_stop(0);
++    } else {
++      read_pads();
++    }
++  }
++  for (int i = 0; i < 4; ++i) {
++    out[i] = g_pads[i];
++    out[i].err = g_port_used[i] ? 0 : -1;
++  }
 +}
 +
 +bool active() { return g_game != nullptr; }
@@ -312,10 +498,10 @@ index 0000000..ee2ac32
 +}  // namespace linux_host::replay
 diff --git a/port/linux/replay_host.h b/port/linux/replay_host.h
 new file mode 100644
-index 0000000..55f9f33
+index 0000000..5b44911
 --- /dev/null
 +++ b/port/linux/replay_host.h
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,23 @@
 +// Linux --replay: the host side of Slippi replay playback (MuHostApi version 9), for fidelity checks.
 +// Plays one .slp's recorded inputs (resync off: positions/actions are simulated, not restored) and
 +// dumps every event the game emits, so a checker can diff the native post-frames against the
@@ -329,5 +515,69 @@ index 0000000..55f9f33
 +// Parse the replay and prepare the game info. False with a message on stderr when unreadable.
 +bool load(const std::string& slp_path, const std::string& sys_dir, const std::string& dump_path);
 +bool active();
++// --env: a live match entered from template_slp's game info and code list, pads from fd_in, each
++// finished frame's events to fd_out (wire format in replay_host.cpp). has_seed: the RNG state at
++// the match's first frame (-123), restored once; the RNG then runs free. online_rng: Slippi
++// online's per-frame seed instead ((frame + 123) << 16 | seed's low 16 bits).
++bool load_env(const std::string& template_slp, const std::string& sys_dir, int fd_in, int fd_out,
++              bool has_seed, uint32_t seed, bool online_rng);
++bool env_active();
++void env_pads(MuPadStatus out[4]);   // pad_read in env mode
 +void install(MuHostApi& h);   // fills the version 9 replay group
 +}  // namespace linux_host::replay
+diff --git a/port/runtime/abi/mu_host.h b/port/runtime/abi/mu_host.h
+index 33bfb6a..cf0add5 100644
+--- a/port/runtime/abi/mu_host.h
++++ b/port/runtime/abi/mu_host.h
+@@ -85,7 +85,9 @@ typedef struct MuReplayStart {
+     uint32_t codes;             /* MU_REPLAY_CODE_*: the gameplay codes in the replay's code list */
+     uint8_t is_pal, preload_ps, frozen_ps, resync;
+     uint8_t ps_frozen_toggle;   /* the data byte of the replay's IngameCheckIfFrozen code */
+-    uint8_t reserved[3];
++    uint8_t live;               /* MIMIC env: enter the match from game_info, but take the pads live
++                                 * (no input injection, no per-frame seed restore) */
++    uint8_t reserved[2];
+ } MuReplayStart;
+ 
+ /* One character's record in a fetched frame (Dolphin's prepareCharacterFrameData). */
+diff --git a/sourceport/game/shim/mu_replay.c b/sourceport/game/shim/mu_replay.c
+index 2b6a70b..aa451fc 100644
+--- a/sourceport/game/shim/mu_replay.c
++++ b/sourceport/game/shim/mu_replay.c
+@@ -42,6 +42,7 @@ int mu_replay_abi_active(void);
+ unsigned int mu_replay_abi_codes(void);
+ const unsigned char* mu_replay_abi_game_info(unsigned int* seed);
+ int mu_replay_abi_resync(void);
++int mu_replay_abi_live(void);
+ int mu_replay_abi_ps_frozen_toggle(void);
+ int mu_replay_abi_fetch(int frame);
+ int mu_replay_abi_last_result(void);
+@@ -644,6 +645,11 @@ void mu_replay_input(Fighter* fp)
+         return;
+     }
+     follower = is_follower(fp);
++    /* MIMIC env: the fighter keeps the input the game derived from its own pads. */
++    if (mu_replay_abi_live()) {
++        emit_pre_frame(fp);
++        return;
++    }
+     resync = mu_replay_abi_resync();
+     if (follower && !resync) {
+         emit_pre_frame(fp);
+diff --git a/sourceport/game/shim/mu_replay_abi.c b/sourceport/game/shim/mu_replay_abi.c
+index b6cb7bf..a141e85 100644
+--- a/sourceport/game/shim/mu_replay_abi.c
++++ b/sourceport/game/shim/mu_replay_abi.c
+@@ -45,6 +45,12 @@ int mu_replay_abi_resync(void)
+     return mu_replay_abi_active() && start_info->resync;
+ }
+ 
++/* MIMIC env: a match entered like a replay but played from live pads. */
++int mu_replay_abi_live(void)
++{
++    return mu_replay_abi_active() && start_info->live;
++}
++
+ int mu_replay_abi_ps_frozen_toggle(void)
+ {
+     return mu_replay_abi_active() ? start_info->ps_frozen_toggle : 0;

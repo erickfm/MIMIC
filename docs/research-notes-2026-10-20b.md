@@ -14,7 +14,7 @@ processes, ~18× our best Dolphin harness. **Decided: we are not making old
   scratch). It fetches Hero88go/melee-unlocked at the pinned commit
   (`tools/patches/melee-unlocked-commit.txt`) plus the doldecomp submodule into
   gitignored `sim/`, applies our GPL-3.0 Linux replay host
-  (`tools/patches/melee-unlocked-linux-replay.patch`), installs gcc-14 (apt as
+  (`tools/patches/melee-unlocked-mimic.patch`, which also carries the RL env mode), installs gcc-14 (apt as
   root, otherwise extracted into `sim/toolchain`, no sudo), and builds headless
   against the local `melee.iso` (SHA-1 checked). The replay host plays a
   replay's recorded inputs with resync off, so positions, actions and percent
@@ -63,3 +63,54 @@ human corpus. **Owner decision (2026-10-20): drop it.** The sim matches current
 Slippi, which is what we deploy on and what RL needs; BC training never touches
 the emulator. If replay-state seeding is ever wanted, use current-Slippi
 replays, which already resimulate exactly. Don't reopen the old-UCF work.
+
+## RL env, milestone 1 (`rlvr/sim/melee_sim.py`)
+
+One headless game per OS process. One game per process is forced by the game itself: console RAM
+lives at the fixed address 0x80000000 and all state is global. The process talks to Python over
+two pipes.
+
+```python
+from rlvr.sim.melee_sim import MeleeSim, Pad
+sim = MeleeSim("some_1v1.slp", seed=1234, rng="offline")   # template: chars, costumes, stage, rules
+frame = sim.reset()                                         # frame -123, ~0.04 s, no menus
+while not sim.done:
+    frame = sim.step([Pad(...), Pad(...), Pad(), Pad()])    # raw pads for the NEXT frame
+    frame.post[(port, 0)]                                   # Slippi post-frame payload, as in a .slp
+```
+
+- **How it works.** A "live" flag in the replay-start struct (game shim: `mu_replay_input` skips
+  injection) enters the match from the template's game info and gameplay-code list, then takes
+  pads through `pad_read` like a real controller. Every frame emits frame start, pre-frames and
+  post-frames, then the pad alarm reads the pads for the next frame. The host publishes at that
+  read, and blocks for the controller.
+- **Input timing.** Pads sent after observing frame f land on f+1. This is measured on Dolphin +
+  libmelee (realtime, blocking input): presses after frames 60/100/140 were recorded on
+  61/101/141. It is also the BC shard alignment.
+- **Env behavior.** START never pauses (`disable_pausing` forced). `reset(initial_pads=...)` sets
+  the controller state going into the match. A watchdog reports done after 600 pad reads with no
+  frame, and the client read times out after 30 s.
+- **RNG.** `rng="offline"` is Melee's own chain, seeded once at frame -123. `rng="online"` is
+  Slippi netplay's per-frame overwrite `((frame+123) << 16) | (seed & 0xFFFF)`; the counter is
+  Slippi's online clock, so it runs ahead across pauses.
+- **Speed.** ~2,200 frames/s per process including the Python round trip, the same as the bare sim.
+
+Validation: `tools/sim_env_check.py` plays a recording's raw controller values (pre-frame physical
+buttons, raw sticks, physical triggers × 140) through the live path with no restore of anything
+after frame -123, and compares every post-frame.
+
+| set | physics-exact |
+|---|---|
+| realtime offline Dolphin, bot vs bot (Doc/Fox, Samus/Link) | 8/8, RNG in step all game |
+| owner netplay, 1v1 (online RNG) | all; the 6 misses of 101 are 4-player games (spawn, teams stock steal unsupported) |
+| `emulator_ss` FFW h2h set | 296/462 |
+
+The h2h misses are a property of those recordings. All 128 non-Ice-Climbers failures begin with
+an RNG desync, while realtime games of the same characters stay in step. **So FFW (`emulator_ss`,
+Fizzi's engine loop) consumes RNG differently from realtime Melee.** The most likely reason is
+draws that happen once per rendered frame; that mechanism is inferred, not checked. All 19
+"physics first" cases are Ice Climbers games (the known ICs divergence).
+
+Not yet: a feature adapter from post-frames to the policy's input tensor (`inference_utils`), a
+multi-env batched runner, savestates/`fork()`, and a template generator (build game info for any
+char/stage pair instead of copying a .slp).

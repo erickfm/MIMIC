@@ -676,6 +676,12 @@ The L-cancel target is **realized avoidable lag** = `max(0, realized_landing_lag
 NOT the binary `post.l_cancel` flag (which counts ledge-cancels/early-hits as
 misses) and NOT the old offset=−4 press proxy (which diverged from the truth).
 
+**Native sim (decomp Melee, no Dolphin)**: `tools/build_native_sim.sh` (run by
+`setup.sh`; builds into gitignored `sim/` — never commit or upload anything there),
+`rlvr/sim/melee_sim.py` (RL env: one game per process, `reset()`/`step(pads)`, ~2.2k fps,
+inputs land on f+1 like Dolphin), `tools/sim_replay_check.py` / `tools/sim_env_check.py`
+(byte-exact fidelity checks vs .slp). Status and limits: `docs/research-notes-2026-10-20b.md`.
+
 **Data**: `tools/slp_to_shards.py` (.slp → v2 .pt shards with
 `target[i] = buttons[i+1]` alignment); `tools/shard_and_upload_ranked.py`
 (ranked .slp archive → HF tarballs).
@@ -908,7 +914,11 @@ references to the slippistats functions used. Past notes:
     (`EnetDisconnected`, enet unserviced > ~20 s) is fixed by the
     `dolphin_actor.py` keepalive thread. See
     `docs/research-notes-2026-06-30.md` (supersedes the FFW claims in
-    `docs/research-notes-2026-05-18.md`).
+    `docs/research-notes-2026-05-18.md`). **RNG caveat (2026-10-20):**
+    FFW does not reproduce realtime Melee's RNG draw sequence — FFW h2h
+    replays desync RNG within ~100s of frames where realtime games stay
+    in step all match (measured with the native sim). Timing/physics
+    canaries are unaffected; don't treat FFW replays as bit-exact.
 
 19. **Netplay runs on the CURRENT Slippi Ishiiruka in `emulator/`** —
     `setup.sh` downloads the latest release at install time (the old vendored
