@@ -140,6 +140,16 @@ else
     echo "  ISO saved to $ISO_PATH"
 fi
 
+# ── 3b. Native (decomp) Melee simulator ─────────────────────────────────────
+# Headless game built from the decomp: the RL simulator (no Dolphin, ~32k fps
+# on 28 cores). Fetched from public upstreams and built locally into sim/
+# (gitignored, never committed or uploaded). Non-fatal: netplay and the
+# Discord bot don't need it.
+echo ""
+echo "── Building native Melee simulator (sim/) ──"
+bash tools/build_native_sim.sh \
+    || echo "  ⚠ Native sim build failed (see sim/build.log). Everything else still works."
+
 # ── 4. Data ─────────────────────────────────────────────────────────────────
 echo ""
 echo "── Setting up training data ──"
