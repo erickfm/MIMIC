@@ -136,8 +136,10 @@ class _Cfg:   # what _make_ctx reads from a model config
 
 class VecSim:
     def __init__(self, templates, policies, n_envs, n_workers, rng="online", seed=0, temperature=1.0,
-                 record_dir=None, max_frames=0, amp=True, compile=True, device="cuda"):
-        """policies: {CHARACTER name: checkpoint dir}. templates: 1v1 .slp paths (cycled over envs)."""
+                 record_dir=None, max_frames=0, amp=True, compile=True, device="cuda", assign=None):
+        """policies: {name: checkpoint dir, or dict(dir=..., char=..., amp=..., compile=...)}; a
+        plain name is the CHARACTER it plays. templates: 1v1 .slp paths (cycled over envs).
+        assign(env, side, char) -> policy name for that slot (default: the character's name)."""
         import torch
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
@@ -146,18 +148,23 @@ class VecSim:
         from rlvr.sim.batch import BatchedPolicy
 
         self.temperature = temperature
+        policies = {k: (v if isinstance(v, dict) else dict(dir=v)) for k, v in policies.items()}
+        assign = assign or (lambda e, side, ch: ch)
         self.envs = []
         n_slots = {ch: 0 for ch in policies}
         for e in range(n_envs):
             t = str(templates[e % len(templates)])
             players = template_players(t)
-            slots = []
-            for port, ch in players:
-                if ch not in policies:
-                    raise ValueError(f"{t}: no policy for {ch}")
-                slots.append(n_slots[ch])
-                n_slots[ch] += 1
-            self.envs.append(dict(template=t, players=players, slots=slots))
+            slots, names = [], []
+            for side, (port, ch) in enumerate(players):
+                name = assign(e, side, ch)
+                if name not in policies:
+                    raise ValueError(f"{t}: no policy {name!r} for {ch}")
+                slots.append(n_slots[name])
+                names.append(name)
+                n_slots[name] += 1
+            self.envs.append(dict(template=t, players=[(port, nm) for (port, _), nm in zip(players, names)],
+                                  chars=[ch for _, ch in players], slots=slots))
         self.slot_env = {ch: np.zeros(n, np.int64) for ch, n in n_slots.items()}
         self.slot_port = {ch: np.zeros(n, np.int64) for ch, n in n_slots.items()}
         for e, env in enumerate(self.envs):
@@ -165,14 +172,15 @@ class VecSim:
                 self.slot_env[ch][s] = e
                 self.slot_port[ch][s] = port
         self.policies, self.feats, ctx_spec = {}, {}, {}
-        for ch, d in policies.items():
+        for ch, pspec in policies.items():
             if n_slots[ch] == 0:
                 continue
+            d = pspec["dir"]
             model, cfg = load_mimic_model(str(Path(d) / "model.pt"), device)
             ctx = _make_ctx(load_inference_context(str(d)), cfg)
             mock = build_mock_frame(ctx)
             self.policies[ch] = BatchedPolicy(model, cfg.max_seq_len, mock, n_slots[ch], device=device,
-                                              amp=amp, compile=compile)
+                                              amp=pspec.get("amp", amp), compile=pspec.get("compile", compile))
             for k, v in mock.items():
                 if k != "self_controller":
                     arr = v[0].numpy()

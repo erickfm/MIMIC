@@ -171,10 +171,12 @@ worker time per step), Ice Climbers, and a template generator.
   Gumbel sampling, offline RNG) against only 6 Dolphin games.
 - Throughput numbers: single runs on this box, not repeated.
 
+- Fast GPU path vs fp32, added later the same day (see "Does bf16 cost strength?" below): action
+  distributions, the Gumbel sampler, and a 300-game same-weights h2h with a same-model control.
+
 **Not tested:**
-- The fast GPU path's *sampling*: Gumbel-max vs `torch.multinomial` was never checked
-  statistically. bf16/compile/graph decisions were never compared to fp32 head by head; the only
-  check is the 48-game canary/win-rate comparison above.
+- A bf16 strength effect smaller than ~7 percentage points (300 games cannot see it; ~1,000 would
+  get to about ±3).
 - Ditto matchups (same character on both sides, two slots per env), any matchup besides Doc vs
   Fox, and more than two policies in one runner.
 - The batched runner under `rng="online"` for fidelity (only benchmarked); templates other than
@@ -191,3 +193,29 @@ worker time per step), Ice Climbers, and a template generator.
   incremental rebuild here).
 - Ice Climbers (diverges), 4-player and teams (spawn, stock steal), and pausing (always disabled).
 - No RL training has run on the sim yet; PPO is not wired to `VecSim`.
+
+## Does bf16 cost strength? (fast path vs the Dolphin inference numerics)
+
+The fast path runs bf16 autocast + `torch.compile` + `forward_last` + Gumbel-max sampling; Dolphin
+inference (`play.py`) runs fp32, full forward, `torch.multinomial`. Same weights throughout.
+
+- **Action distributions**, 6,000 on-policy frames per side (Doc and Fox, 3 games):
+  - `forward_last` in fp32 is exact (total variation ≤ 8e-7).
+  - bf16 + compile: mean total variation 0.0010 on the main stick and 0.0001-0.0005 on the other
+    heads; p99 ≤ 0.007; worst single frame 0.033 (Fox main stick).
+  - Top action agrees on 99.87-100% of frames.
+- **Sampler**: Gumbel-max vs `torch.multinomial`, 2M draws on three distributions. Same distance
+  from the true probabilities; chi-square p = 0.33-0.77.
+- **Head-to-head**: `tools/sim_h2h.py`, Fox ditto, fox-master vs itself, ports alternated, online
+  RNG, 300 games each.
+  - Control, bf16 vs bf16: 151-149, 50.3% [44.7, 56.0], p = 0.95. The rig is fair.
+  - bf16 vs fp32: 144-155 (1 draw), bf16 48.2% [42.6, 53.8], p = 0.56. No detectable effect;
+    a drop larger than ~7 points is ruled out, smaller ones are not.
+
+The model was most likely trained under bf16 autocast (train.py's default; no run script passes
+`--no-amp`, though the checkpoint does not record it). So bf16 inference is, if anything, closer
+to training than fp32. Use: bf16 for rollouts; fp32 for promotion h2h and deployment, as today.
+
+`tools/sim_h2h.py`: sized same-character variant h2h with a Wilson interval and an exact binomial
+p-value (matches scipy; 16-5 → p = 0.0266, as CLAUDE.md quotes). 300 games ≈ 17-30 minutes on one
+box. Variants are `NAME=CKPT_DIR[:fp32|bf16]`; any 1v1 templates are rewritten into dittos.
