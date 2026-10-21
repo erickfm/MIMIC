@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Head-to-head between two variants of one character in the native sim, with statistics.
 
-Variant A and variant B play a ditto. A takes port 1 in even envs and port 2 in odd ones, so
-port advantage cancels. Templates set the stage, rules and costumes: by default 1v1 templates are
-turned into dittos of --char (both players' character bytes rewritten, costumes 0 and 1).
+Variant A and variant B play a ditto. Every template is played equally often in both
+orientations (A on the template's first port, and A on its second), so port and stage effects
+cancel; the envs are a multiple of 2 x templates for that. Each env contributes the same number of
+games (not the first N to finish, which would favour short games). The games are split into two
+passes with the policies registered in opposite orders (A first, then B first), so nothing that
+depends on which policy steps first can favour one side. Templates set the stage, rules and
+costumes: by default 1v1 templates are turned into dittos of --char (both players' character bytes
+rewritten, costumes 0 and 1).
 
 Reports A's record, win rate with a Wilson 95% interval, a two-sided exact binomial p-value
 against 50% (draws excluded), and the mean stock margin. Use a same-model control (A and B
@@ -42,6 +47,35 @@ def make_ditto(src, char, out):
     if k != 2:
         raise ValueError(f"{src}: not a 1v1 template")
     Path(out).write_bytes(d)
+
+
+def lcancel_by_variant(games, envs, names):
+    """Each variant's L-cancel rate over the recorded games: realized avoidable lag (landing-run
+    length minus the move's cancelled floor) == 0, opponent-interrupted landings dropped; the
+    rlvr L-cancel reward's definition. Fox-specific floors (CANCELLED_MIN)."""
+    from rlvr.online.tasks.l_cancel_online import CANCELLED_MIN, DAMAGE_STATES, DEAD_STATES
+    from tools.sim_replay_check import slp_events
+    tally = {n: [0, 0] for n in names}
+    for g in games:
+        if "slp" not in g:
+            continue
+        states = {}
+        for c, p in slp_events(g["slp"]):
+            if c == 0x38 and p[5] == 0:
+                states.setdefault(p[4], []).append(struct.unpack(">H", p[7:9])[0])
+        for port, name in envs[g["env"]]["players"]:
+            st, i = states.get(port, []), 0
+            while i < len(st):
+                if st[i] in CANCELLED_MIN and (i == 0 or st[i - 1] != st[i]):
+                    j = i
+                    while j < len(st) and st[j] == st[i]:
+                        j += 1
+                    if j < len(st) and st[j] not in DEAD_STATES and st[j] not in DAMAGE_STATES:
+                        tally[name][0 if j - i <= CANCELLED_MIN[st[i]] else 1] += 1
+                    i = j
+                else:
+                    i += 1
+    return {n: dict(success=s, miss=m, rate=s / max(1, s + m)) for n, (s, m) in tally.items()}
 
 
 def variant(spec):
@@ -98,28 +132,59 @@ def main():
         out = os.path.join(tmp, src.name)
         make_ditto(src, a.char, out)
         templates.append(out)
-    assign = lambda e, side, ch: (na, nb)[(e + side) % 2]
+    nt = len(templates)
+    envs_n = max(2 * nt, a.envs // (2 * nt) * (2 * nt))   # both orientations of every template
+    if envs_n != a.envs:
+        print(f"--envs {a.envs} -> {envs_n} (a multiple of 2 x {nt} templates)")
+    per_env = math.ceil(a.games / (2 * envs_n))          # games per env per pass
+    # env e uses template e % nt; A's side flips every nt envs, so each template gets both orientations
+    assign = lambda e, side, ch: (na, nb)[(e // nt + side) % 2]
     t0 = time.time()
-    v = VecSim(templates, {na: pa, nb: pb}, a.envs, a.workers, rng=a.rng, seed=a.seed,
-               assign=assign, record_dir=a.record_dir)
-    while len(v.results) < a.games:
-        v.step()
-    games = v.results[:a.games]
-    v.close()
+    games, envs = [], None
+    for order in ((na, nb), (nb, na)):   # pass 2 registers the policies in the opposite order
+        pols = {n: {na: pa, nb: pb}[n] for n in order}
+        rec = os.path.join(a.record_dir, f"pass_{order[0]}_first") if a.record_dir else None
+        v = VecSim(templates, pols, envs_n, a.workers, rng=a.rng, seed=a.seed + len(games),
+                   assign=assign, record_dir=rec)
+        count = [0] * envs_n
+        while min(count) < per_env:
+            n0 = len(v.results)
+            v.step()
+            for r in v.results[n0:]:
+                count[r["env"]] += 1
+        kept = [0] * envs_n
+        for r in v.results:   # each env's first per_env games, in completion order
+            if kept[r["env"]] < per_env:
+                kept[r["env"]] += 1
+                games.append(dict(r, order=f"{order[0]}_first",
+                                  a_side=(r["env"] // nt) % 2, template=r["env"] % nt))
+        envs = v.envs
+        v.close()
     wa = wb = draws = 0
     margin = 0
+    by = {}
     for r in games:
         sa, sb = r["final"][na][0], r["final"][nb][0]
         margin += sa - sb
+        k = (r["template"], r["a_side"])
+        by.setdefault(k, [0, 0, 0])
         if sa > sb:
             wa += 1
+            by[k][0] += 1
         elif sb > sa:
             wb += 1
+            by[k][1] += 1
         else:
             draws += 1
+            by[k][2] += 1
     n = wa + wb
     lo, hi = wilson(wa, n)
-    rep = dict(char=a.char, a=a.a, b=a.b, games=len(games), a_wins=wa, b_wins=wb, draws=draws,
+    lc = lcancel_by_variant(games, envs, (na, nb)) if a.record_dir and a.char == "FOX" else None
+    rep = dict(char=a.char, a=a.a, b=a.b, games=len(games), a_wins=wa, b_wins=wb, draws=draws, lcancel=lc,
+               by_template_side={f"t{t}_aside{sd}": v_ for (t, sd), v_ in sorted(by.items())},
+               by_order={o: [sum(1 for r in games if r["order"] == o and r["final"][na][0] > r["final"][nb][0]),
+                             sum(1 for r in games if r["order"] == o and r["final"][nb][0] > r["final"][na][0])]
+                         for o in (f"{na}_first", f"{nb}_first")},
                a_win_rate=wa / n if n else None, wilson95=[lo, hi], p_two_sided=binom_p_two_sided(wa, n),
                mean_stock_margin_a=margin / len(games), rng=a.rng, seconds=round(time.time() - t0),
                frames=sum(r["frames"] + 123 for r in games))
@@ -127,6 +192,11 @@ def main():
           f"{f' ({draws} draws)' if draws else ''}  {na} win rate {rep['a_win_rate']:.3f} "
           f"[95% {lo:.3f}, {hi:.3f}]  p={rep['p_two_sided']:.3f}  stock margin {rep['mean_stock_margin_a']:+.2f}"
           f"  ({rep['seconds']}s)")
+    print("  by order (A wins, B wins): " + "  ".join(f"{o} {w}-{l}" for o, (w, l) in rep["by_order"].items()))
+    print("  by template/A side (A, B, draws): " + "  ".join(f"{k} {w}-{l}-{d}" for k, (w, l, d) in rep["by_template_side"].items()))
+    if lc:
+        print("  L-cancel: " + "  ".join(f"{n} {d['success']}/{d['success'] + d['miss']} = {100 * d['rate']:.1f}%"
+                                        for n, d in lc.items()))
     if a.out:
         Path(a.out).write_text(json.dumps(dict(report=rep, games=games), indent=1))
 
