@@ -91,6 +91,7 @@ def ppo_update(
     cfg: OnlinePPOConfig = OnlinePPOConfig(),
     device: str = "cuda",
     ref_model=None,
+    extra_loss=None,
 ) -> Dict[str, float]:
     """Run one PPO epoch over the collected episodes.
 
@@ -204,6 +205,12 @@ def ppo_update(
         ) * (end - start)
         total_n += (end - start)
 
+    extra = None
+    if extra_loss is not None:
+        # Optional extra objective (e.g. the sim RL's global KL anchor), added to the same step.
+        extra = extra_loss()
+        if extra.requires_grad:   # a hook may backpropagate itself (e.g. in chunks) and return the value
+            extra.backward()
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
 
@@ -217,4 +224,5 @@ def ppo_update(
         "grad_norm": float(grad_norm),
         "n_frames": total_n,
         "n_episodes": len(episodes),
+        "extra_loss": float(extra.item()) if extra is not None else None,
     }

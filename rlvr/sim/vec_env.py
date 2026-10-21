@@ -39,6 +39,9 @@ def template_players(slp):
     raise ValueError(f"{slp}: no Game Start")
 
 
+INFO_FIELDS = ("frame", "action", "on_ground", "hitstun", "valid")
+
+
 class _Shm:
     """A named shared numpy array (created by the parent, attached by workers)."""
 
@@ -63,6 +66,7 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
 
     feats = {(ch, k): _Shm(*s[:2], name=s[2]) for (ch, k), s in spec["feats"].items()}
     pads = _Shm(*spec["pads"][:2], name=spec["pads"][2])
+    info = _Shm(*spec["info"][:2], name=spec["info"][2])
     ctxs = {ch: _make_ctx(load_inference_context(d), _Cfg(n)) for ch, (d, n) in spec["ctx"].items()}
     rng = random.Random(opts["seed"] * 1000 + wid)
     builds = (build_frame, build_frame_p2)
@@ -85,6 +89,11 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
             s["writer"].add(frame)
         gs = s["parser"].parse(frame)
         s["gs"] = gs
+        for side, (port, _) in enumerate(envs[e]["players"]):   # RL bookkeeping (INFO_FIELDS)
+            ps = gs.players.get(port + 1)
+            if ps is not None:
+                info.a[e, side] = (frame.index, ps.action.value, float(ps.on_ground),
+                                   ps.hitstun_frames_left, 1.0)
         for side, (port, ch) in enumerate(envs[e]["players"]):
             fr = builds[side](gs, None, ctxs[ch])
             row = envs[e]["slots"][side]
@@ -176,7 +185,12 @@ class VecSim:
             if n_slots[ch] == 0:
                 continue
             d = pspec["dir"]
-            model, cfg = load_mimic_model(str(Path(d) / "model.pt"), device)
+            # pspec["model"]: a live model object (e.g. the RL learner, so optimizer steps reach
+            # the rollout policy in place); otherwise loaded from the checkpoint dir.
+            if "model" in pspec:
+                model, cfg = pspec["model"], pspec["cfg"]
+            else:
+                model, cfg = load_mimic_model(str(Path(d) / "model.pt"), device)
             ctx = _make_ctx(load_inference_context(str(d)), cfg)
             mock = build_mock_frame(ctx)
             self.policies[ch] = BatchedPolicy(model, cfg.max_seq_len, mock, n_slots[ch], device=device,
@@ -187,7 +201,12 @@ class VecSim:
                     self.feats[(ch, k)] = _Shm((n_slots[ch],) + arr.shape, arr.dtype)
             ctx_spec[ch] = (str(d), cfg.n_controller_combos)
         self.pads = _Shm((n_envs, 32), np.uint8)
-        spec = dict(feats={k: v.spec() for k, v in self.feats.items()}, pads=self.pads.spec(), ctx=ctx_spec)
+        # Per env and side, this frame's (frame index, action state, on_ground, hitstun frames,
+        # valid): what RL episode tracking needs, without a second parse in the parent.
+        self.info = _Shm((n_envs, 2, len(INFO_FIELDS)), np.float32)
+        self.on_decide = None   # hook(policy_name, (S, 4) head indices, BatchedPolicy) per step
+        spec = dict(feats={k: v.spec() for k, v in self.feats.items()}, pads=self.pads.spec(),
+                    info=self.info.spec(), ctx=ctx_spec)
         opts = dict(rng=rng, seed=seed, record_dir=record_dir, max_frames=max_frames)
         if record_dir:
             os.makedirs(record_dir, exist_ok=True)
@@ -211,6 +230,7 @@ class VecSim:
             resets += r
             self.results += done
         rs = set(resets)
+        self.last_resets = rs   # envs whose current frame is the first of a new episode
         for ch, pol in self.policies.items():
             pol.reset([s for s, e in enumerate(self.slot_env[ch]) if e in rs])
 
@@ -220,6 +240,8 @@ class VecSim:
         for ch, pol in self.policies.items():
             idx = pol.step({k: self.feats[(c, k)].a for (c, k) in self.feats if c == ch},
                            temperature=self.temperature)
+            if self.on_decide is not None:
+                self.on_decide(ch, idx, pol)
             from rlvr.sim.batch import pads_from_indices
             p = pads_from_indices(idx)
             for s in range(len(p)):
@@ -241,6 +263,6 @@ class VecSim:
             p.join(timeout=10)
             if p.is_alive():
                 p.kill()
-        for s in list(self.feats.values()) + [self.pads]:
+        for s in list(self.feats.values()) + [self.pads, self.info]:
             s.shm.close()
             s.shm.unlink()

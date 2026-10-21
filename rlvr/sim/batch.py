@@ -100,7 +100,9 @@ class BatchedPolicy:
         b = self.buf["self_controller"]
         b[:, :-1].copy_(b[:, 1:].clone())
         b[:, -1].copy_(self._controller())
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp):
+        # cache_enabled=False: required when this runs inside CUDA-graph capture (PyTorch's graph
+        # docs); with the cache on, the cast weights live in memory the graph can later overwrite.
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp, cache_enabled=False):
             preds = self.forward(self.buf)
         if "cond_sample" in preds:   # --cond-heads: sampled in order inside the heads
             idx = preds["cond_sample"][:, -1]
