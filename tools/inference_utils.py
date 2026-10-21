@@ -495,6 +495,14 @@ def _safe_sample(logits, temperature: float = 1.0,
     return int(torch.multinomial(probs / s, 1).item())
 
 
+def set_cond_temperature(model, temperature):
+    """For --cond-heads models, which sample inside forward: their sampling temperature.
+    A no-op for other models."""
+    heads = getattr(getattr(model, "_orig_mod", model), "heads", None)
+    if getattr(heads, "cond", False):
+        heads.sample_temperature = float(temperature)
+
+
 def decode_and_press(ctrl, preds, prev_sent, temperature=1.0, top_k=0, top_p=0.0):
     """Decode model predictions, press controller, return updated prev_sent.
 
@@ -504,16 +512,24 @@ def decode_and_press(ctrl, preds, prev_sent, temperature=1.0, top_k=0, top_p=0.0
 
     Returns: (prev_sent dict, pressed list, btn_names list)
     """
-    main_idx = _safe_sample(preds["main_xy"][0, -1], temperature, top_k, top_p)
+    # --cond-heads models sample their heads in order inside forward (each conditioned on the
+    # earlier samples); use those samples instead of drawing each head independently here. Their
+    # temperature is model.heads.sample_temperature (set_cond_temperature).
+    cond = preds.get("cond_sample")
+    if cond is not None and (top_k or top_p):
+        raise ValueError("top-k / top-p decoding is not implemented for --cond-heads models")
+    if cond is not None:
+        cond = [int(v) for v in cond[0, -1]]   # (main, c, shoulder, button)
+    main_idx = cond[0] if cond else _safe_sample(preds["main_xy"][0, -1], temperature, top_k, top_p)
     mx = float(HAL_STICK_CLUSTERS_37[main_idx][0])
     my = float(HAL_STICK_CLUSTERS_37[main_idx][1])
 
-    shldr_idx = _safe_sample(preds["shoulder_val"][0, -1], temperature, top_k, top_p)
+    shldr_idx = cond[2] if cond else _safe_sample(preds["shoulder_val"][0, -1], temperature, top_k, top_p)
     shldr = [0.0, 0.4, 1.0][shldr_idx]
 
     n_cdir = preds["c_dir_logits"].size(-1)
     if n_cdir == 9:
-        c_idx = _safe_sample(preds["c_dir_logits"][0, -1], temperature, top_k, top_p)
+        c_idx = cond[1] if cond else _safe_sample(preds["c_dir_logits"][0, -1], temperature, top_k, top_p)
         cx = float(HAL_CSTICK_CLUSTERS_9[c_idx][0])
         cy = float(HAL_CSTICK_CLUSTERS_9[c_idx][1])
     else:
@@ -522,7 +538,7 @@ def decode_and_press(ctrl, preds, prev_sent, temperature=1.0, top_k=0, top_p=0.0
                   3: (0.0, 0.5), 4: (1.0, 0.5)}
         cx, cy = _C_DIR.get(dir_idx, (0.5, 0.5))
 
-    btn_idx = _safe_sample(preds["btn_logits"][0, -1], temperature, top_k, top_p)
+    btn_idx = cond[3] if cond else _safe_sample(preds["btn_logits"][0, -1], temperature, top_k, top_p)
     n_btn = preds["btn_logits"].size(-1)
 
     # Analog sticks

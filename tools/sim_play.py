@@ -37,7 +37,7 @@ def template_players(slp):
 def play_match(job):
     import torch
     from inference_utils import (PlayerState, build_frame, build_frame_p2, decode_and_press,
-                                 load_inference_context, load_mimic_model)
+                                 load_inference_context, load_mimic_model, set_cond_temperature)
     from play import _make_ctx
     from rlvr.sim.controller import SimController
     from rlvr.sim.gamestate import SlippiParser, SlpWriter
@@ -52,6 +52,7 @@ def play_match(job):
     for (port, char), build in zip(players, (build_frame, build_frame_p2)):
         ckpt_dir = policies[char]
         model, cfg = load_mimic_model(str(Path(ckpt_dir) / "model.pt"), device)
+        set_cond_temperature(model, temperature)
         ctx = _make_ctx(load_inference_context(str(ckpt_dir)), cfg)
         sides.append(dict(port=port, char=char, build=build, ctrl=SimController(),
                           state=PlayerState(model, cfg.max_seq_len, device, ctx=ctx), ctx=ctx))

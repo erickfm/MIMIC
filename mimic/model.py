@@ -81,6 +81,10 @@ class ModelConfig:
     lean_features: bool             = False  # drop nana/projectiles/nana-flags
     mimic_minimal_features: bool    = False  # drop ECB/speeds/hitlag from numeric
     mimic_controller_encoding: bool = False  # one-hot controller feedback (stick clusters + button combos)
+    # Conditional heads (--cond-heads): each mimic head is conditioned on the one-hot CLASS of the
+    # earlier heads (the true class in training, the sampled class at inference) instead of their
+    # detached logits, so the four heads model the joint distribution. Same parameter shapes.
+    cond_heads: bool                = False
     n_controller_combos: int        = 5       # number of button combo classes (from controller_combos.json)
 
     # Legacy hal_* fields — kept for checkpoint backwards compatibility.
@@ -139,6 +143,12 @@ MODEL_PRESETS = {
                          num_c_dirs=9),
     "mimic-learned":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=180, pos_enc="learned",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    # The production mimic block with RoPE instead of Shaw relpos and nothing else changed (the
+    # mimic-rope* presets below use the generic block, whose extra dropout sites confound them).
+    "mimic-rope-matched": dict(d_model=512, nhead=8, num_layers=6, dim_feedforward=2048,
+                         dropout=0.2, max_seq_len=180, pos_enc="mimic_rope",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
     "mimic-rope":   dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
@@ -396,6 +406,39 @@ class CausalSelfAttentionRelPos(nn.Module):
         return self.resid_dropout(self.c_proj(y))
 
 
+class CausalSelfAttentionMimicRoPE(nn.Module):
+    """The mimic block's attention with RoPE instead of Shaw relpos (pos_enc="mimic_rope").
+
+    Same c_attn / c_proj projections and the same two dropout sites as CausalSelfAttentionRelPos
+    (attention weights, residual), so a mimic-rope-matched model differs from mimic only in how
+    position enters attention. With no additive bias, attention runs as one fused SDPA kernel
+    (FlashAttention) instead of the explicit FP32 Q@K^T + Srel."""
+
+    def __init__(self, n_embd: int, n_head: int, dropout: float = 0.0, rope_theta: float = 10000.0):
+        super().__init__()
+        assert n_embd % n_head == 0
+        self.c_attn = nn.Linear(n_embd, 3 * n_embd)
+        self.c_proj = nn.Linear(n_embd, n_embd)
+        self.n_head = n_head
+        self.hs = n_embd // n_head
+        self.attn_p = dropout
+        self.resid_dropout = nn.Dropout(dropout)
+        self.register_buffer("rope_freqs", _build_rope_freqs(self.hs, rope_theta), persistent=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, L, D = x.size()
+        q, k, v = self.c_attn(x).split(D, dim=2)
+        q = q.view(B, L, self.n_head, self.hs).transpose(1, 2)
+        k = k.view(B, L, self.n_head, self.hs).transpose(1, 2)
+        v = v.view(B, L, self.n_head, self.hs).transpose(1, 2)
+        angles = torch.outer(torch.arange(L, device=x.device, dtype=self.rope_freqs.dtype), self.rope_freqs)
+        q, k = _apply_rope(q, k, angles.cos()[None, None], angles.sin()[None, None])
+        y = Fn.scaled_dot_product_attention(q, k, v, is_causal=True,
+                                            dropout_p=self.attn_p if self.training else 0.0)
+        y = y.transpose(1, 2).contiguous().view(B, L, D)
+        return self.resid_dropout(self.c_proj(y))
+
+
 class MimicTransformerBlock(nn.Module):
     """HAL's pre-norm Transformer block with relative-position attention.
     Supports modern components (RMSNorm, SwiGLU) via config flags."""
@@ -406,9 +449,14 @@ class MimicTransformerBlock(nn.Module):
         use_swiglu = getattr(cfg, 'use_swiglu', False)
         Norm = RMSNorm if use_rmsnorm else nn.LayerNorm
         self.ln_1 = Norm(cfg.d_model)
-        self.self_attn = CausalSelfAttentionRelPos(
-            n_embd=cfg.d_model, n_head=cfg.nhead,
-            block_size=1024, dropout=cfg.dropout)
+        if cfg.pos_enc == "mimic_rope":
+            self.self_attn = CausalSelfAttentionMimicRoPE(
+                n_embd=cfg.d_model, n_head=cfg.nhead, dropout=cfg.dropout,
+                rope_theta=getattr(cfg, "rope_theta", 10000.0))
+        else:
+            self.self_attn = CausalSelfAttentionRelPos(
+                n_embd=cfg.d_model, n_head=cfg.nhead,
+                block_size=1024, dropout=cfg.dropout)
         self.ln_2 = Norm(cfg.d_model)
         if use_swiglu:
             self.mlp = SwiGLU(cfg.d_model, cfg.dim_feedforward, cfg.dropout)
@@ -741,6 +789,16 @@ class PredictionHeads(nn.Module):
         return torch.sigmoid(btn_logits) >= self.btn_threshold
 
 
+def _cond_sample(logits: torch.Tensor, temperature: float) -> torch.Tensor:
+    """One class per position from softmax(logits / T) via Gumbel-max (argmax when T <= 0 or the
+    logits are not finite): the cond heads' inference sampler, CUDA-graph capturable."""
+    lg = torch.nan_to_num(logits.float(), nan=-1e9, posinf=1e9, neginf=-1e9)
+    if temperature <= 0:
+        return lg.argmax(dim=-1)
+    u = torch.rand_like(lg).clamp_(1e-20, 1.0)
+    return (lg / temperature - torch.log(-torch.log(u))).argmax(dim=-1)
+
+
 class MimicPredictionHeads(nn.Module):
     """HAL-style prediction heads: single-label buttons, combined shoulder, LayerNorm.
 
@@ -757,8 +815,11 @@ class MimicPredictionHeads(nn.Module):
 
     def __init__(self, d_model: int, n_stick_clusters: int = 63,
                  n_shoulder_bins: int = 3, n_cdir: int = 5,
-                 n_btn_classes: int = 5):
+                 n_btn_classes: int = 5, cond: bool = False):
         super().__init__()
+        self.cond = cond
+        # Inference sampling temperature for cond heads (they sample inside forward).
+        self.sample_temperature = 1.0
         self.n_stick_clusters = n_stick_clusters
         self.n_shoulder_bins = n_shoulder_bins
         self.n_btn_classes = n_btn_classes
@@ -779,7 +840,10 @@ class MimicPredictionHeads(nn.Module):
         self.main_head     = _head(d_model + shldr_out + cdir_out, main_out)
         self.btn_head      = _head(d_model + shldr_out + cdir_out + main_out, btn_out)
 
-    def forward(self, h: torch.Tensor, btn_targets: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+    def forward(self, h: torch.Tensor, btn_targets: Optional[torch.Tensor] = None,
+                cond_classes: Optional[tuple] = None) -> Dict[str, torch.Tensor]:
+        if self.cond:
+            return self._forward_cond(h, cond_classes)
         shoulder = self.shoulder_head(h)
         ctx = shoulder.detach()
         cdir = self.cdir_head(torch.cat([h, ctx], dim=-1))
@@ -794,6 +858,32 @@ class MimicPredictionHeads(nn.Module):
             c_dir_logits=cdir,
             btn_logits=btn,         # (B, T, 5) single-label logits
         )
+
+    def _forward_cond(self, h, cond_classes):
+        """Conditional chain shoulder -> c -> main -> buttons. cond_classes = (shoulder, c, main)
+        class tensors (B, T) in training / val (teacher forcing: the loss is the joint NLL). None
+        at inference: each head is sampled (Gumbel-max at self.sample_temperature; argmax when
+        <= 0) and its one-hot fed to the next; the samples are returned as "cond_sample"
+        (B, T, 4) in (main, c, shoulder, button) order."""
+        oh = lambda idx, n: Fn.one_hot(idx.long(), n).to(h.dtype)
+        n_s, n_c = self.shoulder_head[-1].out_features, self.cdir_head[-1].out_features
+        n_m = self.main_head[-1].out_features
+        sampling = cond_classes is None
+        shoulder = self.shoulder_head(h)
+        s_idx = _cond_sample(shoulder, self.sample_temperature) if sampling else cond_classes[0]
+        ctx = oh(s_idx, n_s)
+        cdir = self.cdir_head(torch.cat([h, ctx], dim=-1))
+        c_idx = _cond_sample(cdir, self.sample_temperature) if sampling else cond_classes[1]
+        ctx = torch.cat([ctx, oh(c_idx, n_c)], dim=-1)
+        main = self.main_head(torch.cat([h, ctx], dim=-1))
+        m_idx = _cond_sample(main, self.sample_temperature) if sampling else cond_classes[2]
+        ctx = torch.cat([ctx, oh(m_idx, n_m)], dim=-1)
+        btn = self.btn_head(torch.cat([h, ctx], dim=-1))
+        out = dict(main_xy=main, shoulder_val=shoulder, c_dir_logits=cdir, btn_logits=btn)
+        if sampling:
+            b_idx = _cond_sample(btn, self.sample_temperature)
+            out["cond_sample"] = torch.stack([m_idx, c_idx, s_idx, b_idx], dim=-1)
+        return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -843,7 +933,7 @@ class FramePredictor(nn.Module):
         else:
             self.pos_emb = None  # relpos / rope / alibi have no separate pos_emb
 
-        use_relpos_block = (cfg.pos_enc == "relpos")
+        use_relpos_block = cfg.pos_enc in ("relpos", "mimic_rope")   # the mimic block
         if use_relpos_block:
             self.blocks = nn.ModuleList([MimicTransformerBlock(cfg) for _ in range(cfg.num_layers)])
         elif cfg.pos_enc == "rope_nope":
@@ -866,6 +956,7 @@ class FramePredictor(nn.Module):
                 n_shoulder_bins=3,  # 3-class combined shoulder (LOW/MID/HIGH)
                 n_cdir=cfg.num_c_dirs,
                 n_btn_classes=cfg.n_controller_combos if cfg.mimic_controller_encoding else 5,
+                cond=getattr(cfg, "cond_heads", False),
             )
         else:
             self.heads = PredictionHeads(
@@ -904,7 +995,8 @@ class FramePredictor(nn.Module):
             nn.init.normal_(module.weight, std=0.02)
 
     def forward(self, frames: Dict[str, torch.Tensor],
-                btn_targets: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
+                btn_targets: Optional[torch.Tensor] = None,
+                cond_classes: Optional[tuple] = None) -> Dict[str, torch.Tensor]:
         x = self.encoder(frames)                         # (B, T, d_model)
         if self.pos_emb is not None:
             T = x.size(1)
@@ -912,6 +1004,8 @@ class FramePredictor(nn.Module):
         for blk in self.blocks:
             x = blk(x)
         x = self.final_norm(x)                           # (B, T, d_model)
+        if cond_classes is not None:
+            return self.heads(x, btn_targets=btn_targets, cond_classes=cond_classes)
         return self.heads(x, btn_targets=btn_targets)    # all T positions
 
 

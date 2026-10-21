@@ -63,7 +63,7 @@ import melee  # noqa: E402
 from tools.inference_utils import (  # noqa: E402
     load_inference_context, load_mimic_model,
     build_frame, build_frame_p2,
-    PlayerState, decode_and_press,
+    PlayerState, decode_and_press, set_cond_temperature,
 )
 
 
@@ -197,6 +197,7 @@ def run(
 
     log.info("loading A (policy): %s", ckpt)
     model_a, cfg_a = load_mimic_model(str(ckpt), device)
+    set_cond_temperature(model_a, temperature)
     ctx_base = load_inference_context(data_dir)
     ctx_a = _make_ctx(ctx_base, cfg_a)
 
@@ -206,6 +207,7 @@ def run(
     else:
         log.info("loading B (policy): %s", ckpt_b)
         model_b, cfg_b = load_mimic_model(str(ckpt_b), device)
+        set_cond_temperature(model_b, opp_temperature if opp_temperature is not None else temperature)
         # B uses its OWN character's norm/combos when --opponent-data-dir is
         # given (each policy is normalized with its own stats — required for
         # fair cross-character h2h). Falls back to A's data_dir otherwise.

@@ -102,8 +102,11 @@ class BatchedPolicy:
         b[:, -1].copy_(self._controller())
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp):
             preds = self.forward(self.buf)
-        idx = torch.stack([_gumbel_sample(preds[h][:, -1].float(), self.inv_temp, self.greedy)
-                           for h in HEADS], 1)
+        if "cond_sample" in preds:   # --cond-heads: sampled in order inside the heads
+            idx = preds["cond_sample"][:, -1]
+        else:
+            idx = torch.stack([_gumbel_sample(preds[h][:, -1].float(), self.inv_temp, self.greedy)
+                               for h in HEADS], 1)
         self.last_idx.copy_(idx)
 
     @torch.no_grad()
@@ -115,6 +118,12 @@ class BatchedPolicy:
             self.new[k].copy_(self.stage[k], non_blocking=True)
         self.greedy.fill_(temperature <= 0)
         self.inv_temp.fill_(1.0 / temperature if temperature > 0 else 1.0)
+        heads = self.model.heads
+        if getattr(heads, "cond", False):
+            # cond heads sample inside the captured graph at a baked-in temperature
+            if self.graph is not None and heads.sample_temperature != float(temperature):
+                raise ValueError("a --cond-heads BatchedPolicy cannot change temperature after capture")
+            heads.sample_temperature = float(temperature)
         if not self.use_graph:
             self._device_step()
         elif self.graph is None:

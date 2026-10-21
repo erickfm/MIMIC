@@ -230,7 +230,20 @@ def _combine_shoulder_targets(l_bin, r_bin, shoulder_centers):
 _CDIR_5_TO_9 = torch.tensor([0, 4, 3, 2, 1], dtype=torch.long)
 
 
-def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5):
+def _cond_head_classes(targets, shoulder_centers, n_cdir):
+    """(shoulder, c_dir, main) target classes, exactly as _compute_loss_hal derives its CE
+    targets: what --cond-heads conditions the later heads on in training."""
+    l_bin, r_bin = targets["l_bin"].long(), targets["r_bin"].long()
+    shldr = (_combine_shoulder_targets(l_bin, r_bin, shoulder_centers)
+             if shoulder_centers is not None else l_bin)
+    cdir_tgt = targets["c_dir"].long()
+    cdir = cdir_tgt.argmax(dim=-1)
+    if n_cdir == 9 and cdir_tgt.size(-1) == 5:
+        cdir = _CDIR_5_TO_9.to(cdir.device)[cdir]
+    return (shldr, cdir, targets["main_cluster"].long())
+
+
+def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5, lite=False):
     """HAL-style loss: plain CE on all heads, single-label buttons, combined shoulder."""
     main_pred = preds["main_xy"].float()
     shldr_pred = preds["shoulder_val"].float()
@@ -271,6 +284,12 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5):
     else:
         btn_single = _multi_hot_to_single_label(btn_tgt)
     loss_btn = F.cross_entropy(btn_pred.reshape(-1, btn_pred.size(-1)), btn_single.reshape(-1))
+    task_losses = (loss_main, loss_shldr, torch.tensor(0.0, device=loss_main.device), loss_cdir, loss_btn)
+    if lite:
+        # --lean-metrics on a non-log step: only the loss terms, still on the GPU (no syncs).
+        metrics = {"loss_main": loss_main.detach(), "loss_l": loss_shldr.detach(), "loss_r": 0.0,
+                   "loss_cdir": loss_cdir.detach(), "loss_btn": loss_btn.detach()}
+        return metrics, task_losses
 
     # Metrics
     main_flat = main_pred.reshape(-1, n_main)
@@ -320,14 +339,13 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5):
         "main_top1_acc":    main_top1,
         "shoulder_top1_acc": shldr_top1,
     }
-    task_losses = (loss_main, loss_shldr, torch.tensor(0.0, device=loss_main.device), loss_cdir, loss_btn)
     return metrics, task_losses
 
 
 def compute_loss(preds, targets, btn_loss_type="focal", plain_ce=False, hal_mode=False,
-                  shoulder_centers=None, n_cdir=5):
+                  shoulder_centers=None, n_cdir=5, lite=False):
     if hal_mode:
-        return _compute_loss_hal(preds, targets, shoulder_centers, n_cdir=n_cdir)
+        return _compute_loss_hal(preds, targets, shoulder_centers, n_cdir=n_cdir, lite=lite)
 
     c_logits = preds["c_dir_logits"].float()
     btn_pred = preds["btn_logits"].float()
@@ -525,7 +543,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               n_heads_override=None, hal_mode=False, lean_features=False,
               hal_minimal_features=False,
               hal_controller_encoding=False, n_controller_combos=5,
-              use_input_gate=False):
+              use_input_gate=False, cond_heads=False):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -568,6 +586,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["n_shoulder_bins"] = n_shoulder_bins
     if use_input_gate:
         overrides["use_input_gate"] = True
+    if cond_heads:
+        overrides["cond_heads"] = True
     seq_len = overrides.pop("max_seq_len", SEQUENCE_LENGTH)
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
@@ -646,6 +666,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           character_filter: int = None,
           random_perspective: bool = False,
           input_gate_l1: float = 0.0,
+          cond_heads: bool = False,
+          wd_fix: bool = False,
+          lean_metrics: bool = False,
           optimizer: str = "adamw",
           muon_lr: float = 0.02,
           soap_lr: float = 3e-3,
@@ -822,6 +845,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     else:
         _shoulder_centers_for_decode = None
         n_shoulder_bins = len(shoulder_centers_np)
+    def _cc(t):   # --cond-heads: true earlier-head classes to condition on (None otherwise)
+        if not cond_heads:
+            return None
+        sc = _shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers
+        return _cond_head_classes(t, sc, cfg.num_c_dirs)
     _shoulder_centers = torch.tensor(shoulder_centers_np if not hal_minimal_features else [0.0, 0.4, 1.0],
                                      dtype=torch.float32, device=DEVICE)
     _stick_centers = torch.tensor(stick_centers_np, dtype=torch.float32, device=DEVICE)
@@ -846,7 +874,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            hal_minimal_features=hal_minimal_features,
                            hal_controller_encoding=hal_controller_encoding,
                            n_controller_combos=_n_combos,
-                           use_input_gate=(input_gate_l1 > 0))
+                           use_input_gate=(input_gate_l1 > 0),
+                           cond_heads=cond_heads)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={val_interval}  "
@@ -856,7 +885,22 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     if optimizer == "adamw":
         decay, no_decay = [], []
-        for n, p in model.named_parameters():
+        if wd_fix:
+            # --wd-fix: no weight decay on biases, any norm layer's gains, embedding tables or the
+            # relpos Er tables, chosen by module type. The default name rule below only catches
+            # biases and final_norm: block norms are ln_1/ln_2, head norms heads.*_head.0.
+            from mimic.model import RMSNorm
+            skip = set()
+            for mod in model.modules():
+                if isinstance(mod, (nn.LayerNorm, RMSNorm, nn.Embedding)):
+                    skip.update(id(q) for q in mod.parameters(recurse=False))
+            for n, p in model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                (no_decay if (n.endswith("bias") or id(p) in skip or n.endswith(".Er"))
+                          else decay).append(p)
+            _log(f"  --wd-fix: weight decay on {len(decay)} tensors, none on {len(no_decay)}")
+        for n, p in ([] if wd_fix else model.named_parameters()):
             if not p.requires_grad:
                 continue
             (no_decay if n.endswith("bias") or "norm" in n.lower()
@@ -1086,6 +1130,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                  "main_top1_acc", "shoulder_top1_acc", "grad_norm"]
     _run_sums = {k: 0.0 for k in _AVG_KEYS}
     _run_ct = 0
+    _run_key_ct = {}
     # Rolling window of train total loss for val/train ratio. 100 steps of
     # smoothing is enough to damp batch noise without lagging behind the
     # current training regime — short enough that the ratio still moves
@@ -1131,7 +1176,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
                     vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
                 with autocast("cuda", dtype=AMP_DTYPE):
-                    vpreds = _raw_model(vs)
+                    vpreds = _raw_model(vs, cond_classes=_cc(vt))
                 vm, vtl = compute_loss(vpreds, vt, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
                                        hal_mode=hal_mode,
                                        shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
@@ -1182,9 +1227,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
                 btn_tgt = target.get("btns", target.get("btns_float"))
                 with autocast("cuda", dtype=AMP_DTYPE):
-                    preds = model(state, btn_targets=btn_tgt if not hal_mode else None)
+                    preds = model(state, btn_targets=btn_tgt if not hal_mode else None,
+                                  cond_classes=_cc(target))
                 metrics, task_losses = compute_loss(
                     preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
+                    lite=lean_metrics and not (step % log_interval == 0 or step == 1),
                     hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
                     n_cdir=cfg.num_c_dirs)
             except torch.cuda.OutOfMemoryError:
@@ -1257,8 +1304,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         _run_sums["total"]     += total_loss_val
         _run_sums["grad_norm"] += grad_norm
         for _mk in _AVG_KEYS:
-            if _mk not in ("total", "grad_norm"):
+            if _mk not in ("total", "grad_norm") and _mk in metrics:
                 _run_sums[_mk] += metrics[_mk]
+                _run_key_ct[_mk] = _run_key_ct.get(_mk, 0) + 1
         _run_ct += 1
 
         if step % log_interval == 0 or step == 1:
@@ -1266,7 +1314,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             sps = step / elapsed
 
             if _run_ct > 0:
-                avg_log = {f"avg/{k}": _run_sums[k] / _run_ct for k in _AVG_KEYS}
+                # Per-key counts: under --lean-metrics the F1/accuracy keys are only computed on
+                # log steps, the loss terms every step (summed on the GPU, read here).
+                avg_log = {f"avg/{k}": float(_run_sums[k]) / (_run_ct if k in ("total", "grad_norm")
+                                                               else max(1, _run_key_ct.get(k, 0)))
+                           for k in _AVG_KEYS}
                 avg_log["perf/step_per_sec"]    = sps
                 avg_log["perf/samples_per_sec"] = sps * BATCH_SIZE * world_size * grad_accum_steps
                 avg_log["train/lr"] = optimiser.param_groups[0]["lr"]
@@ -1281,6 +1333,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 wandb.log(avg_log, step=step)
                 _run_sums = {k: 0.0 for k in _AVG_KEYS}
                 _run_ct = 0
+                _run_key_ct = {}
 
             _log(
                 f"[{step:5d}/{max_steps}] "
@@ -1332,7 +1385,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                             dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
                             vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
                         with autocast("cuda", dtype=AMP_DTYPE):
-                            vpreds = _raw_model(vs)  # unwrapped — no DDP collectives during eval
+                            vpreds = _raw_model(vs, cond_classes=_cc(vt))  # unwrapped — no DDP collectives during eval
                         vm, vtl = compute_loss(vpreds, vt,
                                                btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
                                                hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
@@ -1472,7 +1525,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                             dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
                             vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
                         with autocast("cuda", dtype=AMP_DTYPE):
-                            vpreds = _raw_model(vs)  # unwrapped — no DDP collectives during eval
+                            vpreds = _raw_model(vs, cond_classes=_cc(vt))  # unwrapped — no DDP collectives during eval
                         vm, vtl = compute_loss(vpreds, vt,
                                                btn_loss_type=cfg.btn_loss, plain_ce=plain_ce)
                         batch_total = sum(t.item() for t in vtl)
@@ -1584,6 +1637,17 @@ if __name__ == "__main__":
                         help="Wandb group for related runs (e.g. 'sweep-v1')")
     parser.add_argument("--num-layers", type=int, default=None,
                         help="Override number of transformer layers")
+    parser.add_argument("--cond-heads", action="store_true",
+                        help="Condition each mimic head on the one-hot class of the earlier heads "
+                             "(true class in training, sampled at inference) instead of their "
+                             "detached logits, so the heads model the joint distribution.")
+    parser.add_argument("--wd-fix", action="store_true",
+                        help="AdamW: exclude norm gains, embeddings and relpos Er tables from "
+                             "weight decay (by module type). Default keeps the historical rule.")
+    parser.add_argument("--lean-metrics", action="store_true",
+                        help="Compute F1/accuracy metrics only on log steps and keep the loss terms "
+                             "on the GPU between them (fewer GPU->CPU syncs per step). Logged F1s "
+                             "become log-step snapshots; training is unchanged.")
     parser.add_argument("--input-gate-l1", type=float, default=0.0,
                         help="L1 penalty on per-input-column sigmoid gate in "
                              "the encoder's projection. >0 enables the gate; "
@@ -1796,6 +1860,9 @@ if __name__ == "__main__":
         character_filter=args.character_filter,
         random_perspective=args.random_perspective,
         input_gate_l1=args.input_gate_l1,
+        cond_heads=args.cond_heads,
+        wd_fix=args.wd_fix,
+        lean_metrics=args.lean_metrics,
         optimizer=args.optimizer,
         muon_lr=args.muon_lr,
         soap_lr=args.soap_lr,
