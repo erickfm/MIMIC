@@ -7,7 +7,8 @@ set -euo pipefail
 # Source: Hero88go/melee-unlocked (GPL-3.0) pinned by
 # tools/patches/melee-unlocked-commit.txt, its doldecomp/melee submodule, and
 # our changes (tools/patches/melee-unlocked-mimic.patch, GPL-3.0): the Linux
-# --replay host (fidelity checks) and --env mode (rlvr/sim/melee_sim.py). Everything is fetched from the public upstreams at build time and
+# --replay host (fidelity checks) and --env mode (rlvr/sim/melee_sim.py), plus a
+# small hook in the decomp itself (tools/patches/melee-decomp-mimic.patch, --no-render). Everything is fetched from the public upstreams at build time and
 # built against this machine's own melee.iso. NOTHING under sim/ may be
 # committed or uploaded: it holds the decompiled game code and compiled
 # binaries of it (see docs/research-notes-2026-10-20b.md). sim/ is gitignored.
@@ -24,6 +25,7 @@ SRC="$SIM_DIR/melee-unlocked"
 TC="$SIM_DIR/toolchain"
 COMMIT=$(cat "$REPO_DIR/tools/patches/melee-unlocked-commit.txt")
 PATCH="$REPO_DIR/tools/patches/melee-unlocked-mimic.patch"
+DECOMP_PATCH="$REPO_DIR/tools/patches/melee-decomp-mimic.patch"
 ISO="$REPO_DIR/melee.iso"
 EXE="$SRC/build-linux/port/linux/melee_linux"
 
@@ -59,7 +61,7 @@ if [[ ! -d "$SRC/.git" ]]; then
     git -C "$SRC" remote add origin https://github.com/Hero88go/melee-unlocked.git
 fi
 # A changed pin or patch starts again from clean upstream sources (builds are kept, incremental).
-WANT="$COMMIT $(sha1sum "$PATCH" | cut -d' ' -f1)"
+WANT="$COMMIT $(cat "$PATCH" "$DECOMP_PATCH" | sha1sum | cut -d' ' -f1)"
 if [[ "$(cat "$SIM_DIR/.applied" 2>/dev/null)" != "$WANT" ]]; then
     if [[ "$(git -C "$SRC" rev-parse HEAD 2>/dev/null)" != "$COMMIT" ]]; then
         git -C "$SRC" fetch -q --depth 1 origin "$COMMIT"
@@ -70,6 +72,7 @@ if [[ "$(cat "$SIM_DIR/.applied" 2>/dev/null)" != "$WANT" ]]; then
     git -C "$SRC/sourceport/extern/melee" checkout -q -f . && git -C "$SRC/sourceport/extern/melee" clean -fdxq
     python3 "$SRC/tools/prepare_native_sources.py" 2>&1 | grep -v "has type 100755"   # their native patch to the decomp
     git -C "$SRC" apply "$PATCH"
+    git -C "$SRC/sourceport/extern/melee" apply "$DECOMP_PATCH"
     echo "$WANT" > "$SIM_DIR/.applied"
     echo "  Sources at ${COMMIT:0:7} + MIMIC patch."
 else

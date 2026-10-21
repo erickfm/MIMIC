@@ -1,6 +1,7 @@
 MIMIC changes to Melee Unlocked (Linux native host + game shim):
   --replay / --replay-dump: Slippi replay playback for fidelity checks (tools/sim_replay_check.py)
-  --env-template / --env-fds / --env-seed: live-match RL env mode (rlvr/sim/melee_sim.py)
+  --env-template / --env-fds / --env-seed / --env-online-rng: live-match RL env mode (rlvr/sim/melee_sim.py)
+  --no-audio / --no-render: skip audio mixing / the render pass (speed; see melee_sim.py)
 
 Applies to Hero88go/melee-unlocked at the commit in tools/patches/melee-unlocked-commit.txt.
 Partly ported from that project's port/app/source_host.cpp, so this patch is a derived work of
@@ -27,7 +28,7 @@ index 98f2225..2c72bb8 100644
  # Keep the host PIE well away from the fixed console RAM and game image.
  set_target_properties(melee_linux PROPERTIES POSITION_INDEPENDENT_CODE ON)
 diff --git a/port/linux/host_services.cpp b/port/linux/host_services.cpp
-index 26670fc..c8afce9 100644
+index 26670fc..ca94352 100644
 --- a/port/linux/host_services.cpp
 +++ b/port/linux/host_services.cpp
 @@ -12,6 +12,7 @@
@@ -38,7 +39,15 @@ index 26670fc..c8afce9 100644
  #endif
  
  #include <algorithm>
-@@ -364,6 +365,7 @@ int32_t h_vi_idle() {
+@@ -277,6 +278,7 @@ void pump_events() {
+ }
+ 
+ void audio_tick() {
++  if (cfg.no_audio) return;   // --no-audio: no AX mixing; never touches game state (measured)
+   if (!audio.running || !audio.buffer || !audio.bytes || audio.awaiting || count.ticks < audio.next) return;
+   const uint64_t period = uint64_t(audio.bytes) * MU_TB_HZ / (uint64_t(audio.rate) * 4);
+   audio.next += std::max<uint64_t>(period, 1);
+@@ -364,6 +366,7 @@ int32_t h_vi_idle() {
  
  void h_pad_read(MuPadStatus out[4]) {
    if (!out) return;
@@ -46,7 +55,7 @@ index 26670fc..c8afce9 100644
    pump_events();
    if (input_script.active()) {
      MuStatePod state{};
-@@ -822,6 +824,7 @@ MuHostApi make_api() {
+@@ -822,6 +825,7 @@ MuHostApi make_api() {
    h.display_options=h_zero_u32; h.music_volume=h_music; h.native_draw_identity=h_zero_i32;
    h.mod_flags=h_zero_u32; h.slippi_command=h_slippi; h.resim_phase=h_resim;
    h.hud_scales=h_hud_scales; h.vi_idle_step=h_vi_idle;
@@ -55,10 +64,10 @@ index 26670fc..c8afce9 100644
    h.native_pose_capture_enabled=h_pose_enabled;
    h.native_pose_snapshot=h_pose_snapshot;
 diff --git a/port/linux/host_services.h b/port/linux/host_services.h
-index 9aa5fea..42b6f43 100644
+index 9aa5fea..a954401 100644
 --- a/port/linux/host_services.h
 +++ b/port/linux/host_services.h
-@@ -33,6 +33,13 @@ struct Config {
+@@ -33,6 +33,17 @@ struct Config {
    uint64_t time_base = 0; // GameCube epoch, 40.5 MHz ticks since 2000-01-01.
    bool has_match = false;
    MuMatchOverride match{};
@@ -68,12 +77,16 @@ index 9aa5fea..42b6f43 100644
 +  std::string env_template;
 +  int env_in = -1, env_out = -1;
 +  bool has_env_seed = false, env_online_rng = false;
++  // --no-audio: skip audio mixing (exact: audio never touches game state). --no-render: skip the
++  // scene loop's render pass (exact under Slippi online RNG; offline it shifts the RNG stream,
++  // since some effects draw random numbers while rendering).
++  bool no_audio = false, no_render = false;
 +  uint32_t env_seed = 0;
  };
  
  struct Counters {
 diff --git a/port/linux/main.cpp b/port/linux/main.cpp
-index ccca855..308ac34 100644
+index ccca855..7ebe289 100644
 --- a/port/linux/main.cpp
 +++ b/port/linux/main.cpp
 @@ -1,6 +1,7 @@
@@ -84,7 +97,7 @@ index ccca855..308ac34 100644
  #include <cerrno>
  #include <cstdio>
  #include <cstdlib>
-@@ -159,6 +160,18 @@ int main(int argc, char** argv) {
+@@ -159,6 +160,20 @@ int main(int argc, char** argv) {
        else if (arg == "--log-file") config.log_path = next();
        else if (arg == "--card-dir") config.card_dir = next();
        else if (arg == "--input-script") config.input_script = next();
@@ -99,11 +112,13 @@ index ccca855..308ac34 100644
 +        config.env_in = std::stoi(v.substr(0, comma)); config.env_out = std::stoi(v.substr(comma + 1));
 +      }
 +      else if (arg == "--env-online-rng") config.env_online_rng = true;
++      else if (arg == "--no-audio") config.no_audio = true;
++      else if (arg == "--no-render") { config.no_render = true; setenv("MELEE_SKIP_RENDER", "1", 1); }
 +      else if (arg == "--env-seed") { config.has_env_seed = true; config.env_seed = uint32_t(number(next(), "env seed")); }
        else if (arg == "--state-digest") digest_path = next();
        else if (arg == "--frames") {
          const auto frames = number(next(), "frame count");
-@@ -203,6 +216,14 @@ int main(int argc, char** argv) {
+@@ -203,6 +218,14 @@ int main(int argc, char** argv) {
      if (!config.headless) throw std::runtime_error("this build has no graphics; rebuild with MELEE_LINUX_GRAPHICS=ON");
  #endif
      std::string error;
@@ -565,7 +580,7 @@ index 2b6a70b..aa451fc 100644
      if (follower && !resync) {
          emit_pre_frame(fp);
 diff --git a/sourceport/game/shim/mu_replay_abi.c b/sourceport/game/shim/mu_replay_abi.c
-index b6cb7bf..a141e85 100644
+index b6cb7bf..fd64d42 100644
 --- a/sourceport/game/shim/mu_replay_abi.c
 +++ b/sourceport/game/shim/mu_replay_abi.c
 @@ -45,6 +45,12 @@ int mu_replay_abi_resync(void)
@@ -581,3 +596,19 @@ index b6cb7bf..a141e85 100644
  int mu_replay_abi_ps_frozen_toggle(void)
  {
      return mu_replay_abi_active() ? start_info->ps_frozen_toggle : 0;
+@@ -145,3 +151,15 @@ MU_EXCLUSIONS(replay_abi,
+               MU_EXCLUDE(frame_data),
+               MU_EXCLUDE(frame_fetched))
+ #endif
++
++/* --no-render (the host sets MELEE_SKIP_RENDER=1): the scene loop skips its render pass. */
++char* getenv(const char* name);
++int mu_skip_render(void)
++{
++    static int v = -1;
++    if (v < 0) {
++        const char* e = getenv("MELEE_SKIP_RENDER");
++        v = e && e[0] == '1';
++    }
++    return v;
++}

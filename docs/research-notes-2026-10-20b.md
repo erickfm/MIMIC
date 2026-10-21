@@ -114,3 +114,80 @@ draws that happen once per rendered frame; that mechanism is inferred, not check
 Not yet: a feature adapter from post-frames to the policy's input tensor (`inference_utils`), a
 multi-env batched runner, savestates/`fork()`, and a template generator (build game info for any
 char/stage pair instead of copying a .slp).
+
+## RL env, milestone 2: policies in the loop, and speed
+
+**Policy I/O, exact by construction.**
+- `rlvr/sim/gamestate.py` runs libmelee's own Console event parser over sim frames; the template
+  .slp supplies Event Payloads and Game Start. Against libmelee's parse of the original .slp:
+  10,742 frames × 20 PlayerState fields, 0 mismatches.
+- `rlvr/sim/controller.py` converts libmelee controller calls to raw pads with libmelee's own
+  fix_analog formulas: sticks `round((v-.5)*160)`, triggers `round(v*140)`, and digital L/R
+  forces that trigger fully. Each is measured on realtime Slippi Dolphin with 65-point sweeps.
+- `SlpWriter` writes sim games as .slp; they give the same canaries as the original Dolphin games.
+
+**Batched runner** (`rlvr/sim/vec_env.py` + `rlvr/sim/batch.py`). K CPU workers step and parse M
+sims each (features into shared memory); the GPU advances each character's policy for all of its
+(env, side) slots in one CUDA-graph replay (window shift + `forward_last` + Gumbel-max sampling).
+- The fed-back controller feature equals the one-hot of the sampled indices for all 6,993 head
+  combinations.
+- Batched (argmax, fp32) vs the per-env PlayerState + decode_and_press loop: 4 games × 1,623
+  frames, 0 differing bytes.
+- Behavior vs realtime Dolphin, Doc vs Fox: sim 48 games vs Dolphin 6. Center-stick 35.2/35.9 vs
+  35.9/35.8; L-cancel 68/90 vs 64/84 (Dolphin n = 107/246 landings); Fox wins 43-5 vs 5-1.
+
+**Speed ladder** (one RTX 4090, i9-14900KF):
+
+| change | effect |
+|---|---|
+| `--no-audio` (AX mixing) | sim 2.95× (exact: audio never touches game state) |
+| `--no-render`, used for `rng="online"` | sim 8.5× total, ~16.8k frames per CPU-second. Exact online; shifts the offline RNG (some effects draw random numbers while rendering) |
+| `forward_last`, last position only | GPU 1.25× (same math, ≤2e-6) |
+| bf16 + torch.compile | GPU ~4× vs fp32 full forward: ~10k env-frames/s per policy at batch 64 |
+| CUDA graph + Gumbel-max sampling | step launch overhead removed |
+| **end to end**, 64 envs / 16 workers, self-play | **3,581 env-frames/s ≈ 60× realtime**; the Dolphin RL harness managed 5.7× |
+
+The GPU is the bottleneck: every frame recomputes the full 180-frame window (~7 GFLOP per policy).
+An exact KV cache needs the model trained with sliding-window attention over longer sequences;
+that would cut per-frame inference ~180× and is a model change needing h2h validation. Other
+items left: overlapping CPU and GPU by stepping two env groups alternately (hides the ~5 ms of
+worker time per step), Ice Climbers, and a template generator.
+
+## Test status (read before relying on any of this)
+
+**Tested, with the evidence:**
+- Native sim vs Slippi Dolphin, replay path (inputs injected, RNG restored per frame): current-
+  Slippi 1v1, 465/466 games physics-exact across 23 characters except Ice Climbers.
+- Live pad path (`--env`), raw recorded pads, no restore after frame -123: realtime offline Dolphin
+  8/8 (Doc/Fox, Samus/Link), RNG in step all game; owner's netplay 1v1s all exact (online RNG).
+- `--no-audio` exact on those same sets; `--no-render` exact only under online RNG (offline 6/8).
+- GameState adapter: **one** replay, 10,742 frames × 20 fields, 0 mismatches.
+- SlpWriter: **one** replay; peppi reads it and canaries match the original.
+- Controller formulas on realtime official Slippi Dolphin: main/C stick X/Y and the L trigger
+  (65-point sweeps); shoulder 0.4/1.0 with and without digital L; digital R; X; Y.
+- Batched runner vs the per-env reference: **4 games × 1,623 frames, argmax, fp32, no compile,
+  Doc vs Fox only, offline RNG**: 0 differing bytes.
+- Behavior vs Dolphin: **one matchup** (Doc vs Fox), 48 sim games (bf16 + compile + CUDA graph +
+  Gumbel sampling, offline RNG) against only 6 Dolphin games.
+- Throughput numbers: single runs on this box, not repeated.
+
+**Not tested:**
+- The fast GPU path's *sampling*: Gumbel-max vs `torch.multinomial` was never checked
+  statistically. bf16/compile/graph decisions were never compared to fp32 head by head; the only
+  check is the 48-game canary/win-rate comparison above.
+- Ditto matchups (same character on both sides, two slots per env), any matchup besides Doc vs
+  Fox, and more than two policies in one runner.
+- The batched runner under `rng="online"` for fidelity (only benchmarked); templates other than
+  the 6 offline Doc/Fox Dolphin games.
+- Episode edge cases in the runner: timeouts, sudden death, ties, `max_frames`, the watchdog.
+- Failure handling: a crashed sim or worker probably hangs or raises; nothing catches it, and
+  `/dev/shm` segments leak on abnormal exit.
+- `forward_last` / `BatchedPolicy` on anything but `mimic`-preset 7-class checkpoints
+  (fox-master, doc). SwiGLU, pos_emb and 5-class (legacy) models are unsupported or unverified.
+- Controller: Z, D-pad, START, analog R sweep.
+- GameState adapter and SlpWriter beyond one replay, items/projectiles (the sim emits no item
+  events, so `gs.projectiles` is always empty), stage events (FoD platforms, Whispy, Stadium).
+- `tools/build_native_sim.sh` with the decomp patch on a fresh machine (tested only as an
+  incremental rebuild here).
+- Ice Climbers (diverges), 4-player and teams (spawn, stock steal), and pausing (always disabled).
+- No RL training has run on the sim yet; PPO is not wired to `VecSim`.

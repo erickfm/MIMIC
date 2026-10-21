@@ -1,0 +1,37 @@
+MIMIC hook in the decomp's scene loop (doldecomp/melee as pinned by melee-unlocked):
+--no-render skips the render pass (see rlvr/sim/melee_sim.py for when that is exact).
+Applied inside sourceport/extern/melee by tools/build_native_sim.sh, after melee-unlocked's
+own prepare_native_sources.py.
+
+--- a/src/melee/gm/gmscene.c
++++ b/src/melee/gm/gmscene.c
+@@ -27,6 +27,9 @@
+ #include <sysdolphin/baselib/leak.h>
+ #include <sysdolphin/baselib/perf.h>
+ #include <sysdolphin/baselib/sobjlib.h>
++#ifdef MU_NATIVE
++int mu_skip_render(void);
++#endif
+ 
+ /* 479D30 */ static HSD_GObjLibInitDataType gobj_init_data;
+ /* 479D58 */ static struct gm_80479D58_t gm_80479D58;
+@@ -467,6 +470,9 @@
+         }
+ 
+         lb_800195D0();
++#ifdef MU_NATIVE
++        if (!mu_skip_render()) {
++#endif
+         GXInvalidateVtxCache();
+         GXInvalidateTexAll();
+         HSD_StartRender(HSD_RP_SCREEN);
+@@ -475,6 +481,9 @@
+         HSD_PerfSetDrawTime();
+         HSD_VICopyXFBAsync(HSD_RP_SCREEN);
+ #ifdef MU_NATIVE
++        }
++#endif
++#ifdef MU_NATIVE
+         mu_hud_report();   /* player tags, damage and stocks for the host's overlays */
+ #endif
+         if (temp_r25->unk_4 != -2U) {

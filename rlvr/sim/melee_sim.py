@@ -97,7 +97,7 @@ def to_frames(events):
 
 class MeleeSim:
     def __init__(self, template_slp, exe=DEFAULT_EXE, iso=DEFAULT_ISO, seed=None, rng="offline",
-                 log_path=None, timeout=30.0):
+                 audio=False, render=None, log_path=None, timeout=30.0):
         self.template = str(Path(template_slp).resolve())
         self.exe = Path(exe).resolve()
         self.iso = str(Path(iso).resolve())
@@ -108,6 +108,12 @@ class MeleeSim:
             raise ValueError(f"rng must be 'offline' or 'online', not {rng!r}")
         self.seed = seed
         self.rng = rng
+        # Speed: audio mixing never touches game state (exact without it, ~3x faster). Skipping the
+        # render pass is exact under online RNG (overwritten every frame) but shifts the offline
+        # RNG stream (some effects draw random numbers while rendering), so by default it is
+        # skipped only for rng="online" (~8.5x faster with audio off). Measured 2026-10-20.
+        self.audio = audio
+        self.render = (rng != "online") if render is None else render
         self.log_path = log_path
         self.timeout = timeout   # seconds a single read may wait before the sim counts as hung
         self.proc = None
@@ -129,6 +135,10 @@ class MeleeSim:
             cmd += ["--env-seed", str(self.seed)]
         if self.rng == "online":
             cmd += ["--env-online-rng"]
+        if not self.audio:
+            cmd += ["--no-audio"]
+        if not self.render:
+            cmd += ["--no-render"]
         if self.log_path:
             cmd += ["--log-file", str(self.log_path)]
         # cwd: the checkout root, where the host finds port/slippi_sys_playback.
@@ -144,9 +154,17 @@ class MeleeSim:
 
     def step(self, pads):
         """Send the pads for the next frame (4 Pads, ports 1-4); returns that frame."""
+        self.send(pads)
+        return self.recv()
+
+    # step() split in two, so one controller can send to many sims before collecting any: the
+    # games then advance in parallel.
+    def send(self, pads):
         if self.done:
             raise RuntimeError("step() after the match ended; call reset()")
-        self._w.write(b"".join(p.pack() for p in pads))
+        self._w.write(pads if isinstance(pads, (bytes, bytearray)) else b"".join(p.pack() for p in pads))
+
+    def recv(self):
         return self._recv()
 
     def _read(self, n):
