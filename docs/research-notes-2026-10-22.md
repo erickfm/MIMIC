@@ -147,6 +147,40 @@ wall-clock (val every 1% of steps).
 | 64 | fp32 | 22.6 → 1.14 ms | 22.4 → 0.82 ms (27×) |
 | 64 | bf16 | 13.4 → 1.40 ms | 13.3 → 0.61 ms (22×) |
 
+### Multi-character pretraining (AdamW; pretrain on Falco/Marth/Sheik, 60 shards / 33M frames)
+
+| Run | Fox steps | Last-frame Δ vs Fox scratch (6.5k) |
+|---|---|---|
+| p1-C-mcpre-s1 (no Fox data) | 0 | zero-shot Fox val 0.9101 |
+| p1-C-mcft-s1 | 6,500 | −0.0004 ± 0.0027 (tie; −0.012 to −0.017 ahead mid-run) |
+| p1-C-mcft2k-s1 | 2,000 | +0.0039 ± 0.0022 |
+
+Pretraining on other characters speeds up early Fox training but doesn't change where a full
+run ends. A 2k-step fine-tune (31% of the Fox steps) lands within ~0.004 of a full scratch run,
+about seed noise: for the 22-character retrain, one shared pretrain plus short per-character
+fine-tunes would be ~2.5× less total compute, at a small possible cost.
+
+### Sliding-window models in the sim (`rlvr/sim/batch.py`)
+
+`BatchedPolicy` now streams window models (cfg.attn_window > 0) through `RelPosKVCache`, one
+frame per step, with per-env clocks; an episode starts from an empty cache (a training chunk
+that starts at a game's first frame), not mock-filled windows. Full-causal models keep the
+180-window path. Checks: 8 envs × 400 real val frames, greedy, own decisions fed back, one env
+reset mid-stream — 0 of 3,200 decisions differ from a full-history forward (eager and CUDA
+graph). Speed, 64 envs, bf16, CUDA graph, idle GPU: 6.62 → 0.98 ms per step (9.7k → 65.5k
+env-frames/s). A 96-game same-model sim h2h with a window model ran clean (49–47).
+
+### Training/inference mismatches (owner rule: inference must match training)
+
+- **Window models trained on 720-frame chunks never see more than 719 frames of history**, but
+  their receptive field (and streaming inference mid-game) reaches 1,075. They still tied when
+  scored at the full receptive field, but the setup doesn't match: train on chunks longer than
+  the receptive field (`p1-C-muonswa1440-s1`, 1,440-frame chunks, was running at writing).
+- **Current production models are pre-filled with 179 mock frames at game start**
+  (`PlayerState.push_frame`, HAL convention), while training windows never contain mock frames
+  (a window at a game's start just has less history). This affects about the first 3 s of
+  every game. Not changed here; fix at the next retrain.
+
 ## Code (all off by default; the default path is bit-identical to the previous HEAD)
 
 - `--relpos-impl {fp32,bf16,sdpa,flex}`: training-only kernel for the relpos attention; eval and
@@ -164,8 +198,6 @@ wall-clock (val every 1% of steps).
 
 - Single seed everywhere; proxy scale only. Nothing here is h2h-validated in play except the
   step budget.
-- Multi-character pretraining (Falco/Marth/Sheik, 60 shards, 33M frames → Fox fine-tune at
-  6.5k and 2k steps) was still running when this was written.
 - Fox all-ranks pretraining wasn't testable: only metadata is local.
 - SDPA relpos was only tested on the (now destroyed) box.
 
@@ -174,6 +206,6 @@ wall-clock (val every 1% of steps).
 - Production candidate: Muon + window 180 on 720-frame chunks at a reduced step budget, then
   h2h vs the champion (fp32, Dolphin canaries).
 - Convert existing production characters to the sliding window by fine-tuning (full data,
-  lower lr) to get KV-cache inference without a retrain; wire `RelPosKVCache` into the sim
-  runner and `tools/inference_utils.py`.
+  lower lr, chunks longer than the receptive field); then wire `RelPosKVCache` into
+  `tools/inference_utils.py` / `play.py` (the sim runner already streams window models).
 - Use 2k-step warm starts from the champion for shape-compatible research changes.

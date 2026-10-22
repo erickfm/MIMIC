@@ -254,7 +254,11 @@ enables the exact streaming KV cache in `mimic/kv_cache.py`, 22×
 cheaper batched inference) — not default because the Dolphin
 inference path (`tools/inference_utils.py`) still recomputes a
 180-frame window, which mismatches a window-trained model; wire the
-KV cache in first. `--relpos-impl sdpa` (~14% faster step, equal val
+KV cache in first. The sim runner (`rlvr/sim/batch.py`) already
+streams window models through the cache automatically (exact; 6.8×
+faster sim policy step at 64 envs). Train window models on chunks
+longer than the receptive field (`num_layers × (W−1) + 1` = 1,075 for
+W=180), e.g. `--seq-len 1440`, so training matches streaming. `--relpos-impl sdpa` (~14% faster step, equal val
 on one run; its bf16 sibling diverged, so watch a long run before
 relying on it). Score sliding-window models with
 `tools/eval_last_frame.py`, not train.py's window-averaged val.

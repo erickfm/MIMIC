@@ -14,12 +14,18 @@ and capturable in a CUDA graph. top-k / top-p are not implemented here.
 
 Speed: the per-step work (shift the windows, forward_last, sample) is captured once in a CUDA
 graph and replayed (graph=True), so a step costs a few launches instead of hundreds.
+
+Sliding-window models (cfg.attn_window > 0) stream instead: one frame per step through
+mimic/kv_cache.RelPosKVCache, which is exactly the computation they were trained with. Their
+episodes start from an empty cache (a training chunk that starts at a game's first frame), not
+from mock-filled windows.
 """
 import numpy as np
 import torch
 import torch.nn.functional as Fn
 
 from mimic.features import HAL_CSTICK_CLUSTERS_9, HAL_STICK_CLUSTERS_37
+from mimic.kv_cache import RelPosKVCache
 from rlvr.sim.fast_policy import forward_last
 
 HEADS = ("main_xy", "c_dir_logits", "shoulder_val", "btn_logits")
@@ -66,8 +72,12 @@ class BatchedPolicy:
                     for k, v in self.mock.items()}
         self.last_idx = torch.zeros(n_envs, 4, dtype=torch.long, device=device)
         self.last_idx[:, 3] = BTN_NONE
+        raw = getattr(model, "_orig_mod", model)
+        self.kv = (RelPosKVCache(raw, n_envs, dtype=torch.bfloat16 if amp else None)
+                   if getattr(raw.cfg, "attn_window", 0) > 0 else None)
         fwd = lambda b: forward_last(self.model, b)
-        self.forward = torch.compile(fwd, mode="max-autotune-no-cudagraphs", dynamic=False) if compile else fwd
+        self.forward = (torch.compile(fwd, mode="max-autotune-no-cudagraphs", dynamic=False)
+                        if compile and self.kv is None else fwd)
         # Static inputs for the captured step: this frame's features (host-pinned staging + device).
         self.stage = {k: torch.zeros((n_envs,) + tuple(v.shape), dtype=v.dtype).pin_memory()
                       for k, v in self.mock.items() if k != "self_controller"}
@@ -82,8 +92,11 @@ class BatchedPolicy:
         if len(env_ids) == 0:
             return
         e = torch.as_tensor(env_ids, device=self.device)
-        for k, v in self.mock.items():
-            self.buf[k][e] = v
+        if self.kv is not None:
+            self.kv.reset(e)
+        else:
+            for k, v in self.mock.items():
+                self.buf[k][e] = v
         self.last_idx[e] = torch.tensor([0, 0, 0, BTN_NONE], device=self.device)
 
     def _controller(self):
@@ -91,8 +104,23 @@ class BatchedPolicy:
         return torch.cat([Fn.one_hot(i[:, 0], 37), Fn.one_hot(i[:, 1], 9),
                           Fn.one_hot(i[:, 3], 7), Fn.one_hot(i[:, 2], 3)], dim=1).float()
 
+    def _state(self):
+        """Mutable device state: what warm-up / capture steps must restore."""
+        st = {f"buf.{k}": v for k, v in self.buf.items()}
+        st["last_idx"] = self.last_idx
+        if self.kv is not None:
+            st.update(kv_K=self.kv.K, kv_V=self.kv.V, kv_t=self.kv.t)
+        return st
+
     def _device_step(self):
         """Everything after the host-to-device copy: in-place, fixed addresses (graph-capturable)."""
+        if self.kv is not None:   # stream this frame through the KV cache
+            frame = {k: v.unsqueeze(1).to(self.buf[k].dtype) for k, v in self.new.items()}
+            frame["self_controller"] = self._controller().unsqueeze(1)
+            with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp, cache_enabled=False):
+                preds = self.kv.step(frame)
+            self._sample(preds)
+            return
         for k, v in self.new.items():
             b = self.buf[k]
             b[:, :-1].copy_(b[:, 1:].clone())
@@ -104,6 +132,9 @@ class BatchedPolicy:
         # docs); with the cache on, the cast weights live in memory the graph can later overwrite.
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp, cache_enabled=False):
             preds = self.forward(self.buf)
+        self._sample(preds)
+
+    def _sample(self, preds):
         if "cond_sample" in preds:   # --cond-heads: sampled in order inside the heads
             idx = preds["cond_sample"][:, -1]
         else:
@@ -131,20 +162,18 @@ class BatchedPolicy:
         elif self.graph is None:
             s = torch.cuda.Stream()   # warm up (compile, cuBLAS handles) off the capture
             s.wait_stream(torch.cuda.current_stream())
-            snapshot = {k: v.clone() for k, v in self.buf.items()}, self.last_idx.clone()
+            snapshot = {k: v.clone() for k, v in self._state().items()}
             with torch.cuda.stream(s):
                 for _ in range(3):
                     self._device_step()
             torch.cuda.current_stream().wait_stream(s)
-            for k, v in snapshot[0].items():   # the warm-up steps must not count
-                self.buf[k].copy_(v)
-            self.last_idx.copy_(snapshot[1])
+            for k, v in self._state().items():   # the warm-up steps must not count
+                v.copy_(snapshot[k])
             self.graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(self.graph):
                 self._device_step()
-            for k, v in snapshot[0].items():   # nor the capture itself
-                self.buf[k].copy_(v)
-            self.last_idx.copy_(snapshot[1])
+            for k, v in self._state().items():   # nor the capture itself
+                v.copy_(snapshot[k])
             self.graph.replay()
         else:
             self.graph.replay()
