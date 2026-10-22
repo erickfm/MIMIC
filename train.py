@@ -527,7 +527,6 @@ def get_dataloader(ds, shuffle=True, persistent=True, sampler=None):
 def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               encoder_type=None, d_intra=None, dropout_override=None,
               k_query=None, intra_layers=None, scaled_emb=False,
-              pos_enc=None, attn_variant=None, n_kv_heads=None,
               btn_loss=None, no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None, n_shoulder_bins=None,
               n_heads_override=None, hal_mode=False, lean_features=False,
@@ -549,12 +548,6 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["encoder_nlayers"] = intra_layers
     if scaled_emb:
         overrides["scaled_emb"] = True
-    if pos_enc:
-        overrides["pos_enc"] = pos_enc
-    if attn_variant:
-        overrides["attn_variant"] = attn_variant
-    if n_kv_heads:
-        overrides["n_kv_heads"] = n_kv_heads
     if btn_loss:
         overrides["btn_loss"] = btn_loss
     overrides["no_opp_inputs"] = no_opp_inputs
@@ -641,7 +634,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           encoder_type: str = None, d_intra: int = None,
           dropout_override: float = None, k_query: int = None,
           intra_layers: int = None, scaled_emb: bool = False,
-          pos_enc: str = None, attn_variant: str = None, n_kv_heads: int = None,
           btn_loss: str = None,
           no_opp_inputs: bool = True,
           no_self_inputs: bool = False,
@@ -839,8 +831,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            encoder_type=encoder_type, d_intra=d_intra,
                            dropout_override=dropout_override, k_query=k_query,
                            intra_layers=intra_layers, scaled_emb=scaled_emb,
-                           pos_enc=pos_enc, attn_variant=attn_variant,
-                           n_kv_heads=n_kv_heads,
                            btn_loss=btn_loss, no_opp_inputs=no_opp_inputs,
                            no_self_inputs=no_self_inputs,
                            n_stick_clusters=n_stick_clusters,
@@ -1658,14 +1648,6 @@ if __name__ == "__main__":
                         help="Number of intra-frame attention layers (0=no attn)")
     parser.add_argument("--scaled-emb", action="store_true",
                         help="Scale embedding dim by vocab size (emb = max(16, card^0.25*16))")
-    parser.add_argument("--pos-enc",   type=str, default=None,
-                        choices=["learned", "rope", "sinusoidal", "alibi"],
-                        help="Positional encoding type")
-    parser.add_argument("--attn-variant", type=str, default=None,
-                        choices=["standard", "sliding", "gqa"],
-                        help="Attention variant")
-    parser.add_argument("--n-kv-heads", type=int, default=None,
-                        help="Number of KV heads for GQA (default: nhead)")
     parser.add_argument("--clusters-path", type=str, default="data/full/stick_clusters.json",
                         help="Path to stick_clusters.json")
     parser.add_argument("--btn-loss", type=str, default=None,
@@ -1795,9 +1777,6 @@ if __name__ == "__main__":
         k_query=args.k_query,
         intra_layers=args.intra_layers,
         scaled_emb=args.scaled_emb,
-        pos_enc=args.pos_enc,
-        attn_variant=args.attn_variant,
-        n_kv_heads=args.n_kv_heads,
         btn_loss=args.btn_loss,
         no_opp_inputs=not args.opp_inputs,
         no_self_inputs=not args.self_inputs,

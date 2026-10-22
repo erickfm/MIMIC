@@ -38,13 +38,9 @@ def forward_last(model, frames):
         raise NotImplementedError("forward_last supports full-causal models only; stream "
                                   "sliding-window models with mimic/kv_cache.RelPosKVCache")
     x = model.encoder(frames)
-    if model.pos_emb is not None:
-        x = x + model.pos_emb[:, :x.size(1)]
     for blk in model.blocks[:-1]:
         x = blk(x)
     blk = model.blocks[-1]
-    if not hasattr(blk.self_attn, "Er"):   # not Shaw relpos (e.g. mimic-rope-matched): whole block
-        return model.heads(model.final_norm(blk(x)[:, -1:]))
     h = x[:, -1:] + _last_query_attention(blk.self_attn, blk.ln_1(x))
     if blk._use_swiglu:
         h = h + blk.mlp(blk.ln_2(h))

@@ -2,7 +2,7 @@
 # model.py ─ MIMIC next-frame predictor
 # ------------------------------------
 # 1. Hyper-parameter bundle
-# 2. Causal self-attention & TransformerBlock
+# 2. Shaw relative-position attention & the mimic transformer block
 # 3. PredictionHeads
 # 4. FramePredictor (Encoder ➜ Transformer ➜ Heads)
 # ------------------------------------
@@ -47,16 +47,8 @@ class ModelConfig:
     # sequence length
     max_seq_len: int     = 60
 
-    # positional encoding
-    pos_enc: str         = "rope"
-    rope_theta: float    = 10000.0      # base frequency for RoPE
-    rope_learnable_freqs: bool = False  # make per-dimension RoPE frequencies trainable
-    xpos_scale_base: float = 0.0       # xPos decay base (0 = default 512)
-
-
-    # attention variant
-    attn_variant: str    = "standard"
-    n_kv_heads: int      = 0
+    # positional encoding: Shaw relative-position attention is the only one implemented
+    pos_enc: str         = "relpos"
 
     # modern components
     use_rmsnorm: bool    = False
@@ -131,8 +123,6 @@ class ModelConfig:
 
 
 MODEL_PRESETS = {
-    "tiny":         dict(d_model=256,  nhead=4,  num_layers=4, dim_feedforward=1024),
-    "small":        dict(d_model=512,  nhead=8,  num_layers=4, dim_feedforward=2048),
     # MIMIC's canonical config (bootstrapped from HAL's GPTv5Controller, then diverged).
     "mimic":        dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
@@ -147,10 +137,7 @@ MODEL_PRESETS = {
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    # "Simply wider" variants of `mimic`: ONLY d_model scaled (nhead held at
-    # head_dim=64, FFN held at the 4x ratio, depth=6 unchanged). For the
-    # does-extra-width-help width sweep (512 baseline / 768 / 1024). Everything
-    # else (relpos, GELU, LN, dropout, seq_len, categorical dims) is identical.
+    # Wider `mimic`: only d_model scaled (head_dim 64, 4x FFN, depth 6); for scale-up.
     "mimic-w768":   dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
@@ -159,212 +146,20 @@ MODEL_PRESETS = {
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "mimic-learned":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="learned",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    # The production mimic block with RoPE instead of Shaw relpos and nothing else changed (the
-    # mimic-rope* presets below use the generic block, whose extra dropout sites confound them).
-    "mimic-rope-matched": dict(d_model=512, nhead=8, num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="mimic_rope",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-rope":   dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="rope",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-rope-lt":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="rope", rope_theta=1000.0,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-rope-lf":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="rope", rope_learnable_freqs=True,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-flex":   dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="flexbias",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-ropeflex":dict(d_model=512, nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="rope+flexbias",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-rope-deep":dict(d_model=512,nhead=8,  num_layers=12, dim_feedforward=2048,
-                         dropout=0.1, max_seq_len=180, pos_enc="rope",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
+    # Larger scale-up presets (SwiGLU / deeper), e.g. for a big distillation teacher.
     "mimic-xl":     dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
                          dropout=0.1, max_seq_len=180, pos_enc="relpos",
                          use_swiglu=True,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-xl-rms": dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
-                         dropout=0.1, max_seq_len=180, pos_enc="relpos",
-                         use_swiglu=True, use_rmsnorm=True,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
     "mimic-xxl":    dict(d_model=1024, nhead=16, num_layers=12, dim_feedforward=4096,
                          dropout=0.1, max_seq_len=180, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
-    "mimic-xpos":   dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.1, max_seq_len=180, pos_enc="xpos", xpos_scale_base=128.0,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-selrope":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.1, max_seq_len=180, pos_enc="selective_rope",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-ropenope":dict(d_model=512, nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.1, max_seq_len=180, pos_enc="rope_nope",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-xpos-64":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.1, max_seq_len=180, pos_enc="xpos", xpos_scale_base=64.0,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "modern":       dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2500,
-                         dropout=0.2, max_seq_len=180, pos_enc="rope",
-                         n_kv_heads=2, use_rmsnorm=True, use_swiglu=True,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "modern-relpos": dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2050,
-                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
-                         n_kv_heads=2, use_rmsnorm=True, use_swiglu=True,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "modern-relpos-gelu": dict(d_model=512, nhead=8, num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
-                         n_kv_heads=2, use_rmsnorm=True, use_swiglu=False,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "medium":       dict(d_model=768,  nhead=8,  num_layers=4, dim_feedforward=3072),
-    "base":         dict(d_model=1024, nhead=8,  num_layers=4, dim_feedforward=4096),
-    "shallow":      dict(d_model=1024, nhead=8,  num_layers=2, dim_feedforward=4096),
-    "deep":         dict(d_model=512,  nhead=8,  num_layers=8, dim_feedforward=2048),
-    "wide-shallow": dict(d_model=1536, nhead=12, num_layers=2, dim_feedforward=6144),
-    "xlarge":       dict(d_model=1024, nhead=8,  num_layers=8, dim_feedforward=4096),
-    "xxlarge":      dict(d_model=1536, nhead=12, num_layers=8, dim_feedforward=6144),
-    "huge":         dict(d_model=2048, nhead=16, num_layers=12, dim_feedforward=8192,
-                         d_intra=512, head_hidden=512),
-    "giant":        dict(d_model=3072, nhead=24, num_layers=12, dim_feedforward=12288,
-                         d_intra=512, head_hidden=768),
 }
 
-# Backwards-compat aliases: old "hal*" preset names map to the new "mimic*"
-# entries. Saved checkpoints with `model_preset="hal"` / "hal-rope" / etc.
-# still load via these.
-for _old, _new in [
-    ("hal",           "mimic"),
-    ("hal-learned",   "mimic-learned"),
-    ("hal-rope",      "mimic-rope"),
-    ("hal-rope-lt",   "mimic-rope-lt"),
-    ("hal-rope-lf",   "mimic-rope-lf"),
-    ("hal-flex",      "mimic-flex"),
-    ("hal-ropeflex",  "mimic-ropeflex"),
-    ("hal-rope-deep", "mimic-rope-deep"),
-    ("hal-xpos",      "mimic-xpos"),
-    ("hal-selrope",   "mimic-selrope"),
-    ("hal-ropenope",  "mimic-ropenope"),
-    ("hal-xpos-64",   "mimic-xpos-64"),
-]:
-    MODEL_PRESETS[_old] = MODEL_PRESETS[_new]
-del _old, _new
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. Positional encoding helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _sinusoidal_embeddings(max_len: int, d_model: int) -> torch.Tensor:
-    pe = torch.zeros(max_len, d_model)
-    pos = torch.arange(max_len).unsqueeze(1).float()
-    div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-    pe[:, 0::2] = torch.sin(pos * div)
-    pe[:, 1::2] = torch.cos(pos * div)
-    return pe.unsqueeze(0)
-
-
-def _apply_rope(q: torch.Tensor, k: torch.Tensor,
-                 cos_f: torch.Tensor, sin_f: torch.Tensor) -> tuple:
-    """Apply rotary position embeddings to q, k of shape (B, nhead, T, head_dim).
-
-    cos_f, sin_f: (1, 1, T, half) precomputed by CausalSelfAttention.
-    """
-    half = cos_f.size(-1)
-
-    def rotate(x):
-        x1, x2 = x[..., :half], x[..., half:]
-        return torch.cat([x1 * cos_f - x2 * sin_f, x2 * cos_f + x1 * sin_f], dim=-1)
-
-    return rotate(q), rotate(k)
-
-
-def _build_rope_freqs(head_dim: int, theta: float) -> torch.Tensor:
-    """Return base frequency vector of shape (head_dim // 2,)."""
-    half = head_dim // 2
-    return 1.0 / (theta ** (torch.arange(0, half).float() / half))
-
-
-def _apply_rope_xpos(q: torch.Tensor, k: torch.Tensor,
-                     cos_f: torch.Tensor, sin_f: torch.Tensor,
-                     scale: torch.Tensor) -> tuple:
-    """RoPE with xPos exponential decay. scale: (1, 1, T, half)."""
-    half = cos_f.size(-1)
-    scale2 = scale.repeat_interleave(2, dim=-1)  # (1, 1, T, head_dim)
-
-    def rotate(x):
-        x1, x2 = x[..., :half], x[..., half:]
-        return torch.cat([x1 * cos_f - x2 * sin_f, x2 * cos_f + x1 * sin_f], dim=-1)
-
-    return rotate(q) * scale2, rotate(k) / scale2
-
-
-def _build_xpos_scale(head_dim: int, seq_len: int, scale_base: float = 512.0) -> torch.Tensor:
-    """Build xPos position-dependent scale tensor. Returns (1, 1, seq_len, half)."""
-    half = head_dim // 2
-    # Per-dimension base scale
-    base_scale = (torch.arange(0, half).float() + 0.4 * head_dim) / (1.4 * head_dim)
-    # Position-dependent power (centered)
-    pos = torch.arange(seq_len).float() - seq_len // 2
-    power = pos.unsqueeze(1) / scale_base  # (T, 1)
-    scale = base_scale.unsqueeze(0) ** power  # (T, half)
-    return scale.unsqueeze(0).unsqueeze(0)
-
-
-def _flex_bias_attention(q, k, v, dist_bias, T, device):
-    """FlexAttention with learned per-distance bias (Shaw relpos via fused kernel)."""
-    from torch.nn.attention.flex_attention import flex_attention, create_block_mask
-    bias = dist_bias  # (nhead, max_seq_len)
-    def score_mod(score, b, h, q_idx, kv_idx):
-        return score + bias[h, q_idx - kv_idx]
-    block_mask = create_block_mask(
-        lambda b, h, q_idx, kv_idx: q_idx >= kv_idx,
-        B=None, H=None, Q_LEN=T, KV_LEN=T, device=device,
-    )
-    return flex_attention(q, k, v, score_mod=score_mod, block_mask=block_mask)
-
-
-def _alibi_slopes(nhead: int) -> torch.Tensor:
-    closest_pow2 = 2 ** math.floor(math.log2(nhead))
-    base = 2.0 ** (-(2.0 ** -(math.log2(closest_pow2) - 3)))
-    slopes = torch.pow(base, torch.arange(1, closest_pow2 + 1).float())
-    if closest_pow2 < nhead:
-        extra_base = 2.0 ** (-(2.0 ** -(math.log2(2 * closest_pow2) - 3)))
-        extra = torch.pow(extra_base, torch.arange(1, 2 * (nhead - closest_pow2) + 1, 2).float())
-        slopes = torch.cat([slopes, extra])
-    return slopes
-
-
-def _sliding_window_mask(T: int, window: int, device: torch.device) -> torch.Tensor:
-    """Causal mask with sliding window: attend to max `window` past positions."""
-    row = torch.arange(T, device=device).unsqueeze(1)
-    col = torch.arange(T, device=device).unsqueeze(0)
-    mask = (col <= row) & (row - col < window)
-    return mask.float().log()  # 0 for valid, -inf for masked
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 2b. HAL's relative-position attention (skew-based, Shaw et al. 2018)
+# 2. Shaw relative-position attention (skew trick, Shaw et al. 2018)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _skew(QEr: torch.Tensor) -> torch.Tensor:
@@ -490,39 +285,6 @@ class CausalSelfAttentionRelPos(nn.Module):
                               scale=scale)
 
 
-class CausalSelfAttentionMimicRoPE(nn.Module):
-    """The mimic block's attention with RoPE instead of Shaw relpos (pos_enc="mimic_rope").
-
-    Same c_attn / c_proj projections and the same two dropout sites as CausalSelfAttentionRelPos
-    (attention weights, residual), so a mimic-rope-matched model differs from mimic only in how
-    position enters attention. With no additive bias, attention runs as one fused SDPA kernel
-    (FlashAttention) instead of the explicit FP32 Q@K^T + Srel."""
-
-    def __init__(self, n_embd: int, n_head: int, dropout: float = 0.0, rope_theta: float = 10000.0):
-        super().__init__()
-        assert n_embd % n_head == 0
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd)
-        self.c_proj = nn.Linear(n_embd, n_embd)
-        self.n_head = n_head
-        self.hs = n_embd // n_head
-        self.attn_p = dropout
-        self.resid_dropout = nn.Dropout(dropout)
-        self.register_buffer("rope_freqs", _build_rope_freqs(self.hs, rope_theta), persistent=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, L, D = x.size()
-        q, k, v = self.c_attn(x).split(D, dim=2)
-        q = q.view(B, L, self.n_head, self.hs).transpose(1, 2)
-        k = k.view(B, L, self.n_head, self.hs).transpose(1, 2)
-        v = v.view(B, L, self.n_head, self.hs).transpose(1, 2)
-        angles = torch.outer(torch.arange(L, device=x.device, dtype=self.rope_freqs.dtype), self.rope_freqs)
-        q, k = _apply_rope(q, k, angles.cos()[None, None], angles.sin()[None, None])
-        y = Fn.scaled_dot_product_attention(q, k, v, is_causal=True,
-                                            dropout_p=self.attn_p if self.training else 0.0)
-        y = y.transpose(1, 2).contiguous().view(B, L, D)
-        return self.resid_dropout(self.c_proj(y))
-
-
 class MimicTransformerBlock(nn.Module):
     """HAL's pre-norm Transformer block with relative-position attention.
     Supports modern components (RMSNorm, SwiGLU) via config flags."""
@@ -533,16 +295,11 @@ class MimicTransformerBlock(nn.Module):
         use_swiglu = getattr(cfg, 'use_swiglu', False)
         Norm = RMSNorm if use_rmsnorm else nn.LayerNorm
         self.ln_1 = Norm(cfg.d_model)
-        if cfg.pos_enc == "mimic_rope":
-            self.self_attn = CausalSelfAttentionMimicRoPE(
-                n_embd=cfg.d_model, n_head=cfg.nhead, dropout=cfg.dropout,
-                rope_theta=getattr(cfg, "rope_theta", 10000.0))
-        else:
-            self.self_attn = CausalSelfAttentionRelPos(
-                n_embd=cfg.d_model, n_head=cfg.nhead,
-                block_size=1024, dropout=cfg.dropout,
-                impl=getattr(cfg, "relpos_impl", "fp32"),
-                window=getattr(cfg, "attn_window", 0))
+        self.self_attn = CausalSelfAttentionRelPos(
+            n_embd=cfg.d_model, n_head=cfg.nhead,
+            block_size=1024, dropout=cfg.dropout,
+            impl=getattr(cfg, "relpos_impl", "fp32"),
+            window=getattr(cfg, "attn_window", 0))
         self.ln_2 = Norm(cfg.d_model)
         if use_swiglu:
             self.mlp = SwiGLU(cfg.d_model, cfg.dim_feedforward, cfg.dropout)
@@ -567,7 +324,7 @@ class MimicTransformerBlock(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2c. Modern components: RMSNorm, SwiGLU
+# 2b. Optional block components: RMSNorm, SwiGLU
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RMSNorm(nn.Module):
@@ -596,168 +353,6 @@ class SwiGLU(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.dropout(self.w_down(Fn.silu(self.w_gate(x)) * self.w_up(x)))
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. Attention + Transformer block
-# ─────────────────────────────────────────────────────────────────────────────
-
-class CausalSelfAttention(nn.Module):
-    """Multi-head self-attention with support for RoPE, ALiBi, FlexBias, GQA, sliding window."""
-
-    def __init__(self, d_model: int, nhead: int, dropout: float, max_seq_len: int,
-                 pos_enc: str = "learned", attn_variant: str = "standard",
-                 n_kv_heads: int = 0, window_size: int = 30,
-                 rope_theta: float = 10000.0, rope_learnable_freqs: bool = False,
-                 xpos_scale_base: float = 0.0):
-        super().__init__()
-        assert d_model % nhead == 0
-        self.nhead = nhead
-        self.head_dim = d_model // nhead
-        self.d_model = d_model
-        self.dropout = dropout
-        self.pos_enc = pos_enc
-        self.attn_variant = attn_variant
-        self.window_size = window_size
-        self.xpos_scale_base = xpos_scale_base
-
-        self.n_kv_heads = n_kv_heads if (n_kv_heads and n_kv_heads < nhead) else nhead
-        assert nhead % self.n_kv_heads == 0, f"nhead ({nhead}) must be divisible by n_kv_heads ({self.n_kv_heads})"
-        self.kv_group_size = nhead // self.n_kv_heads
-
-        q_dim = nhead * self.head_dim
-        kv_dim = self.n_kv_heads * self.head_dim
-        self.q_proj = nn.Linear(d_model, q_dim)
-        self.k_proj = nn.Linear(d_model, kv_dim)
-        self.v_proj = nn.Linear(d_model, kv_dim)
-        self.out_proj = nn.Linear(d_model, d_model)
-
-        uses_rope = pos_enc in ("rope", "rope+flexbias", "xpos", "selective_rope")
-        if uses_rope:
-            base_freqs = _build_rope_freqs(self.head_dim, rope_theta)
-            if rope_learnable_freqs:
-                self.rope_log_freqs = nn.Parameter(base_freqs.log())
-            else:
-                self.register_buffer("rope_freqs", base_freqs)
-            self.rope_learnable_freqs = rope_learnable_freqs
-
-        if pos_enc == "xpos":
-            sb = xpos_scale_base if xpos_scale_base > 0 else 512.0
-            self.register_buffer("xpos_scale",
-                _build_xpos_scale(self.head_dim, max_seq_len, sb))
-
-        if pos_enc == "selective_rope":
-            half = self.head_dim // 2
-            # Conv1d to produce per-position angular velocity from input
-            self.sel_omega_proj = nn.Linear(d_model, half)
-            self.sel_temperature = nn.Parameter(torch.ones(half))
-
-        if pos_enc in ("flexbias", "rope+flexbias"):
-            self.dist_bias = nn.Parameter(torch.zeros(nhead, max_seq_len))
-
-        if pos_enc == "alibi":
-            slopes = _alibi_slopes(nhead)
-            self.register_buffer("alibi_slopes", slopes)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, T, C = x.shape
-        q = self.q_proj(x).view(B, T, self.nhead, self.head_dim).transpose(1, 2)
-        k = self.k_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
-        v = self.v_proj(x).view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
-
-        if self.kv_group_size > 1:
-            k = k.repeat_interleave(self.kv_group_size, dim=1)
-            v = v.repeat_interleave(self.kv_group_size, dim=1)
-
-        if self.pos_enc in ("rope", "rope+flexbias"):
-            freqs = self.rope_log_freqs.exp() if self.rope_learnable_freqs else self.rope_freqs
-            pos = torch.arange(T, device=x.device).float()
-            angles = torch.outer(pos, freqs)
-            cos_f = angles.cos().unsqueeze(0).unsqueeze(0)
-            sin_f = angles.sin().unsqueeze(0).unsqueeze(0)
-            q, k = _apply_rope(q, k, cos_f, sin_f)
-
-        if self.pos_enc == "xpos":
-            freqs = self.rope_log_freqs.exp() if self.rope_learnable_freqs else self.rope_freqs
-            pos = torch.arange(T, device=x.device).float()
-            angles = torch.outer(pos, freqs)
-            cos_f = angles.cos().unsqueeze(0).unsqueeze(0)
-            sin_f = angles.sin().unsqueeze(0).unsqueeze(0)
-            scale = self.xpos_scale[:, :, :T, :]
-            q, k = _apply_rope_xpos(q, k, cos_f, sin_f, scale)
-
-        if self.pos_enc == "selective_rope":
-            # Content-dependent angular velocity
-            omega = self.sel_omega_proj(x)  # (B, T, half)
-            omega = omega * self.sel_temperature.unsqueeze(0).unsqueeze(0)
-            angles = omega.cumsum(dim=1)  # (B, T, half)
-            cos_f = angles.cos().unsqueeze(1)  # (B, 1, T, half)
-            sin_f = angles.sin().unsqueeze(1)
-            q, k = _apply_rope(q, k, cos_f, sin_f)
-
-        attn_mask = None
-        use_causal = True
-
-        if self.pos_enc == "alibi":
-            pos = torch.arange(T, device=x.device)
-            dist = pos.unsqueeze(0) - pos.unsqueeze(1)  # (T, T)
-            causal = (dist <= 0).float().log()
-            bias = -self.alibi_slopes.view(-1, 1, 1) * dist.abs().unsqueeze(0).float()
-            attn_mask = (bias + causal).unsqueeze(0)  # (1, nhead, T, T)
-            use_causal = False
-
-        if self.attn_variant == "sliding":
-            sw_mask = _sliding_window_mask(T, self.window_size, x.device)
-            if attn_mask is not None:
-                attn_mask = attn_mask + sw_mask.unsqueeze(0).unsqueeze(0)
-            else:
-                attn_mask = sw_mask.unsqueeze(0).unsqueeze(0)
-            use_causal = False
-
-        if self.pos_enc in ("flexbias", "rope+flexbias"):
-            out = _flex_bias_attention(q, k, v, self.dist_bias, T, x.device)
-        else:
-            out = Fn.scaled_dot_product_attention(
-                q, k, v, attn_mask=attn_mask, is_causal=use_causal,
-                dropout_p=self.dropout if self.training else 0.0,
-            )
-        out = out.transpose(1, 2).contiguous().view(B, T, C)
-        return self.out_proj(out)
-
-
-class TransformerBlock(nn.Module):
-    """Pre-norm Transformer block with configurable attention, norm, and FFN."""
-    def __init__(self, cfg: ModelConfig):
-        super().__init__()
-        self.self_attn = CausalSelfAttention(
-            cfg.d_model, cfg.nhead, cfg.dropout, cfg.max_seq_len,
-            pos_enc=cfg.pos_enc, attn_variant=cfg.attn_variant,
-            n_kv_heads=cfg.n_kv_heads,
-            rope_theta=cfg.rope_theta, rope_learnable_freqs=cfg.rope_learnable_freqs,
-            xpos_scale_base=getattr(cfg, 'xpos_scale_base', 0.0),
-        )
-        use_rmsnorm = getattr(cfg, 'use_rmsnorm', False)
-        use_swiglu = getattr(cfg, 'use_swiglu', False)
-        Norm = RMSNorm if use_rmsnorm else nn.LayerNorm
-        self.norm1 = Norm(cfg.d_model)
-        self.drop1 = nn.Dropout(cfg.dropout)
-
-        if use_swiglu:
-            self.ff = SwiGLU(cfg.d_model, cfg.dim_feedforward, cfg.dropout)
-        else:
-            self.ff = nn.Sequential(
-                nn.Linear(cfg.d_model, cfg.dim_feedforward),
-                nn.GELU(),
-                nn.Dropout(cfg.dropout),
-                nn.Linear(cfg.dim_feedforward, cfg.d_model),
-            )
-        self.norm2 = Norm(cfg.d_model)
-        self.drop2 = nn.Dropout(cfg.dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.drop1(self.self_attn(self.norm1(x)))
-        x = x + self.drop2(self.ff(self.norm2(x)))
-        return x
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -973,7 +568,7 @@ class MimicPredictionHeads(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Full model: Encoder → Pos-emb → N×Transformer → Heads
+# 4. Full model: Encoder → N×Transformer → Heads
 # ─────────────────────────────────────────────────────────────────────────────
 class FramePredictor(nn.Module):
     """
@@ -1012,29 +607,10 @@ class FramePredictor(nn.Module):
             use_input_gate=cfg.use_input_gate,
         )
 
-        if cfg.pos_enc == "learned":
-            self.pos_emb = nn.Parameter(torch.randn(1, cfg.max_seq_len, cfg.d_model) * 0.02)
-        elif cfg.pos_enc == "sinusoidal":
-            self.register_buffer("pos_emb", _sinusoidal_embeddings(cfg.max_seq_len, cfg.d_model))
-        else:
-            self.pos_emb = None  # relpos / rope / alibi have no separate pos_emb
-
-        use_relpos_block = cfg.pos_enc in ("relpos", "mimic_rope")   # the mimic block
-        if getattr(cfg, "attn_window", 0) > 0 and cfg.pos_enc != "relpos":
-            raise ValueError(f"attn_window is implemented for Shaw relpos only, not pos_enc={cfg.pos_enc!r}")
-        if use_relpos_block:
-            self.blocks = nn.ModuleList([MimicTransformerBlock(cfg) for _ in range(cfg.num_layers)])
-        elif cfg.pos_enc == "rope_nope":
-            # Alternating RoPE / NoPE layers
-            blocks = []
-            from copy import copy
-            for i in range(cfg.num_layers):
-                layer_cfg = copy(cfg)
-                layer_cfg.pos_enc = "rope" if i % 2 == 0 else "none"
-                blocks.append(TransformerBlock(layer_cfg))
-            self.blocks = nn.ModuleList(blocks)
-        else:
-            self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
+        if cfg.pos_enc != "relpos":
+            raise ValueError(f"only Shaw relpos attention is implemented, not pos_enc={cfg.pos_enc!r} "
+                             f"(the RoPE/xPos/ALiBi/learned variants were removed 2026-10-22; git history)")
+        self.blocks = nn.ModuleList([MimicTransformerBlock(cfg) for _ in range(cfg.num_layers)])
         FinalNorm = RMSNorm if getattr(cfg, 'use_rmsnorm', False) else nn.LayerNorm
         self.final_norm = FinalNorm(cfg.d_model)
         if cfg.mimic_mode:
@@ -1059,19 +635,11 @@ class FramePredictor(nn.Module):
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * max(cfg.num_layers, 1))
         for blk in self.blocks:
-            if use_relpos_block:
-                nn.init.normal_(blk.self_attn.c_proj.weight, std=residual_std)
-                if isinstance(blk.mlp, SwiGLU):
-                    nn.init.normal_(blk.mlp.w_down.weight, std=residual_std)
-                else:
-                    nn.init.normal_(blk.mlp.c_proj.weight, std=residual_std)
+            nn.init.normal_(blk.self_attn.c_proj.weight, std=residual_std)
+            if isinstance(blk.mlp, SwiGLU):
+                nn.init.normal_(blk.mlp.w_down.weight, std=residual_std)
             else:
-                nn.init.normal_(blk.self_attn.out_proj.weight, std=residual_std)
-                # SwiGLU uses w_down, standard FFN uses ff[-1]
-                if isinstance(blk.ff, SwiGLU):
-                    nn.init.normal_(blk.ff.w_down.weight, std=residual_std)
-                else:
-                    nn.init.normal_(blk.ff[-1].weight, std=residual_std)
+                nn.init.normal_(blk.mlp.c_proj.weight, std=residual_std)
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -1085,9 +653,6 @@ class FramePredictor(nn.Module):
     def features(self, frames: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Encoder + backbone + final norm: the (B, T, d_model) input to the heads."""
         x = self.encoder(frames)                         # (B, T, d_model)
-        if self.pos_emb is not None:
-            T = x.size(1)
-            x = x + self.pos_emb[:, :T]
         for blk in self.blocks:
             x = blk(x)
         return self.final_norm(x)

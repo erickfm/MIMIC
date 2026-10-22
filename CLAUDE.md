@@ -37,8 +37,8 @@ GPTv5Controller and later diverged):
 
 - **Params:** ~19.95M (minimal-features) / ~19.99M (full-features).
 - **Transformer:** d_model=512, 6 layers, 8 heads, block_size=1024.
-- **Position encoding:** Shaw relative-position attention (`mimic`).
-  RoPE variants (`mimic-rope*`) are deprecated — see Pitfalls.
+- **Position encoding:** Shaw relative-position attention — the only one
+  implemented (RoPE/xPos/ALiBi/learned were removed 2026-10-22; see Pitfalls).
 - **Input:**
   - **Minimal features** (legacy, `--mimic-minimal-features`):
     Linear(166 → 512) from
@@ -51,8 +51,8 @@ GPTv5Controller and later diverged):
 - **Head hidden dim:** `input_dim // 2` (NOT a fixed 256 — each head has
   different hidden size).
 - **Sequence length:** 180 frames (~3 seconds).
-- **Dropout:** 0.2 (mimic / modern-relpos), 0.1 (mimic-xl and other scaled
-  presets).
+- **Dropout:** 0.2 (mimic and the w256/w384/w768/w1024 widths), 0.1
+  (mimic-xl, mimic-xxl).
 
 ### Gamestate columns per player
 
@@ -117,18 +117,17 @@ without raw c coords.
 
 - **`mimic`** — production. d_model=512, 6 layers, 8 heads, relpos
   attention, LN, GELU. ~20M params.
+- **`mimic-w256` / `mimic-w384`** — narrower research proxies (5.35M /
+  11.5M; `tools/fast_proxy.sh` uses w256).
+- **`mimic-w768` / `mimic-w1024`** — width-only scale-ups.
 - **`mimic-xl`** — width+FFN scale-up, SwiGLU, ~44M params.
-  `--num-layers 10` makes it ~73M. Not currently in production.
-- **`modern*` and `mimic-xl-rms`** — GQA + RMSNorm + SwiGLU
-  variants; tied or slightly below `mimic` at puff scale; parked.
-- **`mimic-rope*` family** — RoPE / xPos / ALiBi / FlexAttention
-  position-encoding experiments. **Underperforms relpos. Don't use
-  in production.**
-- **Generic presets** (`tiny`, `small`, `medium`, `base`, `deep`,
-  `shallow`, `wide-shallow`, `xlarge`, `xxlarge`, `huge`, `giant`)
-  — legacy, no mimic-specific keys. **Avoid for `--mimic-mode`** —
-  they don't set `max_seq_len` so the dataset silently falls back
-  to 60 frames.
+  `--num-layers 10` makes it ~73M. **`mimic-xxl`** — 1024 wide, 12 layers.
+  Not currently in production.
+- The relpos block also takes `use_rmsnorm` / `use_swiglu`. Everything
+  else (RoPE/xPos/ALiBi/flexbias/learned position encodings, the generic
+  block and GQA, the `modern*` and generic `tiny`…`giant` presets, the
+  `hal*` preset aliases, the MLP backbone) was removed 2026-10-22; it's
+  in git history.
 
 ### Learned input gate (diagnostic, opt-in)
 
@@ -293,16 +292,15 @@ so the EMA costs ~2% per step plus an extra val pass for nothing.
 controller-history input at all and val loss climbs ~3.5× (main-stick
 F1 drops from ~57% to ~15%).
 
-**Use `--model mimic` (Shaw relpos).** `mimic-rope*` presets are
-deprecated — see Pitfalls.
+`--model mimic` is the default.
 
 Single-GPU variant: swap `torchrun --nproc_per_node=2` for `python3`
 and use `--batch-size 64 --grad-accum-steps 8` to keep effective batch
 at 512.
 
-The legacy `--hal-*` flags and `--model hal` / `--encoder hal_flat`
-names still work as aliases; checkpoints from before the HAL→MIMIC
-rename load unchanged.
+The `--encoder hal_flat` alias still works; checkpoints from before the
+HAL→MIMIC rename load unchanged (the `hal_*` config fields are migrated
+in `ModelConfig.__post_init__`).
 
 ### Legacy leaked-shards runs
 
@@ -332,11 +330,8 @@ would train 8× the requested sample budget and severely overfit.
 ### Model preset → seq_len gating
 
 `train.py` sets the global `SEQUENCE_LENGTH` for the dataset by
-reading `MODEL_PRESETS[model_preset]["max_seq_len"]`. The `mimic`
-preset sets 180; presets without `max_seq_len` (the legacy generic
-presets — `tiny`, `small`, etc.) fall back to the module default
-`SEQUENCE_LENGTH = 60`, a 3× reduction in temporal context per
-sample.
+reading `MODEL_PRESETS[model_preset]["max_seq_len"]` (180 for every
+preset; `--seq-len` overrides it, e.g. for sliding-window chunks).
 
 **Do not add `if model_preset == "X"` gates in this lookup.** Read
 the value off the preset dict so any new preset/alias automatically
@@ -678,7 +673,7 @@ X but didn't upload it." The `.pt` itself must come from the GPU box
 
 ### Core
 - `train.py` — training loop (DDP, gradient accumulation, mimic_mode, cosine LR).
-- `mimic/model.py` — model architecture (FramePredictor, mimic presets, relpos+other attention variants).
+- `mimic/model.py` — model architecture (FramePredictor, mimic presets, Shaw relpos attention incl. sliding window and the sdpa/flex training kernels).
 - `mimic/dataset.py` — StreamingMeleeDataset (per-game + pre-windowed shards).
 - `mimic/frame_encoder.py` — MimicFlatEncoder; honors `mimic_minimal_features` (slices the shard numeric tensor to 9 cols in HAL order) vs full (13 numeric + 5 flags). Also hosts the optional `use_input_gate` L1 diagnostic.
 - `mimic/features.py` — feature schema + normalization. `numeric_state(full=True)` returns 13 cols.
@@ -889,11 +884,10 @@ references to the slippistats functions used. Past notes:
     Early-release encoding is legacy 5-class only. Shoulder+button
     combos ARE representable since shoulder is a separate head.
 
-11. **RoPE (`mimic-rope*`) presets are deprecated.** They underperform
-    the relpos baseline — the bug is in the positional-encoding path
-    itself, not the training recipe. Default to `--model mimic` (Shaw
-    relpos). Use a RoPE preset only when specifically testing it and
-    you know what you're looking at.
+11. **Only Shaw relpos attention exists.** RoPE variants underperformed
+    relpos (−1–2% val at matched settings, 2026-10-21) and were removed
+    with the other position encodings on 2026-10-22; recover them from
+    git history if a future experiment needs them.
 
 12. **Full features are the default.** Omit `--mimic-minimal-features`
     unless deliberately reproducing a minimal-path baseline. The
