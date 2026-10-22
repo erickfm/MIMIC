@@ -53,12 +53,6 @@ class ModelConfig:
     rope_learnable_freqs: bool = False  # make per-dimension RoPE frequencies trainable
     xpos_scale_base: float = 0.0       # xPos decay base (0 = default 512)
 
-    # temporal backbone type: "transformer", or "mlp" = a plain MLP on the flattened last
-    # mlp_window frames at every position (no attention, no weight sharing across time)
-    backbone: str        = "transformer"
-    mlp_window: int      = 90
-    mlp_hidden: int      = 1024
-    mlp_layers: int      = 4
 
     # attention variant
     attn_variant: str    = "standard"
@@ -163,13 +157,6 @@ MODEL_PRESETS = {
                          num_c_dirs=9),
     "mimic-w1024":  dict(d_model=1024, nhead=16, num_layers=6, dim_feedforward=4096,
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    # Plain MLP instead of the transformer: each position sees the raw per-frame features of its
-    # last 90 frames, flattened (90 x 184 = 16,560 inputs) -> 1024 x4 -> 512 -> the mimic heads.
-    "mimic-mlp90":  dict(d_model=512,  nhead=8,  num_layers=0, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="none",
-                         backbone="mlp", mlp_window=90, mlp_hidden=1024, mlp_layers=4,
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
     "mimic-learned":dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
@@ -988,29 +975,6 @@ class MimicPredictionHeads(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Full model: Encoder → Pos-emb → N×Transformer → Heads
 # ─────────────────────────────────────────────────────────────────────────────
-class MLPBackbone(nn.Module):
-    """Plain MLP over the flattened last `window` frames, applied at every position.
-
-    The first layer is a causal Conv1d with kernel `window`: that is exactly a Linear on the
-    concatenated (window x in_dim) inputs ending at frame t (zeros before the sequence start),
-    without materialising the (B, T, window*in_dim) tensor.
-    """
-    def __init__(self, in_dim: int, window: int, hidden: int, n_layers: int,
-                 d_out: int, dropout: float):
-        super().__init__()
-        self.window = window
-        self.first = nn.Conv1d(in_dim, hidden, kernel_size=window)
-        layers = []
-        for _ in range(n_layers - 1):
-            layers += [nn.GELU(), nn.Dropout(dropout), nn.Linear(hidden, hidden)]
-        layers += [nn.GELU(), nn.Dropout(dropout), nn.Linear(hidden, d_out)]
-        self.rest = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:   # (B, T, in_dim) -> (B, T, d_out)
-        x = Fn.pad(x.transpose(1, 2), (self.window - 1, 0))
-        return self.rest(self.first(x).transpose(1, 2))
-
-
 class FramePredictor(nn.Module):
     """
     1. Encodes structured frames via FrameEncoder → (B, T, d_model)
@@ -1058,16 +1022,7 @@ class FramePredictor(nn.Module):
         use_relpos_block = cfg.pos_enc in ("relpos", "mimic_rope")   # the mimic block
         if getattr(cfg, "attn_window", 0) > 0 and cfg.pos_enc != "relpos":
             raise ValueError(f"attn_window is implemented for Shaw relpos only, not pos_enc={cfg.pos_enc!r}")
-        self.mlp = None
-        if getattr(cfg, "backbone", "transformer") == "mlp":
-            # The MLP reads the raw per-frame features: drop the encoder's projection and dropout.
-            in_dim = self.encoder.proj.in_features
-            self.encoder.proj = nn.Identity()
-            self.encoder.drop = nn.Identity()
-            self.mlp = MLPBackbone(in_dim, cfg.mlp_window, cfg.mlp_hidden, cfg.mlp_layers,
-                                   cfg.d_model, cfg.dropout)
-            self.blocks = nn.ModuleList()
-        elif use_relpos_block:
+        if use_relpos_block:
             self.blocks = nn.ModuleList([MimicTransformerBlock(cfg) for _ in range(cfg.num_layers)])
         elif cfg.pos_enc == "rope_nope":
             # Alternating RoPE / NoPE layers
@@ -1130,8 +1085,6 @@ class FramePredictor(nn.Module):
     def features(self, frames: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Encoder + backbone + final norm: the (B, T, d_model) input to the heads."""
         x = self.encoder(frames)                         # (B, T, d_model)
-        if self.mlp is not None:
-            x = self.mlp(x)
         if self.pos_emb is not None:
             T = x.size(1)
             x = x + self.pos_emb[:, :T]

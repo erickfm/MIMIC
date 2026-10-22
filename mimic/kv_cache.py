@@ -14,7 +14,7 @@ of the per-frame cost of recomputing a W-frame window.
 Each row keeps its own clock, so rows can start episodes at different times. An empty cache is
 exactly a training chunk that starts at the first frame of a game (no history, no mock frames).
 
-Only the mimic relpos transformer is supported (no MLP backbone, no pos_emb, no RoPE).
+Only the mimic relpos transformer is supported (no pos_emb, no RoPE).
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class RelPosKVCache:
         model = getattr(model, "_orig_mod", model)
         w = getattr(model.cfg, "attn_window", 0)
         assert w > 0, "KV cache needs a sliding-window model (cfg.attn_window > 0)"
-        assert model.mlp is None and model.pos_emb is None
+        assert model.pos_emb is None
         self.model, self.w, self.B = model, w, batch_size
         attn0 = model.blocks[0].self_attn
         assert isinstance(attn0, CausalSelfAttentionRelPos)
