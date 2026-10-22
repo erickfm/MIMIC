@@ -121,7 +121,7 @@ def _multiclass_prf(pred_idx, tgt_idx, n_classes):
     return 0.0, 0.0, 0.0
 
 
-# Module-level state for combo encoding (set by train() when --hal-controller-encoding)
+# Module-level state for combo encoding (set by train() when --mimic-controller-encoding)
 _combo_map: dict = None
 _combo_lookup: torch.Tensor = None  # vectorized lookup table: combo_int → class_idx
 
@@ -454,12 +454,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           no_opp_inputs: bool = True,
           no_self_inputs: bool = False,
           clusters_path: str = None,
-          target_val_f1: float = None,
           max_wall_time: float = None,
           val_frac_override: float = None,
           warmup_steps_override: int = None,
           weight_decay_override: float = None,
-          scale_lr: bool = False,
           grad_accum_steps: int = 1,
           nccl_timeout: int = 1800,
           grad_clip_norm: float = None,
@@ -470,7 +468,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           n_heads_override: int = None,
           no_amp: bool = False,
           cosine_min_lr: float = None,
-          cosine_decay_steps: int = None,
           no_warmup: bool = False,
           stick_clusters: str = None,
           hal_minimal_features: bool = False,
@@ -483,7 +480,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           attn_window: int = 0,
           distill_from: str = None,
           distill_alpha: float = 1.0,
-          wd_fix: bool = False,
           lean_metrics: bool = False,
           optimizer: str = "muon",
           muon_lr: float = 0.02,
@@ -551,7 +547,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             _log(f"  Controller encoding: {_n_combos} button combos from {combos_path}")
         else:
             raise RuntimeError(
-                f"--hal-controller-encoding requires controller_combos.json in {data_dir}. "
+                f"--mimic-controller-encoding requires controller_combos.json in {data_dir}. "
                 f"Copy from an existing HAL-normalized data dir (e.g. data/fox_hal_local/).")
 
     _log(f"Loading dataset from {data_dir} ...")
@@ -603,9 +599,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         warmup_steps = warmup_steps_override
 
     actual_lr = lr or LEARNING_RATE
-    if scale_lr and world_size > 1:
-        actual_lr *= world_size
-        _log(f"  LR scaled by {world_size}x: {lr or LEARNING_RATE} → {actual_lr}")
 
     _log(f"  Compiling model: {compile_model}  preset: {model_preset or 'base'}")
     from mimic.features import load_cluster_centers
@@ -659,22 +652,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     if optimizer == "adamw":
         decay, no_decay = [], []
-        if wd_fix:
-            # --wd-fix: no weight decay on biases, any norm layer's gains, embedding tables or the
-            # relpos Er tables, chosen by module type. The default name rule below only catches
-            # biases and final_norm: block norms are ln_1/ln_2, head norms heads.*_head.0.
-            from mimic.model import RMSNorm
-            skip = set()
-            for mod in model.modules():
-                if isinstance(mod, (nn.LayerNorm, RMSNorm, nn.Embedding)):
-                    skip.update(id(q) for q in mod.parameters(recurse=False))
-            for n, p in model.named_parameters():
-                if not p.requires_grad:
-                    continue
-                (no_decay if (n.endswith("bias") or id(p) in skip or n.endswith(".Er"))
-                          else decay).append(p)
-            _log(f"  --wd-fix: weight decay on {len(decay)} tensors, none on {len(no_decay)}")
-        for n, p in ([] if wd_fix else model.named_parameters()):
+        for n, p in model.named_parameters():
             if not p.requires_grad:
                 continue
             (no_decay if n.endswith("bias") or "norm" in n.lower()
@@ -733,47 +711,19 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         raise ValueError(f"unknown --optimizer {optimizer!r}")
 
     _eta_min = cosine_min_lr if cosine_min_lr is not None else 1e-6
-    # Decouple the cosine decay length from the total training length so a
-    # longer run still gets a proper low-LR refinement window at the end
-    # instead of stretching the cosine across the whole schedule. If
-    # --cosine-decay-steps is set, decay cosine to eta_min by that step
-    # and hold flat at eta_min for the remainder.
-    _decay_steps = cosine_decay_steps if cosine_decay_steps is not None else max_steps
-    if _decay_steps > max_steps:
-        _log(f"  [WARN] --cosine-decay-steps {cosine_decay_steps} > max_steps {max_steps}, clamping")
-        _decay_steps = max_steps
-    _use_flat_tail = (_decay_steps < max_steps)
 
     def _build_cosine(n):
         return optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=max(n, 1), eta_min=_eta_min)
 
-    def _build_flat_tail(n):
-        factor = (_eta_min / actual_lr) if actual_lr > 0 else 1.0
-        return optim.lr_scheduler.ConstantLR(optimiser, factor=factor, total_iters=max(n, 1))
-
-    def _make_scheduler():
+    def _make_scheduler():   # optional linear warmup, then cosine to eta_min at max_steps
         if warmup_steps > 0:
             warmup  = optim.lr_scheduler.LinearLR(
                 optimiser, start_factor=0.01, total_iters=warmup_steps)
-            cosine_phase_len = max(_decay_steps - warmup_steps, 1)
-            cosine  = _build_cosine(cosine_phase_len)
-            if _use_flat_tail:
-                flat = _build_flat_tail(max_steps - _decay_steps)
-                return optim.lr_scheduler.SequentialLR(
-                    optimiser, [warmup, cosine, flat],
-                    milestones=[warmup_steps, _decay_steps])
+            cosine  = _build_cosine(max(max_steps - warmup_steps, 1))
             return optim.lr_scheduler.SequentialLR(
                 optimiser, [warmup, cosine], milestones=[warmup_steps])
-        cosine = _build_cosine(_decay_steps)
-        if _use_flat_tail:
-            flat = _build_flat_tail(max_steps - _decay_steps)
-            return optim.lr_scheduler.SequentialLR(
-                optimiser, [cosine, flat], milestones=[_decay_steps])
-        return cosine
+        return _build_cosine(max_steps)
     scheduler = _make_scheduler()
-    if _use_flat_tail:
-        _log(f"  LR schedule: cosine to eta_min={_eta_min:g} over {_decay_steps} steps, "
-             f"then flat at eta_min for the remaining {max_steps - _decay_steps} steps")
 
     start_step = 0
     if resume:
@@ -920,7 +870,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     best_val_loss_step = 0
     evals_since_improve = 0
     _log(f"\n=== Training {max_steps} steps ===")
-    _target_hit = False
     # --- Eval-only: load a checkpoint, score it with the EXACT training val loop
     # (same compute_loss / flags / MAX_VAL_BATCHES), print val/total, and exit. ---
     if eval_only:
@@ -1268,12 +1217,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         _log(f"  -- new best val loss={cur_val_loss:.4f} → {best_loss_path}")
                 elif math.isfinite(cur_val_loss):
                     evals_since_improve += 1
-                if target_val_f1 and cur_val_f1 >= target_val_f1:
-                    _elapsed = time.time() - t0
-                    _log(f"TARGET REACHED: val_f1={cur_val_f1:.4f} at step {step} in {_elapsed:.1f}s")
-                    wandb.log({"target_reached_step": step, "target_reached_wall_s": _elapsed}, step=step)
-                    _target_hit = True
-                    break
             else:
                 _log("  -- val: no valid batches")
             if is_distributed:
@@ -1342,11 +1285,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     epoch_frac = step / max(est_batches, 1)
     _log(f"\nDone. {step:,}/{max_steps:,} steps ({epoch_frac:.2f} epochs) in {elapsed:.0f}s "
          f"({step/elapsed:.1f} step/s){skip_msg}")
-    if target_val_f1 and not _target_hit:
-        _log(f"TARGET NOT REACHED: best val_f1={best_val_f1:.4f} (target={target_val_f1:.4f})")
     if math.isfinite(best_val_loss):
-        _log(f"Best val_loss={best_val_loss:.4f} @ step {best_val_loss_step}. "
-             f"Use --cosine-decay-steps {best_val_loss_step} for next run on this data.")
+        _log(f"Best val_loss={best_val_loss:.4f} @ step {best_val_loss_step}.")
 
     # Dump input-gate importance ranking if gate was enabled (main rank only).
     if input_gate_l1 > 0 and _is_main and hasattr(_raw_model.encoder, "input_gate_logits"):
@@ -1415,9 +1355,6 @@ if __name__ == "__main__":
     parser.add_argument("--distill-from", type=str, default=None,
                         help="Checkpoint of a frozen teacher; adds alpha * KL(teacher || student) per head.")
     parser.add_argument("--distill-alpha", type=float, default=1.0)
-    parser.add_argument("--wd-fix", action="store_true",
-                        help="AdamW: exclude norm gains, embeddings and relpos Er tables from "
-                             "weight decay (by module type). Default keeps the historical rule.")
     parser.add_argument("--save-steps", type=str, default=None,
                         help="Comma-separated optimizer steps at which to save a weights-only "
                              "snapshot checkpoints/{run}_snapNNNNNN.pt (0 = initial weights).")
@@ -1452,16 +1389,12 @@ if __name__ == "__main__":
                         help="Weight decay (default: 1e-2)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
-    parser.add_argument("--target-val-f1", type=float, default=None,
-                        help="Stop training when val btn_f1 >= this value (e.g. 0.985)")
     parser.add_argument("--max-wall-time", type=float, default=None,
                         help="Hard wall-time limit in seconds; stop if exceeded")
     parser.add_argument("--val-frac", type=float, default=None,
                         help="Override validation frequency as fraction of max_steps (default: 0.025)")
     parser.add_argument("--warmup-steps", type=int, default=None,
                         help="Override warmup steps (default: 1%% of max_steps)")
-    parser.add_argument("--scale-lr", action="store_true",
-                        help="Scale LR by world_size for DDP (linear scaling rule)")
     parser.add_argument("--grad-accum-steps", type=int, default=1,
                         help="Gradient accumulation steps (default: 1, eff_batch = bs * gpus * accum)")
     parser.add_argument("--nccl-timeout", type=int, default=1800,
@@ -1496,29 +1429,23 @@ if __name__ == "__main__":
                              "commands parse)")
     parser.add_argument("--n-heads", type=int, default=None,
                         help="Override number of attention heads")
-    parser.add_argument("--mimic-mode", "--hal-mode", dest="mimic_mode", action="store_true",
+    parser.add_argument("--mimic-mode", dest="mimic_mode", action="store_true",
                         help="No-op: mimic mode (single-label buttons, combined shoulder, LN heads, "
                              "plain CE) is the only mode (kept so old commands parse)")
     parser.add_argument("--no-amp", action="store_true",
                         help="Disable AMP (train in FP32)")
     parser.add_argument("--cosine-min-lr", type=float, default=None,
                         help="Minimum LR for the cosine schedule (default: 1e-6)")
-    parser.add_argument("--cosine-decay-steps", type=int, default=None,
-                        help="Decouple cosine decay length from total training. "
-                             "If set, cosine decays from peak to --cosine-min-lr "
-                             "over this many steps, then holds flat at min_lr for "
-                             "the remainder. Useful for long runs on small-data "
-                             "characters to avoid stretching the refinement window.")
     parser.add_argument("--no-warmup", action="store_true",
                         help="No LR warmup: the default since 2026-10-22 (kept so old commands parse)")
     parser.add_argument("--warmup", action="store_true",
                         help="Enable the linear LR warmup (5%% of steps, or --warmup-steps)")
     parser.add_argument("--stick-clusters", type=str, default="hal37",
                         help="Stick cluster set: 'hal37' (default) for the 37 hand-designed clusters")
-    parser.add_argument("--mimic-minimal-features", "--hal-minimal-features",
+    parser.add_argument("--mimic-minimal-features",
                         dest="mimic_minimal_features", action="store_true",
                         help="Minimal input set (drop ECB, speeds, hitlag/hitstun from numeric)")
-    parser.add_argument("--mimic-controller-encoding", "--hal-controller-encoding",
+    parser.add_argument("--mimic-controller-encoding",
                         dest="mimic_controller_encoding", action=argparse.BooleanOptionalAction,
                         default=True,
                         help="One-hot controller feedback encoding (requires controller_combos.json)")
@@ -1555,12 +1482,10 @@ if __name__ == "__main__":
         no_opp_inputs=not args.opp_inputs,
         no_self_inputs=not args.self_inputs,
         clusters_path=args.clusters_path,
-        target_val_f1=args.target_val_f1,
         max_wall_time=args.max_wall_time,
         val_frac_override=args.val_frac,
         warmup_steps_override=args.warmup_steps,
         weight_decay_override=args.weight_decay,
-        scale_lr=args.scale_lr,
         grad_accum_steps=args.grad_accum_steps,
         nccl_timeout=args.nccl_timeout,
         grad_clip_norm=args.grad_clip_norm,
@@ -1571,7 +1496,6 @@ if __name__ == "__main__":
         n_heads_override=args.n_heads,
         no_amp=args.no_amp,
         cosine_min_lr=args.cosine_min_lr,
-        cosine_decay_steps=args.cosine_decay_steps,
         no_warmup=not args.warmup,
         stick_clusters=args.stick_clusters,
         hal_minimal_features=args.mimic_minimal_features,
@@ -1584,7 +1508,6 @@ if __name__ == "__main__":
         attn_window=args.attn_window,
         distill_from=args.distill_from,
         distill_alpha=args.distill_alpha,
-        wd_fix=args.wd_fix,
         save_steps=args.save_steps,
         lean_metrics=args.lean_metrics,
         optimizer=args.optimizer,

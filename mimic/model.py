@@ -523,10 +523,3 @@ class FramePredictor(nn.Module):
         if cond_classes is not None:
             return self.heads(x, btn_targets=btn_targets, cond_classes=cond_classes)
         return self.heads(x, btn_targets=btn_targets)    # all T positions
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Backwards-compat aliases (old HAL-prefixed symbol names)
-# ─────────────────────────────────────────────────────────────────────────────
-HALTransformerBlock = MimicTransformerBlock
-HALPredictionHeads = MimicPredictionHeads
