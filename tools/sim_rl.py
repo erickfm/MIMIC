@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""L-cancel RL in the native sim: rollouts from rlvr/sim/vec_env.py, update from rlvr/online/ppo.py.
+"""L-cancel RL in the native sim: rollouts from rlvr/sim/vec_env.py, update from rlvr/sim/ppo.py.
 
 The learner plays Fox dittos against a frozen copy of the starting policy (frozen BC, not CPU-9:
 see memory feedback_rlvr_training_opponent), ports alternated across envs. Episodes and reward
@@ -55,8 +55,8 @@ def main():
 
     import torch
     from inference_utils import load_mimic_model
-    from rlvr.online.ppo import OnlinePPOConfig, _logprob_at_indices, ppo_update
-    from rlvr.online.trajectory import FrameRecord
+    from rlvr.sim.ppo import OnlinePPOConfig, _logprob_at_indices, ppo_update
+    from rlvr.sim.trajectory import FrameRecord
     from rlvr.sim.lcancel import LCancelTracker
     from rlvr.sim.vec_env import VecSim
     from sim_h2h import make_ditto

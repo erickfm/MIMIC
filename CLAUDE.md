@@ -250,7 +250,7 @@ PlayerState` (so `play.py`, `play_netplay.py`, the Discord bot,
 policy step at 64 envs). Both start an episode from an empty cache —
 a training chunk that begins at a game's first frame — not from mock
 frames. Paths that keep their own fixed window (`h2h_batch_mp.py`,
-`ffw_batch_mp.py`, `rlvr/online` `_PolicyRunner`) refuse window models
+`ffw_batch_mp.py`, `rlvr/sim/fast_policy.forward_last`) refuse window models
 via `require_full_causal` rather than run them mismatched. Not the
 default because no production-quality window model exists yet
 (a warm-started champion conversion played clean in Dolphin, canaries
@@ -737,77 +737,19 @@ inputs land on f+1 like Dolphin), `tools/sim_replay_check.py` / `tools/sim_env_c
 `target[i] = buttons[i+1]` alignment); `tools/shard_and_upload_ranked.py`
 (ranked .slp archive → HF tarballs).
 
-## Porting slippistats logic (live-streaming variants)
+## Porting slippistats logic
 
-Several VR modules under `rlvr/online/vr/` need streaming-state-
-machine versions of logic that already exists in the slippistats
-library (`~/.local/lib/python3.12/site-packages/slippistats/`).
-slippistats is **batch on parsed .slp**; our actor needs
-**streaming on live `libmelee.PlayerState`**. Same predicates,
-different data shape + interface.
-
-The streaming-slippistats module (`rlvr/online/slippi_stream.py`) is
-the canonical home for these ports — the `is_*`/`in_punish_state`
-predicates plus the `MoveCounter` / `ComboTracker` / `TechTracker` /
-`RecoveryTracker` state machines, consumed by the VR modules in
-`rlvr/online/vr/`. Its combo logic went through ~6 rounds of "I caught
-another missed case" (in the now-retired `combo_extend_online.py`,
-since superseded by `slippi_stream.py` + the `combo_length` VR). Each
-round caught a real bug. Pattern: the obvious predicates get ported on
-the first pass, the specialized ones get missed.
-
-**Default to paranoid faithfulness when porting** any slippistats
-logic. Concretely:
-
-1. Read the WHOLE function in `slippistats/stats/*` you're
-   porting (start to end), not just the parts that look relevant.
-2. Enumerate every conditional branch (`if X: ...`) and check
-   that the port has an equivalent — including the seemingly
-   incidental ones like `player_did_lose_stock` mid-combo.
-3. Enumerate every state predicate referenced (`is_X(...)`) and
-   verify the range constants match libmelee Action enum values
-   (don't rely on memory or assumed ranges).
-4. Compare start / keep-alive / termination sets line-by-line.
-5. Don't add safety nets / hard caps / extra filters that
-   slippistats DOESN'T have unless the reason is documented. They
-   handled the edge cases we'd think to add.
-
-Specific gotchas already found while porting the combo logic into
-`slippi_stream.py` (all are slippistats behaviors a naive port misses):
-
-- **THROWN range (239-243)** is separate from CAPTURE (223-232).
-  Throws are NOT in the "in opp's grab" set on their own — a
-  grab→throw combo gets fragmented without explicit THROWN.
-- **DYING (0-10)** must be in the keep-alive set so the kill blow
-  stays in-episode long enough for the stock decrement to register
-  before the K-gap closes.
-- **`player_did_lose_stock`** (bot dies mid-combo) is a termination
-  condition alongside opp-died and K-gap.
-- **Command grabs (266-304, 327-338)** are separate from regular
-  grabs and must be in start + keep-alive predicates.
-- **`hitlag_left > 0`** is a keep-alive condition independent of
-  `hitstun_frames_left`. Both are populated by libmelee.
-- **`COMBO_LENIENCY = 45 frames`**, not 20 or 30. Tech-chase /
-  re-grab / wait-DI sequences need the full 45.
-- **`action_changed_since_hit`** uses the BOT's action state, not
-  opp's. Move counting requires tracking self.action + action_frame.
-- **No frame-count hard cap** in slippistats. The three termination
-  conditions (opp died / K-gap / bot died) are sufficient.
-- **The `stock` counter decrements ~1.5 s *after* the kill** — the KO'd
-  character runs the DEAD animation (action 0-10) first. A fixed
-  backward look-back window from the stock-decrement frame lands inside
-  those DEAD frames and misses the killing hit. This broke
-  `stock_delta`'s SD-gate — every kill scored as an opponent
-  self-destruct, inverting the reward. Gate hit-recency *statefully*
-  (`OppHitRecencyTracker`: a decay counter that DEAD frames pass through
-  untouched), not with a backward scan. (`low_percent_kill` has since
-  been fixed the same way — streaming tracker + regression tests.)
-
-When porting new slippistats logic (edgeguard, shield-escape,
-pressure, etc.), file a research note specifically calling out
-what was ported and what was intentionally skipped, with file
-references to the slippistats functions used. Past notes:
-`docs/research-notes-2026-05-14b.md`.
+The streaming slippistats ports (`rlvr/online/slippi_stream.py`) and the
+VR reward modules that used them were removed 2026-10-22 with the Dolphin
+RL path; they're in git history, with port notes in
+`docs/research-notes-2026-05-14b.md`. If you port slippistats logic again
+(e.g. a sim reward): read the whole slippistats function, enumerate every
+branch and state predicate, check enum ranges against libmelee, and don't
+add filters slippistats doesn't have. The past ports kept missing the
+specialized cases: the THROWN range (239-243) separate from CAPTURE, DYING
+(0-10) as keep-alive, command grabs, `hitlag_left > 0` as keep-alive,
+the 45-frame combo leniency, and the stock counter decrementing ~1.5 s
+after the kill (gate hit-recency statefully, not with a backward scan).
 
 ## Pitfalls for agents
 
@@ -957,9 +899,8 @@ references to the slippistats functions used. Past notes:
     2.9→3.5× total, GPU pins at 90% while CPU idles). Real throughput
     needs **batched multi-env inference** (one process, N Dolphins, one
     batched forward) = slippi-ai's `AsyncBatchedEnvironment` = the RLVR
-    rollout harness. The inter-update PPO-pause disconnect
-    (`EnetDisconnected`, enet unserviced > ~20 s) is fixed by the
-    `dolphin_actor.py` keepalive thread. See
+    rollout harness (the Dolphin RL actors were removed 2026-10-22; RL
+    now runs in the native sim). See
     `docs/research-notes-2026-06-30.md` (supersedes the FFW claims in
     `docs/research-notes-2026-05-18.md`). **RNG caveat (2026-10-20):**
     FFW does not reproduce realtime Melee's RNG draw sequence — FFW h2h

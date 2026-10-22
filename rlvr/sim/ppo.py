@@ -21,7 +21,7 @@ from typing import Dict, List
 import torch
 import torch.nn.functional as F
 
-from rlvr.online.trajectory import Episode, group_normalize_across_episodes
+from rlvr.sim.trajectory import Episode, group_normalize_across_episodes
 
 
 @dataclass
@@ -35,10 +35,9 @@ class OnlinePPOConfig:
     # Off by default (normal path unchanged). When True, each episode
     # must carry a precomputed scalar advantage in
     # ep.metadata["advantage"]; every frame of that episode gets it and
-    # the global return z-scoring above is bypassed. Used by the
-    # savestate drill loop (rlvr/online/drill_loop.py), whose advantages
-    # are matched-context group means (reward - group mean), not
-    # batch-wide z-scores.
+    # the global return z-scoring above is bypassed (e.g. matched-context
+    # group means, reward - group mean, rather than batch-wide z-scores;
+    # the removed savestate drill loop used it).
     use_metadata_advantage: bool = False
 
 

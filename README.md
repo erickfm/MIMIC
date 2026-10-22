@@ -238,14 +238,13 @@ state encoding the answer. Train with `--reaction-delay 0` on v2 shards.
 
 ## RLVR
 
-`rlvr/online/` holds the reinforcement-learning loop: parallel Dolphin
-actors (fast-forward emulation, ~5.7× realtime for model-vs-model on one
-GPU), PPO with group-normalized advantages, per-skill verifiable rewards
-scored against the engine (post-match replay parsing, not proxies), and a
-savestate harness (a small patch to the Slippi Dolphin fork adds
-`SAVESTATE`/`LOADSTATE` pipe verbs — `tools/build_savestate_dolphin.sh`)
-for drilling harvested miss states. Skills are tackled one at a time;
-L-cancel is the first and is in progress.
+RL runs in a native build of Melee compiled from the decomp
+(`rlvr/sim/`, no Dolphin): batched GPU policy rollouts across many sim
+processes, PPO with group-normalized advantages, and per-skill rewards
+scored against exact engine state (`tools/sim_rl.py`). Head-to-head evals
+run in the same sim (`tools/sim_h2h.py`). Skills are tackled one at a
+time; L-cancel is the first. (The earlier Dolphin RL loop and the offline
+RLVR pipeline were removed 2026-10-22; they're in git history.)
 
 ---
 
@@ -255,19 +254,22 @@ L-cancel is the first and is in progress.
 .
 ├── train.py                          # BC training entry point
 ├── mimic/                            # Core library
-│   ├── model.py                      # FramePredictor, attention variants, heads
+│   ├── model.py                      # FramePredictor, relpos attention, heads
+│   ├── kv_cache.py                   # Streaming KV cache for sliding-window models
 │   ├── frame_encoder.py              # Frame → 512-d encoder
 │   ├── features.py                   # Feature encoding, 7-class collapse
 │   └── dataset.py                    # Shard streaming
-├── rlvr/                             # RL from verifiable rewards
-│   └── online/                       # Live-Dolphin actors, PPO, savestate drill
+├── rlvr/                             # RL
+│   ├── sim/                          # Native-sim env, batched policy, PPO, L-cancel reward
+│   └── state/                        # GameState + peppi/libmelee adapters (canaries)
 ├── tools/                            # See tools/README.md for the full index
 │   ├── play.py                       # Bot vs CPU / bot vs bot (local)
 │   ├── play_netplay.py               # Bot vs human (Slippi netplay)
 │   ├── discord_bot.py                # Discord queue/frontend
 │   ├── inference_utils.py            # Shared decode + frame building
 │   ├── slp_to_shards.py              # .slp → v2 shards
-│   └── build_savestate_dolphin.sh    # Patched-fork emulator build (RL)
+│   ├── sim_rl.py / sim_h2h.py        # RL and head-to-head in the native sim
+│   └── build_savestate_dolphin.sh    # Patched-fork emulator build (dual-pad FFW)
 ├── docs/                             # Dev journal + setup guides
 ├── setup.sh                          # Fresh-machine bootstrap
 ├── checkpoints/                      # Local checkpoints (gitignored)

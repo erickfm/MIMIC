@@ -32,7 +32,10 @@ orientation is `../CLAUDE.md`; this file is just a map.
 - `discord_bot.py` — Discord front-end (`!play`, `!<character>`, queue).
 - `inference_utils.py` — **shared** decode pipeline; new entry points import from here.
 - `ffw_batch_mp.py` — multiprocess FFW rollout harness (one env per process,
-  central batched forward); the endpoint A/B eval rig for RLVR checkpoints.
+  central batched forward) for Dolphin A/B evals.
+- `h2h_batch_mp.py` — batched cross-character Dolphin h2h (both pads, one central process).
+- `sim_h2h.py` / `sim_rl.py` / `sim_play.py` — head-to-head, RL, and play in the
+  native sim (`rlvr/sim/`).
 - `run_hal_model.py` — reference reimpl of HAL's 5-class inference (loads Eric Gu's
   original HAL checkpoints only; not on any MIMIC path — do not delete).
 
@@ -41,8 +44,9 @@ orientation is `../CLAUDE.md`; this file is just a map.
   (`erickfm/slippi-Ishiiruka@mimic-savestates`, pinned in
   `patches/slippi-ishiiruka-commit.txt`) into `emulator_ss/` (netplay variant,
   SAVESTATE/LOADSTATE pipe verbs + dual-pad FFW fix) and `emulator_pb/`
-  (playback variant, replay-seeded savestate harvest). RL-only; the netplay
-  bot uses the stock Slippi build in `emulator/`.
+  (playback variant, replay-seeded savestate harvest). `emulator_ss/` is the
+  dual-pad FFW build for Dolphin h2h; the netplay bot uses the stock Slippi
+  build in `emulator/`.
 - `patches/` — the savestate patch + pinned fork commit (backup for the fork).
 
 ## Promotion / upload
@@ -71,7 +75,9 @@ history if a rebuild ever needs them:
   builds, reshard one-offs, rank probes, L-cancel probes, `ffw_batch_bench.py`,
   `diagnose.py`, `split_by_character.py`, `upload_models_to_hf.py` — superseded
   by `upload_char.py`) — removed 2026-07-17.
-- **2026-10-22 legacy cleanup** — `download_fox.py`, `build_clusters.py`,
+- **2026-10-22 legacy cleanup** — the Dolphin RL loop (`rlvr/online`) and offline
+  RLVR (`rlvr/train`, `rollout`, `eval`, `sampler`, `tagger`, `tasks`);
+  `download_fox.py`, `build_clusters.py`,
   `build_controller_combos.py`, `run_all_chars.sh`, `retrain_all_baseline.sh`,
   `gen_h2h_schedule.py`, `plot_h2h.py`, `plot_winrate_steps.py`
   (see `../docs/research-notes-2026-10-22.md`).

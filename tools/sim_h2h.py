@@ -53,7 +53,7 @@ def lcancel_by_variant(games, envs, names):
     """Each variant's L-cancel rate over the recorded games: realized avoidable lag (landing-run
     length minus the move's cancelled floor) == 0, opponent-interrupted landings dropped; the
     rlvr L-cancel reward's definition. Fox-specific floors (CANCELLED_MIN)."""
-    from rlvr.online.tasks.l_cancel_online import CANCELLED_MIN, DAMAGE_STATES, DEAD_STATES
+    from rlvr.sim.lcancel import CANCELLED_MIN, DAMAGE_STATES, DEAD_STATES
     from tools.sim_replay_check import slp_events
     tally = {n: [0, 0] for n in names}
     for g in games:
