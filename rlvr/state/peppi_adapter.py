@@ -1,9 +1,8 @@
 """peppi_py -> GameState adapter.
 
 peppi exposes replays as Apache Arrow columnar arrays. We keep the hot
-path columnar for the tagger (see rlvr/tagger) and materialize GameState
-dataclasses lazily only where needed (the sampler's prompt-context
-window, which is T=180 frames).
+path columnar (for bulk replay scans) and materialize GameState
+dataclasses lazily only where needed.
 
 Empirically verified facts about peppi's schema (see rlvr/tests):
   - peppi returns **external** Melee character IDs (CSS order) and
