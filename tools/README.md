@@ -6,21 +6,20 @@ done (recoverable from git history), not archived in-tree. Canonical
 orientation is `../CLAUDE.md`; this file is just a map.
 
 ## Data pipeline (raw replays → training shards)
-- `download_fox.py` — pull Fox `.slp` from the legacy `slippi-public-dataset-v3.7`.
 - `shard_and_upload_ranked.py` — ranked `.slp` archive → HF tarballs, bucketed by
   (character, rank_pair). Holds the `PEPPI_TO_LIBMELEE` external-ID remap.
 - `slp_to_shards.py` — `.slp` → v2 `.pt` shards with `target[i] = buttons[i+1]`.
 - `filter_masterfox.py` — keep only perspectives where the target char is
   master-rank (rank read from `netplay.name`; hardcodes Fox, generalizes).
 - `reshard.py` — re-split shards to a target size (`--target-mb 800`).
-- `build_norm_stats.py`, `build_mimic_norm.py`, `build_clusters.py`,
-  `build_controller_combos.py` — generate shard-build metadata (`norm_stats.json`,
-  `mimic_norm.json`, `stick_clusters.json`, `controller_combos.json`).
+- `build_norm_stats.py`, `build_mimic_norm.py` — generate shard-build metadata
+  (`norm_stats.json`, `mimic_norm.json`); `stick_clusters.json` /
+  `controller_combos.json` come from `tools/meta/`.
 
 ## Training
 - `run_local_chars.sh` — local single-4090 all-character pipeline.
-- `run_all_chars.sh` — remote 2×5090 all-character pipeline.
-- `retrain_all_baseline.sh` — all-character baseline retrain (see 2026-04-20 note).
+- `run_pod_chars.sh` — remote-box all-character pipeline (stages, never pushes).
+- `fast_proxy.sh` / `proxy_run.sh` — ~5-min and ~45-min local research proxies.
 - `build_masterfox_train_box.sh` / `build_full_masterfox_box.sh` — remote-box
   filter→reshard→train pipelines for the rank-filtered master-Fox set.
 - `average_checkpoints.py` — checkpoint averaging (tail-SWA is part of the
@@ -72,3 +71,7 @@ history if a rebuild ever needs them:
   builds, reshard one-offs, rank probes, L-cancel probes, `ffw_batch_bench.py`,
   `diagnose.py`, `split_by_character.py`, `upload_models_to_hf.py` — superseded
   by `upload_char.py`) — removed 2026-07-17.
+- **2026-10-22 legacy cleanup** — `download_fox.py`, `build_clusters.py`,
+  `build_controller_combos.py`, `run_all_chars.sh`, `retrain_all_baseline.sh`,
+  `gen_h2h_schedule.py`, `plot_h2h.py`, `plot_winrate_steps.py`
+  (see `../docs/research-notes-2026-10-22.md`).

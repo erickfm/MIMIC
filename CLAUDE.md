@@ -500,8 +500,8 @@ Two sources of raw replays. Ranked is canonical for new training.
   `metadata/metadata_a{N}.json` sidecars were deleted in the fix and
   not yet regenerated.
 - **`erickfm/slippi-public-dataset-v3.7`** — legacy. 95K replays by
-  character; Fox folder has 45,854 .slp. `tools/download_fox.py` is
-  hardcoded to this source.
+  character; Fox folder has 45,854 .slp. (Its downloader,
+  `tools/download_fox.py`, was removed 2026-10-22.)
 
 ### Ranked dataset pipeline (`tools/shard_and_upload_ranked.py`)
 
@@ -564,24 +564,23 @@ cannot represent airdodge / wavedash / L-cancel.
 
 Full pipeline (download master-* ranked replays from HF → extract →
 re-shard with existing `mimic_norm.json` → train using the current
-best command) is wired into `tools/run_all_chars.sh` (remote 2×5090
-box) and `tools/run_local_chars.sh` (local single-4090 box; builds
-fresh per-char metadata, prefetches char N+1 during char N's
-training, uploads in the background). Per-char wall time on 2×RTX
+best command) is wired into `tools/run_pod_chars.sh` (remote box;
+stages, never pushes) and `tools/run_local_chars.sh` (local single-4090
+box; builds fresh per-char metadata, prefetches char N+1 during char
+N's training, uploads in the background). The v2 shard sets for every
+character are also on HF (`erickfm/mimic-shards-v2`), usable directly
+as `--data-dir`. Per-char wall time on 2×RTX
 5090 is ~1.5–2.5 hr; on the local 4090 ~2 hr of GPU time per char
 (bs 256 × grad-accum 2, ~4.5 step/s).
 
 **`hf download --include` gotcha:** repeating the `--include` flag
 overwrites earlier patterns (argparse `nargs='*'`) — all glob
-patterns must follow a SINGLE `--include`. Both shell scripts now use
-the single-flag form, but `run_all_chars.sh` HAD the repeated-flag bug
-and silently fetched only `master-platinum` (6 of 18 tarballs per
-char); the 2026-06-12 local runs initially trained on that ⅓ data and
-early-stopped at 1.6k–7.8k steps before the fix. Any model whose data
-was pulled through the buggy path should be considered platinum-only
-until verified. (Also note `run_all_chars.sh` still trains
-`--mimic-minimal-features`; `run_local_chars.sh` trains fullfeat —
-their outputs are not comparable.)
+patterns must follow a SINGLE `--include`. The (since removed)
+`run_all_chars.sh` HAD the repeated-flag bug and silently fetched only
+`master-platinum` (6 of 18 tarballs per char); the 2026-06-12 local
+runs initially trained on that ⅓ data and early-stopped at 1.6k–7.8k
+steps before the fix. Any model whose data was pulled through the buggy
+path should be considered platinum-only until verified.
 
 Character index + HF bucket map (`idx` = the libmelee `--character`
 value passed to `slp_to_shards.py`). Post-2026-06-15, Sheik and Zelda
