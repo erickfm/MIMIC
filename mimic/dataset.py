@@ -2,14 +2,9 @@
 # ---------------------------------------------------------------------------
 # Pretokenized tensor shard dataset for MIMIC training.
 #
-# StreamingMeleeDataset -- IterableDataset that reads pretokenized .pt shards.
-# Two shard formats are supported:
-#   1. Per-game shards (tensor_manifest.json) -- games concatenated with
-#      offsets array; windows extracted on the fly.  Produced by
-#      upload_dataset.py for HuggingFace distribution.
-#   2. Pre-windowed shards (tensor_meta.json) -- each sample is a
-#      pre-sliced window.  Produced locally by tensorize.py for maximum
-#      single-machine throughput.
+# StreamingMeleeDataset -- IterableDataset that reads per-game .pt shards
+# (tensor_manifest.json): games concatenated with an offsets array, windows
+# extracted on the fly. Produced by tools/slp_to_shards.py.
 # ---------------------------------------------------------------------------
 
 import json
@@ -27,10 +22,7 @@ from .features import encode_controller_onehot
 class StreamingMeleeDataset(IterableDataset):
     """Streams pretokenized .pt shards for training.
 
-    Requires one of:
-      - tensor_manifest.json  (per-game shards from upload_dataset.py)
-      - tensor_meta.json      (pre-windowed shards from tensorize.py)
-    Plus norm_stats.json (for checkpoint saving).
+    Requires tensor_manifest.json (per-game shards) and norm_stats.json (for checkpoint saving).
     """
 
     def __init__(
@@ -69,21 +61,9 @@ class StreamingMeleeDataset(IterableDataset):
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
 
-        prewindowed_path = self.data_dir / "tensor_meta.json"
         manifest_path = self.data_dir / "tensor_manifest.json"
 
-        if prewindowed_path.exists():
-            self._mode = "prewindowed"
-            with open(prewindowed_path) as fh:
-                tmeta = json.load(fh)
-            key = "val_shards" if split == "val" else "train_shards"
-            self.files = [self.data_dir / n for n in tmeta[key]]
-            self.n_games = len(self.files)
-            wkey = "n_val_windows" if split == "val" else "n_train_windows"
-            self._total_windows = tmeta[wkey]
-
-        elif manifest_path.exists():
-            self._mode = "pergame"
+        if manifest_path.exists():
             with open(manifest_path) as fh:
                 manifest = json.load(fh)
             key = "val_shards" if split == "val" else "train_shards"
@@ -94,10 +74,7 @@ class StreamingMeleeDataset(IterableDataset):
             self._total_windows = self.n_games * 100
 
         else:
-            raise RuntimeError(
-                f"No tensor_meta.json or tensor_manifest.json in {data_dir}. "
-                f"Run upload_dataset.py or tensorize.py first."
-            )
+            raise RuntimeError(f"No tensor_manifest.json in {data_dir} (per-game v2 shards).")
 
     def __len__(self):
         return self._total_windows
@@ -112,44 +89,6 @@ class StreamingMeleeDataset(IterableDataset):
         if worker_info is not None:
             files = files[worker_info.id :: worker_info.num_workers]
         return files
-
-    # ------------------------------------------------------------------
-    # Pre-windowed shards (from tensorize.py)
-    # ------------------------------------------------------------------
-    def _iter_prewindowed(self):
-        files = list(self.files)
-        rng = random.Random(42)
-        rng.shuffle(files)
-        files = self._shard_files(files)
-        random.shuffle(files)
-
-        for path in files:
-            shard = torch.load(path, weights_only=True, mmap=True)
-            n = shard["n"]
-            indices = list(range(n))
-            random.shuffle(indices)
-            for i in indices:
-                state = {k: v[i] for k, v in shard["states"].items()}
-                target = {k: v[i] for k, v in shard["targets"].items()}
-
-                # HAL-style: encode controller as one-hot vector (only if not pre-encoded)
-                if (self._hal_ctrl_enc and self._combo_map is not None
-                        and "self_controller" not in state
-                        and "self_buttons" in state and "self_analog" in state):
-                    onehot = encode_controller_onehot(
-                        state["self_buttons"].numpy(),
-                        state["self_analog"].numpy(),
-                        state["self_c_dir"].numpy(),
-                        self._combo_map,
-                        self._n_combos,
-                        norm_stats=self.norm_stats,
-                    )
-                    state["self_controller"] = torch.from_numpy(onehot)
-                    del state["self_buttons"]
-                    del state["self_analog"]
-                    del state["self_c_dir"]
-
-                yield state, target
 
     # ------------------------------------------------------------------
     # Per-game shards (from upload_dataset.py)
@@ -257,8 +196,7 @@ class StreamingMeleeDataset(IterableDataset):
 
     # ------------------------------------------------------------------
     def __iter__(self):
-        src = (self._iter_prewindowed() if self._mode == "prewindowed"
-               else self._iter_pergame())
+        src = self._iter_pergame()
         if self._mirror_aug <= 0.0:
             yield from src
             return

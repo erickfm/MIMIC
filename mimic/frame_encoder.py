@@ -734,7 +734,6 @@ class MimicFlatEncoder(nn.Module):
         # Legacy alias
         self._hal_ctrl_enc = self._ctrl_enc
         self._minimal = mimic_minimal_features
-        self.si_drop_prob: float = 0.0
 
         # Categorical embeddings (HAL sizes)
         self.stage_emb = nn.Embedding(num_stages, self.STAGE_EMB_DIM)
@@ -779,18 +778,6 @@ class MimicFlatEncoder(nn.Module):
         )
 
     def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
-        # Stochastic self-input masking
-        if not self._no_self_inputs and self.si_drop_prob > 0 and self._hal_ctrl_enc:
-            if "self_controller" in seq:
-                seq = dict(seq)
-                B = seq["self_controller"].shape[0]
-                device = seq["self_controller"].device
-                if self.training and self.si_drop_prob < 1.0:
-                    keep = (torch.rand(B, 1, 1, device=device) >= self.si_drop_prob).float()
-                else:
-                    keep = torch.zeros(B, 1, 1, device=device)
-                seq["self_controller"] = seq["self_controller"] * keep
-
         # Categorical embeddings
         # Stage remap: MIMIC shards use NO_STAGE=0, so tournament stages are 1-6.
         # HAL expects 0-5. Subtract 1 and clamp to handle the offset.

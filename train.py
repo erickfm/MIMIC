@@ -675,8 +675,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           warm_restart: bool = False,
           ema_decay: float = 0.0,
           eval_only: str = None,
-          si_drop_start: float = None, si_drop_end: float = None,
-          si_drop_max: float = 1.0,
           plain_ce: bool = False,
           n_heads_override: int = None,
           hal_mode: bool = False,
@@ -705,7 +703,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           lean_metrics: bool = False,
           optimizer: str = "muon",
           muon_lr: float = 0.02,
-          soap_lr: float = 3e-3,
           mirror_aug: float = 0.0,
           save_steps: str = None):
     if debug:
@@ -994,22 +991,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         ])
         _log(f"  Muon: {len(muon_p)} hidden matrices @ lr={muon_lr}; "
              f"aux-AdamW: {len(decay)+len(no_decay)} tensors @ lr={actual_lr}")
-    elif optimizer == "soap":
-        from mimic.soap import SOAP
-        decay, no_decay = [], []
-        for n, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            (no_decay if n.endswith("bias") or "norm" in n.lower()
-                      else decay).append(p)
-        optimiser = SOAP(
-            [{"params": decay,    "weight_decay": WEIGHT_DECAY},
-             {"params": no_decay, "weight_decay": 0.0}],
-            lr=soap_lr, betas=(0.95, 0.95), weight_decay=WEIGHT_DECAY,
-            precondition_frequency=10,
-        )
-        _log(f"  SOAP: {len(decay)+len(no_decay)} params @ lr={soap_lr} "
-             f"(precond_freq=10)")
     else:
         raise ValueError(f"unknown --optimizer {optimizer!r}")
 
@@ -1131,19 +1112,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         else:
             _log(f"  EMA enabled (decay={ema_decay}); initialized from current weights")
 
-    # -- Self-input curriculum schedule --
-    _si_schedule = None
-    if si_drop_start is not None and si_drop_end is not None:
-        si_start_step = int(si_drop_start * max_steps)
-        si_end_step = int(si_drop_end * max_steps)
-        def _si_drop_prob(step):
-            if step < si_start_step:
-                return 0.0
-            if step >= si_end_step:
-                return si_drop_max
-            return si_drop_max * (step - si_start_step) / (si_end_step - si_start_step)
-        _si_schedule = _si_drop_prob
-        _log(f"SI curriculum: drop 0→{si_drop_max} over steps {si_start_step}→{si_end_step}")
 
     if not run_name:
         extra = {}
@@ -1177,9 +1145,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             compiled=compile_model,
             model_preset=model_preset or "base",
             n_params=n_params,
-            si_drop_start=si_drop_start,
-            si_drop_end=si_drop_end,
-            si_drop_max=si_drop_max,
             **cfg.__dict__,
         ),
     )
@@ -1236,8 +1201,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             _sd = {k[len("_orig_mod."):]: v for k, v in _sd.items()}
         _raw_model.load_state_dict(_sd)
         model.eval()
-        if _si_schedule:
-            _raw_model.encoder.si_drop_prob = 0.0
         _EK = ["total", "main_f1", "btn_f1", "shldr_f1", "cdir_f1"]
         _s = {k: 0.0 for k in _EK}; _c = 0
         with torch.no_grad():
@@ -1301,8 +1264,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             break
 
         model.train()
-        if _si_schedule:
-            _raw_model.encoder.si_drop_prob = _si_schedule(step)
         optimiser.zero_grad(set_to_none=True)
 
         # -- Gradient accumulation loop --
@@ -1442,8 +1403,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 avg_log["perf/step_per_sec"]    = sps
                 avg_log["perf/samples_per_sec"] = sps * BATCH_SIZE * world_size * grad_accum_steps
                 avg_log["train/lr"] = optimiser.param_groups[0]["lr"]
-                if _si_schedule:
-                    avg_log["curriculum/si_drop_prob"] = _raw_model.encoder.si_drop_prob
                 if input_gate_l1 > 0 and hasattr(_raw_model.encoder, "input_gate_logits"):
                     g = torch.sigmoid(_raw_model.encoder.input_gate_logits).detach()
                     avg_log["gate/mean"]       = g.mean().item()
@@ -1470,16 +1429,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 f"cf1={metrics['cdir_f1']:.1%} "
                 f"gnorm={grad_norm:.2f} "
                 f"lr={scheduler.get_last_lr()[0]:.2e} "
-                + (f"si_drop={_raw_model.encoder.si_drop_prob:.2f} " if _si_schedule else "")
                 + f"({sps:.1f} step/s)",
             )
 
         # Validation
         if step % val_interval == 0 or step == max_steps:
             model.eval()
-            if _si_schedule:
-                _saved_si_prob = _raw_model.encoder.si_drop_prob
-                _raw_model.encoder.si_drop_prob = 0.0
             _VAL_KEYS = ["total", "loss_main", "loss_l", "loss_r",
                          "loss_cdir", "loss_btn", "cdir_acc", "btn_acc",
                          "btn_f1", "btn_precision", "btn_recall",
@@ -1625,46 +1580,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     for n, p in _raw_model.named_parameters():
                         p.copy_(_bk[n])
 
-            # Restore si_drop_prob after normal val
-            if _si_schedule:
-                _raw_model.encoder.si_drop_prob = _saved_si_prob
-
-            # Dual validation: eval with all self-inputs dropped
-            if _si_schedule and _saved_si_prob > 0:
-                _raw_model.encoder.si_drop_prob = 1.0
-                val_nsi_sums = {k: 0.0 for k in _VAL_KEYS}
-                val_nsi_ct = 0
-                with torch.no_grad():
-                    for vs, vt in val_dl:
-                        for k, v in vs.items():
-                            vs[k] = v.to(DEVICE, non_blocking=True)
-                        for k, v in vt.items():
-                            vt[k] = v.to(DEVICE, non_blocking=True)
-                        if _recluster_sticks and "main_x" in vt:
-                            xy = torch.stack([vt["main_x"], vt["main_y"]], dim=-1)
-                            dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
-                            vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
-                        with autocast("cuda", dtype=AMP_DTYPE):
-                            vpreds = _raw_model(vs, cond_classes=_cc(vt))  # unwrapped — no DDP collectives during eval
-                        vm, vtl = compute_loss(vpreds, vt,
-                                               btn_loss_type=cfg.btn_loss, plain_ce=plain_ce)
-                        batch_total = sum(t.item() for t in vtl)
-                        if math.isfinite(batch_total):
-                            val_nsi_sums["total"] += batch_total
-                            for _vk in _VAL_KEYS:
-                                if _vk != "total":
-                                    val_nsi_sums[_vk] += vm[_vk]
-                            val_nsi_ct += 1
-                        if val_nsi_ct >= MAX_VAL_BATCHES:
-                            break
-                if val_nsi_ct > 0:
-                    val_nsi_avg = {f"val_nsi/{k}": val_nsi_sums[k] / val_nsi_ct for k in _VAL_KEYS}
-                    wandb.log(val_nsi_avg, step=step)
-                    _log(f"  -- val_nsi bf1={val_nsi_avg['val_nsi/btn_f1']:.1%} "
-                         f"mf1={val_nsi_avg['val_nsi/main_f1']:.1%} "
-                         f"cf1={val_nsi_avg['val_nsi/cdir_f1']:.1%}")
-                _raw_model.encoder.si_drop_prob = _saved_si_prob
-
         if step in _save_steps:
             _save_snapshot(step)
 
@@ -1766,7 +1681,7 @@ if __name__ == "__main__":
                              "detached logits, so the heads model the joint distribution. On by "
                              "default since 2026-10-22; --no-cond-heads for the older heads (and to "
                              "resume runs trained without it).")
-    parser.add_argument("--relpos-impl", choices=["fp32", "bf16", "sdpa", "flex"], default="fp32",
+    parser.add_argument("--relpos-impl", choices=["fp32", "sdpa", "flex"], default="fp32",
                         help="Training kernel for the relpos attention (speed only; eval and "
                              "inference always use fp32). flex drops attention dropout.")
     parser.add_argument("--attn-window", type=int, default=0,
@@ -1874,19 +1789,16 @@ if __name__ == "__main__":
                         help="Path to a checkpoint: score it with the exact training "
                              "val loop (val/total), print EVAL_ONLY ..., and exit. "
                              "For scoring averaged/loaded checkpoints reproducibly.")
-    parser.add_argument("--optimizer", choices=["adamw", "muon", "soap"],
+    parser.add_argument("--optimizer", choices=["adamw", "muon"],
                         default="muon",
                         help="Optimizer for hidden matrices. 'muon' (default since 2026-10-22; "
                              "docs/research-notes-2026-10-22.md) runs Muon on "
                              "2D weight matrices + aux-AdamW on embeddings/heads/"
                              "norms/biases. 'adamw' is the pre-2026-10-22 default: use it to "
-                             "reproduce or resume older runs. 'soap' runs SOAP (Adam in the "
-                             "Shampoo eigenbasis) on all params.")
+                             "reproduce or resume older runs.")
     parser.add_argument("--muon-lr", type=float, default=0.02,
                         help="LR for the Muon group (2D hidden matrices) when "
                              "--optimizer muon; the aux-AdamW group keeps --lr.")
-    parser.add_argument("--soap-lr", type=float, default=3e-3,
-                        help="LR for SOAP when --optimizer soap (Adam-scale, ~3e-3).")
     parser.add_argument("--mirror-aug", type=float, default=0.0,
                         help="Left-right mirror augmentation probability per train "
                              "window (e.g. 0.5). Exploits Melee's L-R symmetry to "
@@ -1927,12 +1839,6 @@ if __name__ == "__main__":
                         help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
     parser.add_argument("--random-perspective", action="store_true",
                         help="Randomly pick one perspective per game pair (HAL-style regularization)")
-    parser.add_argument("--si-drop-start", type=float, default=None,
-                        help="Fraction of training where SI dropout begins")
-    parser.add_argument("--si-drop-end", type=float, default=None,
-                        help="Fraction of training where SI dropout reaches max")
-    parser.add_argument("--si-drop-max", type=float, default=1.0,
-                        help="Max SI drop probability (default: 1.0)")
     args = parser.parse_args()
 
     import train as _self_module
@@ -1990,9 +1896,6 @@ if __name__ == "__main__":
         warm_restart=args.warm_restart,
         ema_decay=args.ema_decay,
         eval_only=args.eval_only,
-        si_drop_start=args.si_drop_start,
-        si_drop_end=args.si_drop_end,
-        si_drop_max=args.si_drop_max,
         plain_ce=args.plain_ce,
         n_heads_override=args.n_heads,
         hal_mode=args.mimic_mode,
@@ -2022,6 +1925,5 @@ if __name__ == "__main__":
         lean_metrics=args.lean_metrics,
         optimizer=args.optimizer,
         muon_lr=args.muon_lr,
-        soap_lr=args.soap_lr,
         mirror_aug=args.mirror_aug,
     )

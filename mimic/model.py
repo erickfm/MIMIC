@@ -93,8 +93,8 @@ class ModelConfig:
     # detached logits, so the four heads model the joint distribution. Same parameter shapes.
     cond_heads: bool                = False
     # Training-time kernel for the Shaw relpos attention (--relpos-impl): "fp32" (the explicit
-    # FP32 math), "bf16" (same math, bf16 matmuls, fp32 softmax), "sdpa" (Shaw term as an
-    # additive mask into fused SDPA) or "flex" (FlexAttention; no attention dropout, needs
+    # FP32 math), "sdpa" (Shaw term as an additive mask into fused SDPA) or "flex"
+    # (FlexAttention; no attention dropout, needs
     # torch.compile). Speed only: eval and inference always run the fp32 path.
     relpos_impl: str                = "fp32"
     # Sliding-window relpos attention (--attn-window): >0 limits every layer to the last N frames,
@@ -407,7 +407,7 @@ class CausalSelfAttentionRelPos(nn.Module):
                  block_size: int = 1024, dropout: float = 0.2, impl: str = "fp32",
                  window: int = 0):
         super().__init__()
-        assert impl in ("fp32", "bf16", "sdpa", "flex"), impl
+        assert impl in ("fp32", "sdpa", "flex"), impl
         assert 0 <= window <= block_size, f"attn_window {window} exceeds the relpos table ({block_size})"
         self.impl = impl
         self.window = window          # >0: each query sees only the last `window` keys (incl. itself)
@@ -486,10 +486,6 @@ class CausalSelfAttentionRelPos(nn.Module):
     def _fast_attention(self, q, k, v, L):
         """Training-only kernels for the same Q@K^T + Srel attention (see relpos_impl)."""
         scale = 1.0 / math.sqrt(k.size(-1))
-        if self.impl == "bf16":
-            att = (q @ k.transpose(-2, -1) + self._srel(q, L)).float() * scale
-            att = att.masked_fill(self._mask(L) == 0, float("-inf"))
-            return self.attn_dropout(Fn.softmax(att, dim=-1).to(v.dtype)) @ v
         if self.impl == "sdpa":
             bias = (self._srel(q, L) * scale).masked_fill(self._mask(L) == 0, float("-inf"))
             return Fn.scaled_dot_product_attention(q, k, v, attn_mask=bias,
