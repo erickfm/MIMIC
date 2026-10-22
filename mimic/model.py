@@ -100,14 +100,6 @@ class ModelConfig:
     # Sliding-window relpos attention (--attn-window): >0 limits every layer to the last N frames,
     # so training can use long chunks and inference can stream with a KV cache (mimic/kv_cache.py).
     attn_window: int                = 0
-    # Temporal patching (--patch P): the transformer runs over P-frame patches (1/P the tokens);
-    # a small per-frame MLP predicts frame t from the last finished patch's output plus the raw
-    # frames t-P+1..t, so every prediction stays causal and sees the newest frame.
-    patch: int                      = 0
-    # Multi-token prediction (--mtp K): K extra training-only head sets; set k predicts the
-    # controller k frames further ahead from the same features (through its own Linear+GELU).
-    mtp: int                        = 0
-    patch_local_hidden: int         = 1024
     n_controller_combos: int        = 5       # number of button combo classes (from controller_combos.json)
 
     # Legacy hal_* fields — kept for checkpoint backwards compatibility.
@@ -1088,15 +1080,6 @@ class FramePredictor(nn.Module):
             self.blocks = nn.ModuleList(blocks)
         else:
             self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
-        P = getattr(cfg, "patch", 0)
-        self.patch_proj = None
-        if P > 1:
-            D = cfg.d_model
-            self.patch_proj = nn.Linear(P * D, D)
-            self.patch_start = nn.Parameter(torch.zeros(1, 1, D))   # context for the first patch
-            self.local = nn.Sequential(
-                nn.Linear((P + 1) * D, cfg.patch_local_hidden), nn.GELU(), nn.Dropout(cfg.dropout),
-                nn.Linear(cfg.patch_local_hidden, D))
         FinalNorm = RMSNorm if getattr(cfg, 'use_rmsnorm', False) else nn.LayerNorm
         self.final_norm = FinalNorm(cfg.d_model)
         if cfg.mimic_mode:
@@ -1117,16 +1100,6 @@ class FramePredictor(nn.Module):
                 n_shoulder_bins=cfg.n_shoulder_bins,
                 autoregressive=cfg.autoregressive_heads,
             )
-
-        self.mtp_heads = None
-        if getattr(cfg, "mtp", 0) > 0 and cfg.mimic_mode:
-            self.mtp_heads = nn.ModuleList([nn.ModuleDict(dict(
-                proj=nn.Sequential(nn.Linear(cfg.d_model, cfg.d_model), nn.GELU()),
-                heads=MimicPredictionHeads(
-                    cfg.d_model, n_stick_clusters=cfg.n_stick_clusters, n_shoulder_bins=3,
-                    n_cdir=cfg.num_c_dirs,
-                    n_btn_classes=cfg.n_controller_combos if cfg.mimic_controller_encoding else 5)))
-                for _ in range(cfg.mtp)])
 
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * max(cfg.num_layers, 1))
@@ -1154,19 +1127,6 @@ class FramePredictor(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, std=0.02)
 
-    def _patched(self, x: torch.Tensor) -> torch.Tensor:
-        """Transformer over P-frame patches, then the per-frame local MLP (see cfg.patch)."""
-        B, T, D = x.shape
-        P = self.cfg.patch
-        assert T % P == 0, f"seq len {T} must be a multiple of patch {P}"
-        c = self.patch_proj(x.reshape(B, T // P, P * D))
-        for blk in self.blocks:
-            c = blk(c)
-        # frame t in patch p gets patch p-1's output (frames < pP) plus raw frames t-P+1..t
-        ctx = torch.cat([self.patch_start.expand(B, 1, D), c[:, :-1]], dim=1).repeat_interleave(P, dim=1)
-        recent = [x] + [Fn.pad(x, (0, 0, k, 0))[:, :T] for k in range(1, P)]
-        return x + self.local(torch.cat([ctx] + recent, dim=-1))
-
     def features(self, frames: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Encoder + backbone + final norm: the (B, T, d_model) input to the heads."""
         x = self.encoder(frames)                         # (B, T, d_model)
@@ -1175,23 +1135,14 @@ class FramePredictor(nn.Module):
         if self.pos_emb is not None:
             T = x.size(1)
             x = x + self.pos_emb[:, :T]
-        if self.patch_proj is not None:
-            x = self._patched(x)
-        else:
-            for blk in self.blocks:
-                x = blk(x)
+        for blk in self.blocks:
+            x = blk(x)
         return self.final_norm(x)
 
     def forward(self, frames: Dict[str, torch.Tensor],
                 btn_targets: Optional[torch.Tensor] = None,
                 cond_classes: Optional[tuple] = None) -> Dict[str, torch.Tensor]:
         x = self.features(frames)                        # (B, T, d_model)
-        if self.mtp_heads is not None and self.training:
-            # "_mtp"[k-1] predicts the targets k frames later, so it covers positions 0..T-1-k
-            out = (self.heads(x, btn_targets=btn_targets, cond_classes=cond_classes)
-                   if cond_classes is not None else self.heads(x, btn_targets=btn_targets))
-            out["_mtp"] = [m["heads"](m["proj"](x[:, :-(k + 1)])) for k, m in enumerate(self.mtp_heads)]
-            return out
         if cond_classes is not None:
             return self.heads(x, btn_targets=btn_targets, cond_classes=cond_classes)
         return self.heads(x, btn_targets=btn_targets)    # all T positions

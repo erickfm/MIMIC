@@ -32,7 +32,7 @@ class RelPosKVCache:
         model = getattr(model, "_orig_mod", model)
         w = getattr(model.cfg, "attn_window", 0)
         assert w > 0, "KV cache needs a sliding-window model (cfg.attn_window > 0)"
-        assert model.mlp is None and model.pos_emb is None and model.patch_proj is None
+        assert model.mlp is None and model.pos_emb is None
         self.model, self.w, self.B = model, w, batch_size
         attn0 = model.blocks[0].self_attn
         assert isinstance(attn0, CausalSelfAttentionRelPos)
