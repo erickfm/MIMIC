@@ -2,17 +2,23 @@
 
 ## TL;DR
 
-- **Cond-heads (`--cond-heads`, champion recipe otherwise) beats the fox-master
-  champion 610–446 in the native sim** (57.8%, 95% CI 54.8–60.7%, p = 5×10⁻⁷,
-  1,056 fp32 games on the fixed harness). The win holds with either policy
-  listed first, and L-cancel is equal (91.2% both). The clean A/B against the
-  same-code `control` run is pending (pod, ~22:50 UTC).
+- **Cond-heads (`--cond-heads`, champion recipe otherwise) beats `control`
+  (same code and recipe, no flag) 611–445 in the native sim** (57.9%, 95% CI
+  54.9–60.8%, p ≈ 4×10⁻⁷, 1,056 bf16 games on the fixed harness). Against the
+  fox-master champion it's 610–446 (57.8%, fp32). Val loss on a fixed held-out
+  set: 0.6803 → 0.6519 (−4.2%).
+- **RoPE (`mimic-rope-matched`) loses to relpos on val loss, and the gap grows
+  with training.** It was worse than `control` at all 62 matched evals, by 1.3%
+  at step 174k. Stopped by the owner at step 175k; RoPE is dropped. See
+  "RoPE vs relpos" below for how strong this is.
 - **The old `sim_h2h` harness was biased.** An identical-model control gave
   225–175 (p = 0.014). Fixed in `27bda08`. The fixed harness's control gives
   248–232 (p = 0.49). Every h2h number from before the fix is unconfirmed.
 - **L-cancel RL in the sim raises L-cancel from ~91% to 94–97%, but no
-  checkpoint has a confirmed strength gain over BC.** Pushing to ~97% cost
-  strength even with a KL anchor. The fixed-harness reruns are pending.
+  checkpoint has a strength gain over BC.** The one apparent win (B2 u25, 57% on
+  the old harness) came out 247–233 (51.5%, p = 0.55) on the fixed harness.
+  Pushing to ~97% cost strength even with a KL anchor. As a test that the RL
+  loop learns what it's rewarded for, it works.
 - **The trainer's intermittent CUDA fault is a cuBLAS SGEMM launched with a bad
   address after CUDA-graph rollouts.** `CUBLAS_WORKSPACE_CONFIG=:0:0` stops it
   (0 crashes in 34 updates vs one every ~5–10). Fixed in `ecaebaf`.
@@ -56,7 +62,7 @@ Lesson: one 50% control on one seed did not show the rig was unbiased. Run a
 same-model control on the seed and harness actually used, and read the
 breakdowns.
 
-## Cond-heads vs champion
+## Cond-heads vs champion and vs control
 
 Cond-heads is `fox-20261020-condheads`, averaged over its last 5 checkpoints
 (tail-SWA) on the vast pod; the champion is `hf_eval/fox-master` (`AVG_c9nm`).
@@ -67,6 +73,18 @@ Both ran in fp32, the Dolphin inference numerics.
 | old (seed 21) | 1,000 | 545–454 (1 draw) | 54.6% [51.5, 57.6] | 0.004 | +0.20 |
 | **fixed** (seed 21) | 1,056 | **610–446** | **57.8% [54.8, 60.7]** | 5×10⁻⁷ | +0.33 |
 
+**Against `control`** (`fox-20261020-control`: same code, recipe, data and seed,
+no `--cond-heads`), fixed harness, bf16, 1,056 games: **611–445, 57.9%
+[54.9, 60.8], p ≈ 4×10⁻⁷**, stock margin +0.27. The record was 304–224 with
+cond-heads listed first and 307–221 with control first. Cond-heads deals about
+22 more damage per game than it takes (difference of total damage dealt, from
+the recorded games). This is the clean A/B: the gain comes from the flag.
+
+Val loss on a fixed held-out set (`train.py --eval-only --seed 0`, batch 768,
+100 batches from the 3 local val shards): control **0.6803**, cond-heads
+**0.6519** (−0.0284, −4.2%). In-training val curves show the gap at 3.6–4.0%
+from 1% of training (step 2.8k) to the end.
+
 On the fixed harness, cond-heads won 292–236 when listed first and 318–210 when
 the champion was listed first. It led in 10 of 12 template/side cells; the
 other two were 45–43 and 43–45. L-cancel was 91.2% for both models, so the gain
@@ -74,8 +92,7 @@ comes from somewhere else.
 
 Caveats:
 
-- The champion was trained in July on the same recipe and shards but older
-  code. `fox-20261020-control` (same code, no flag) is the clean comparison.
+- Not yet checked in Dolphin. Needed before promoting.
 - Sim only. One Dolphin check of the unannealed step-28k checkpoint (2 games)
   showed nothing broken: L-cancel 77% (n=44), center-stick 42%.
 
@@ -127,7 +144,11 @@ Arms (all on fox-master; screens are 75 games vs BC, seed 7, **old harness**):
 
 The last row is a halfway weight blend of BC and G2L u60 (WiSE-FT).
 
-Reading, pending the fixed-harness reruns:
+Fixed-harness rerun (480 games vs BC, bf16): **B2 u25 247–233, 51.5% [47.0, 55.9],
+p = 0.55.** The blend and G2L u60 reruns were stopped as low value once this
+came in.
+
+Reading:
 
 - At ~94–95% L-cancel the policy plays about even with BC.
 - B2 u25's 57% didn't replicate on seed 31, and seed 11 is the seed where the
@@ -140,8 +161,89 @@ This matches CLAUDE.md's "error consequence is non-uniform" point:
 L-cancel is worth little to win rate, so a pure L-cancel reward can only cost
 strength once it changes behaviour beyond timing.
 
-Reruns on the fixed harness (B2 u25, the blend and G2L u60 vs BC, 480 games each)
-are running: `checkpoints/h2h_rerun_20261021/results.txt`.
+As a test of the RL loop itself, it worked: the reward rose within 10–30
+updates, the KL penalties behaved as designed, and the unanchored runs showed
+the expected reward hacking.
+
+## RoPE vs relpos (`mimic-rope-matched`): dropped
+
+`fox-20261020-ropematched` is `control` with only the position encoding changed.
+`mimic-rope-matched` has the same block, projections and dropout sites as `mimic`,
+with RoPE on Q/K and a fused SDPA kernel instead of Shaw relative-position
+attention. Same data, seed, batch, schedule and steps.
+
+In-training val loss at matched steps (each eval draws its own val sample, so
+single points wobble; the trend across evals is what counts):
+
+| step | control | ropematched | rope − control |
+|---|---|---|---|
+| 2.8k (1%) | 0.8051 | 0.8066 | +0.0015 (+0.2%) |
+| 14k (5%) | 0.7543 | 0.7561 | +0.0018 (+0.2%) |
+| 28k (10%) | 0.7361 | 0.7406 | +0.0045 (+0.6%) |
+| 56k (20%) | 0.7245 | 0.7323 | +0.0078 (+1.1%) |
+| 112k (40%) | 0.7056 | 0.7180 | +0.0124 (+1.8%) |
+| 174k (62%) | 0.7006 | 0.7098 | +0.0092 (+1.3%) |
+
+**How strong the evidence is:**
+
+- **Consistent.** RoPE was worse at all 62 matched evals. After 20% of
+  training it was worse at 43 of 43, by +0.0096 on average (1.3%).
+- **Large relative to measurement jitter.** The eval-to-eval wobble of a fixed
+  difference between two runs (control minus cond-heads, after 20%) has an SD of
+  0.0014, so the RoPE gap is about 7× that.
+- **Larger than seed noise, but only one seed.** The June study put the spread
+  between seeds at full size at about 0.004 (0.5%), so the gap is about 2.4× that.
+  Each arm is a single training seed.
+- **Not run to the end.** It was stopped at step 175k of 280k, before most of
+  the cosine LR decay. The final gap could shrink or grow; at the last eval it
+  was still about 1.3%.
+- **No h2h.** Val loss only; no averaged checkpoint was made.
+- **It agrees with history.** Earlier RoPE presets also underperformed. The
+  10-20c memo found those comparisons confounded (seq 60 vs 256); this one isn't.
+- **It's a gradual effect.** The gap is near zero for the first 5% of training
+  and opens over time. Short proxy runs would have called RoPE a tie.
+
+Conclusion: RoPE as implemented is worse than Shaw relpos for this model, by
+about 1–2% val loss. The evidence is strong enough to stop spending pod time on
+it, but not a final number. What RoPE buys is speed: 11.2 vs 8.4 steps/s in
+training (+33%), and fused-kernel inference (about 2×, measured 2026-10-20).
+Relpos stays.
+
+## Proxy setup for fast research iteration (calibration in progress)
+
+The goal: a small local training run (RTX 4090) that ranks changes the way the
+9-hour pod runs do, with clear single-seed signal.
+
+Setup:
+- Data: 16 of 342 master-Fox shards (`data/mastfox_c9_half`, about 5%).
+- Recipe: champion recipe, eff batch 768, scaled down.
+- Scoring: tail-SWA of the last 5 checkpoints, then fixed-set val loss.
+- Script: `tools/proxy_run.sh`.
+
+Three equal-wall-clock cells: 5M × 13k steps, 11M × 9k, 20M × 6.5k.
+
+| Model | Baseline val | Cond-heads val | Gain |
+|---|---|---|---|
+| 5M, 13k steps (40 min) | 0.7807 | 0.7472 | −4.3% |
+| 11M, 9k steps (50 min) | 0.7747 | 0.7427 | −4.1% |
+| 20M full run (9 h, pod) | 0.6803 | 0.6519 | −4.2% |
+
+So far:
+
+- **The proxies reproduce the full-size gain in relative terms.**
+- **The 5M gain shows no in-game edge.** A 96-game sim match between the 5M
+  pair was a tie (44–52; damage +0.8 ± 9.6). At this size the val gain doesn't
+  show in play, so h2h sanity checks need a bigger proxy.
+- **Pending:** the 20M proxy cell, and second baseline seeds for the noise
+  floor.
+
+Whole-game h2h metrics all need about 300 games for an 8-point edge:
+
+| Metric | Games needed (cond-heads vs control) |
+|---|---|
+| Win/loss | ~310 |
+| Stock margin | ~390 |
+| Damage dealt minus taken | ~280 |
 
 ## Trainer crash: cuBLAS SGEMM bad address after CUDA-graph rollouts
 
@@ -191,18 +293,19 @@ plus saved optimizer state (`opt_uNNNN.pt`) were added along the way.
 
 ## Pod queue (vast, 2×5090)
 
-- `fox-20261020-condheads` finished 13:31 UTC; its averaged checkpoint was pulled.
-- `fox-20261020-control` is at step 226k of 280k, ETA ~22:50 UTC.
-- Then `ropematched` (~07:40 UTC 10-22) and `wdfix`. `wdfix` won't finish
-  before the balance runs out (~14:45 UTC 10-22) without a top-up.
+- `fox-20261020-condheads` finished 13:31 UTC; `fox-20261020-control` finished
+  22:45 UTC. Both averaged checkpoints were pulled.
+- `fox-20261020-ropematched` was stopped by the owner at step 175k (03:08 UTC
+  10-22); see above. The pod queue was restarted as `run_queue3.sh` (wdfix only).
+- `fox-20261020-wdfix` started 03:08 UTC 10-22 at 8.4 steps/s, ETA ~12:20 UTC.
+  Auto top-up is on, so the balance isn't a constraint.
 
 ## Next
 
-- Cond-heads vs `control` on the fixed harness (1,000+ bf16 games) when the
-  control checkpoint lands.
-- Read the fixed-harness RL reruns. If nothing beats BC, L-cancel-only RL is
-  done as a strength lever. Its value is the pipeline, which is now fast,
-  faithful and stable, for a consequence-weighted reward.
+- `wdfix` vs `control`: fixed-set val loss, then a sim h2h, when it lands.
+- Cond-heads in Dolphin before any promotion.
+- Proxy calibration (local 4090) to set up a fast research loop: see the
+  proxy notes when the calibration finishes.
 
 ## Files
 
