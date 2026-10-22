@@ -363,7 +363,6 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None,
               n_heads_override=None,
-              hal_minimal_features=False,
               hal_controller_encoding=False, n_controller_combos=5,
               use_input_gate=False, cond_heads=False, relpos_impl="fp32", attn_window=0):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
@@ -378,8 +377,6 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
     if n_heads_override:
         overrides["nhead"] = n_heads_override
     overrides["mimic_mode"] = True   # the only mode
-    if hal_minimal_features:
-        overrides["hal_minimal_features"] = True
     if hal_controller_encoding:
         overrides["hal_controller_encoding"] = True
         overrides["n_controller_combos"] = n_controller_combos
@@ -469,7 +466,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           cosine_min_lr: float = None,
           no_warmup: bool = False,
           stick_clusters: str = None,
-          hal_minimal_features: bool = False,
           reaction_delay_override: int = None,
           hal_controller_encoding: bool = False,
           character_filter: int = None,
@@ -609,20 +605,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             f"No stick_clusters.json found "
             f"(checked: {clusters_path}, {data_dir}, data/full/)")
     n_stick_clusters = len(stick_centers_np)
-    if hal_minimal_features:
-        # Force 3-class shoulder output, but keep data's centers for decoding
-        _shoulder_centers_for_decode = torch.tensor(shoulder_centers_np, dtype=torch.float32, device=DEVICE)
-        n_shoulder_bins = 3
-    else:
-        _shoulder_centers_for_decode = None
-        n_shoulder_bins = len(shoulder_centers_np)
+    n_shoulder_bins = len(shoulder_centers_np)
     def _cc(t):   # --cond-heads: true earlier-head classes to condition on (None otherwise)
         if not cond_heads:
             return None
-        sc = _shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers
-        return _cond_head_classes(t, sc, cfg.num_c_dirs)
-    _shoulder_centers = torch.tensor(shoulder_centers_np if not hal_minimal_features else [0.0, 0.4, 1.0],
-                                     dtype=torch.float32, device=DEVICE)
+        return _cond_head_classes(t, _shoulder_centers, cfg.num_c_dirs)
+    _shoulder_centers = torch.tensor(shoulder_centers_np, dtype=torch.float32, device=DEVICE)
     _stick_centers = torch.tensor(stick_centers_np, dtype=torch.float32, device=DEVICE)
     _recluster_sticks = stick_clusters is not None  # re-assign if using non-data clusters
     _log(f"  Clusters: {n_stick_clusters} stick, {n_shoulder_bins} shoulder"
@@ -636,7 +624,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            no_self_inputs=no_self_inputs,
                            n_stick_clusters=n_stick_clusters,
                            n_heads_override=n_heads_override,
-                           hal_minimal_features=hal_minimal_features,
                            hal_controller_encoding=hal_controller_encoding,
                            n_controller_combos=_n_combos,
                            use_input_gate=(input_gate_l1 > 0),
@@ -884,7 +871,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 with autocast("cuda", dtype=AMP_DTYPE):
                     vpreds = _raw_model(vs, cond_classes=_cc(vt))
                 vm, vtl = compute_loss(vpreds, vt,
-                                       shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                                       shoulder_centers=_shoulder_centers,
                                        n_cdir=cfg.num_c_dirs)
                 _bt = sum(t.item() for t in vtl)
                 if math.isfinite(_bt):
@@ -961,7 +948,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 metrics, task_losses = compute_loss(
                     preds, target,
                     lite=lean_metrics and not (step % log_interval == 0 or step == 1),
-                    shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                    shoulder_centers=_shoulder_centers,
                     n_cdir=cfg.num_c_dirs)
             except torch.cuda.OutOfMemoryError:
                 mem = torch.cuda.max_memory_allocated() / 1e9
@@ -988,8 +975,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 with torch.no_grad(), autocast("cuda", dtype=AMP_DTYPE):
                     # a cond teacher conditions on the true earlier-head classes (not its own samples)
                     t_preds = _teacher(state, cond_classes=_cond_head_classes(
-                        target, _shoulder_centers_for_decode if _shoulder_centers_for_decode is not None
-                        else _shoulder_centers, cfg.num_c_dirs) if _teacher_cond else None)
+                        target, _shoulder_centers, cfg.num_c_dirs) if _teacher_cond else None)
                 kd = sum(F.kl_div(F.log_softmax(preds[k].float(), -1), F.log_softmax(t_preds[k].float(), -1),
                                   log_target=True, reduction="none").sum(-1).mean()
                          for k in ("main_xy", "shoulder_val", "c_dir_logits", "btn_logits"))
@@ -1115,7 +1101,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         with autocast("cuda", dtype=AMP_DTYPE):
                             vpreds = _raw_model(vs, cond_classes=_cc(vt))  # unwrapped — no DDP collectives during eval
                         vm, vtl = compute_loss(vpreds, vt,
-                                               shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                                               shoulder_centers=_shoulder_centers,
                                                n_cdir=cfg.num_c_dirs)
                         batch_total = sum(t.item() for t in vtl)
                         if math.isfinite(batch_total):
@@ -1388,9 +1374,6 @@ if __name__ == "__main__":
                         help="Enable the linear LR warmup (5%% of steps, or --warmup-steps)")
     parser.add_argument("--stick-clusters", type=str, default="hal37",
                         help="Stick cluster set: 'hal37' (default) for the 37 hand-designed clusters")
-    parser.add_argument("--mimic-minimal-features",
-                        dest="mimic_minimal_features", action="store_true",
-                        help="Minimal input set (drop ECB, speeds, hitlag/hitstun from numeric)")
     parser.add_argument("--mimic-controller-encoding",
                         dest="mimic_controller_encoding", action=argparse.BooleanOptionalAction,
                         default=True,
@@ -1443,7 +1426,6 @@ if __name__ == "__main__":
         cosine_min_lr=args.cosine_min_lr,
         no_warmup=not args.warmup,
         stick_clusters=args.stick_clusters,
-        hal_minimal_features=args.mimic_minimal_features,
         reaction_delay_override=args.reaction_delay,
         hal_controller_encoding=args.mimic_controller_encoding,
         character_filter=args.character_filter,

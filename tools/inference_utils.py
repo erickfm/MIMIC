@@ -38,9 +38,7 @@ BUTTONS_NO_SHOULDER_5 = [
 
 # Numeric features in shard column order (13-col schema, post 2026-04-20
 # drop of invuln_left + ECB corners — see mimic/features.py:numeric_state
-# and tools/slp_to_shards.py). The MimicFlatEncoder slices to 6 cols
-# internally for minimal-features checkpoints, so producing the full 13
-# works for both minimal and fullfeat models.
+# and tools/slp_to_shards.py).
 MIMIC_NUM_FULL = [
     "pos_x", "pos_y", "percent", "stock", "jumps_left",
     "speed_air_x_self", "speed_ground_x_self",
@@ -151,46 +149,15 @@ def _player_numeric_full(ps, hal_features, norm_stats):
 
 
 def load_mimic_model(checkpoint_path, device):
-    """Load a MIMIC FramePredictor (or HAL bare state dict) from checkpoint.
+    """Load a MIMIC FramePredictor from a training/averaged checkpoint.
 
     Returns (model, cfg) with model in eval mode on device.
     """
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-    # HAL bare state dict — no "config" key, just raw weights with module. prefix
     if not isinstance(ckpt, dict) or "config" not in ckpt:
-        sd = {k.removeprefix("module."): v for k, v in ckpt.items()}
-        # Remap HAL key names → MIMIC FramePredictor key names
-        remap = {}
-        for k, v in sd.items():
-            nk = k
-            nk = nk.replace("stage_emb.", "encoder.stage_emb.")
-            nk = nk.replace("character_emb.", "encoder.char_emb.")
-            nk = nk.replace("action_emb.", "encoder.action_emb.")
-            nk = nk.replace("transformer.proj_down.", "encoder.proj.")
-            nk = nk.replace("transformer.drop.", "encoder.drop.")
-            nk = nk.replace("transformer.ln_f.", "final_norm.")
-            nk = nk.replace("transformer.h.", "blocks.")
-            nk = nk.replace(".attn.", ".self_attn.")
-            nk = nk.replace("shoulder_head.", "heads.shoulder_head.")
-            nk = nk.replace("c_stick_head.", "heads.cdir_head.")
-            nk = nk.replace("main_stick_head.", "heads.main_head.")
-            nk = nk.replace("button_head.", "heads.btn_head.")
-            remap[nk] = v
-        sd = remap
-        cfg = ModelConfig(
-            d_model=512, nhead=8, num_layers=6, dim_feedforward=2048,
-            dropout=0.2, max_seq_len=256, pos_enc="relpos",
-            num_stages=6, num_characters=27, num_actions=396, num_c_dirs=9,
-            hal_mode=True, hal_minimal_features=True, hal_controller_encoding=True,
-            encoder_type="hal_flat", n_controller_combos=5, n_stick_clusters=37,
-            no_self_inputs=False, no_opp_inputs=True,
-        )
-        model = FramePredictor(cfg)
-        model.load_state_dict(sd)
-        model.eval()
-        model.to(device)
-        return model, cfg
+        raise ValueError(f"{checkpoint_path} has no config: HAL bare state dicts are loaded by "
+                         f"tools/run_hal_model.py, not the MIMIC inference path")
 
     cfg_dict = {k: v for k, v in ckpt["config"].items()
                 if k in ModelConfig.__dataclass_fields__}
@@ -222,9 +189,8 @@ def load_inference_context(data_dir):
 
     # norm_stats.json: per-column [mean, std] pairs, built from a sample
     # of raw .slp files by tools/build_norm_stats.py. Optional — legacy
-    # data dirs may not have it, in which case non-minimal features
-    # pass through as 0.0 at inference (the encoder slices them away
-    # for minimal-features checkpoints, so no harm in that case).
+    # data dirs may not have it, in which case those features pass through
+    # as 0.0 at inference.
     norm_stats = {}
     ns_path = data_dir / "norm_stats.json"
     if ns_path.exists():

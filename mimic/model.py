@@ -62,7 +62,7 @@ class ModelConfig:
     # prediction heads (the mimic heads: single-label buttons, combined 3-class shoulder, LN)
     n_stick_clusters: int           = 63
     mimic_mode: bool                = True   # the only mode; False only in pre-mimic checkpoints
-    mimic_minimal_features: bool    = False  # drop ECB/speeds/hitlag from numeric
+    mimic_minimal_features: bool    = False  # legacy 9-col gamestate; removed 2026-10-22 (load refuses)
     mimic_controller_encoding: bool = False  # one-hot controller feedback (stick clusters + button combos)
     # Conditional heads (--cond-heads): each mimic head is conditioned on the one-hot CLASS of the
     # earlier heads (the true class in training, the sampled class at inference) instead of their
@@ -467,7 +467,6 @@ class FramePredictor(nn.Module):
             num_characters=cfg.num_characters,
             num_actions=cfg.num_actions,
             no_self_inputs=cfg.no_self_inputs,
-            mimic_minimal_features=cfg.mimic_minimal_features,
             mimic_controller_encoding=cfg.mimic_controller_encoding,
             n_controller_combos=cfg.n_controller_combos,
             use_input_gate=cfg.use_input_gate,
@@ -479,6 +478,9 @@ class FramePredictor(nn.Module):
         self.blocks = nn.ModuleList([MimicTransformerBlock(cfg) for _ in range(cfg.num_layers)])
         FinalNorm = RMSNorm if getattr(cfg, 'use_rmsnorm', False) else nn.LayerNorm
         self.final_norm = FinalNorm(cfg.d_model)
+        if cfg.mimic_minimal_features:
+            raise ValueError("minimal-features (9-col gamestate) models are no longer supported "
+                             "(removed 2026-10-22; git history)")
         if not cfg.mimic_mode:
             raise ValueError("only the mimic heads are implemented (the multi-label PredictionHeads "
                              "were removed 2026-10-22; git history)")

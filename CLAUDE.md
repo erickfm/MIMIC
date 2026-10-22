@@ -35,17 +35,16 @@ where the transformer backbone came from.
 MIMIC's canonical config (preset name `mimic`, bootstrapped from HAL's
 GPTv5Controller and later diverged):
 
-- **Params:** ~19.95M (minimal-features) / ~19.99M (full-features).
+- **Params:** ~19.99M.
 - **Transformer:** d_model=512, 6 layers, 8 heads, block_size=1024.
 - **Position encoding:** Shaw relative-position attention — the only one
   implemented (RoPE/xPos/ALiBi/learned were removed 2026-10-22; see Pitfalls).
 - **Input:**
-  - **Minimal features** (legacy, `--mimic-minimal-features`):
-    Linear(166 → 512) from
-    `[stage_emb(4) + 2*char_emb(12) + 2*action_emb(32) + gamestate(18) + controller(56)]`.
-  - **Full features** (default — drop `--mimic-minimal-features` from the CLI):
-    Linear(184 → 512) — same categorical embeddings, but the 18-dim
-    `gamestate` becomes 36-dim (18 per player: 13 numeric + 5 flags).
+  Linear(184 → 512) from
+  `[stage_emb(4) + 2*char_emb(12) + 2*action_emb(32) + gamestate(36) + controller(56)]`,
+  gamestate = 18 per player (13 numeric + 5 flags). The older 9-col
+  "minimal features" input (Linear 166 → 512) was removed 2026-10-22;
+  minimal-features checkpoints no longer load (git history).
 - **Output heads (autoregressive with detach):**
   shoulder(3) → c_stick(9) → main_stick(37) → buttons(7).
 - **Head hidden dim:** `input_dim // 2` (NOT a fixed 256 — each head has
@@ -56,11 +55,7 @@ GPTv5Controller and later diverged):
 
 ### Gamestate columns per player
 
-**Minimal (9):** `percent, stock, facing, invulnerable, jumps_left,
-on_ground, shield_strength, position_x, position_y` (exact HAL order
-is preserved by a reindex in the encoder's minimal path).
-
-**Full (18):** 13 numeric + 5 flags in native shard order:
+**18 per player:** 13 numeric + 5 flags in native shard order:
 
     numeric[0-4]   : pos_x, pos_y, percent, stock, jumps_left
     numeric[5-9]   : speed_air_x_self, speed_ground_x_self,
@@ -79,10 +74,7 @@ back to 0 if `event_bytes` is too short, which it is). They always
 carried constant zero — an L1 input-gate run independently pruned them
 to the sparsity floor. Some older fullfeat checkpoints (`puff xxl`,
 `peach baseline`, `falco xxl continue`, `ice_climbers xxl`) were trained
-on the 22-col layout and cannot load into the current 184→512 encoder;
-minimal-features checkpoints still load correctly because the minimal
-path is shard-width aware and reduces to the same 9-slot layout
-internally.
+on the 22-col layout and cannot load into the current 184→512 encoder.
 
 ### Per-feature normalization
 
@@ -235,13 +227,6 @@ hal37`, `--self-inputs`, `--reaction-delay 0`, `--lr 3e-4`, no warmup,
 no-ops (mimic mode and plain CE are the only mode and loss; focal loss
 and the multi-label heads were removed). A bare `train.py --data-dir D
 --run-name N` trains the production recipe.
-
-**Full features are the default** — omit `--mimic-minimal-features`
-so the encoder exposes the full 13-numeric + 5-flag per-player
-gamestate. Worth ~1.5–3.5% val-loss reduction over the minimal path
-at no wall-clock cost. Old checkpoints trained with the flag still
-load unchanged (the flag flows through the pickled config and the
-minimal-path behavior is bit-identical for back-compat).
 
 **Muon is the default optimizer (since 2026-10-22).** `--optimizer muon`
 (implicit): Muon at `--muon-lr 0.02` on the hidden 2D matrices,
@@ -681,8 +666,8 @@ X but didn't upload it." The `.pt` itself must come from the GPU box
 ### Core
 - `train.py` — training loop (DDP, gradient accumulation, mimic_mode, cosine LR).
 - `mimic/model.py` — model architecture (FramePredictor, mimic presets, Shaw relpos attention incl. sliding window and the sdpa/flex training kernels).
-- `mimic/dataset.py` — StreamingMeleeDataset (per-game + pre-windowed shards).
-- `mimic/frame_encoder.py` — MimicFlatEncoder; honors `mimic_minimal_features` (slices the shard numeric tensor to 9 cols in HAL order) vs full (13 numeric + 5 flags). Also hosts the optional `use_input_gate` L1 diagnostic.
+- `mimic/dataset.py` — StreamingMeleeDataset (per-game v2 shards).
+- `mimic/frame_encoder.py` — MimicFlatEncoder (13 numeric + 5 flags per player, embeddings, controller one-hot → one Linear). Also hosts the optional `use_input_gate` L1 diagnostic.
 - `mimic/features.py` — feature schema + normalization. `numeric_state(full=True)` returns 13 cols.
 - The old root-level `eval.py` / `inference.py` were removed (2026-06); inference lives in `tools/play.py` / `tools/play_netplay.py`.
 
@@ -720,8 +705,7 @@ where the L-button / TRIG decode lives — new inference entry points
 must import from here, not reimplement. Produces the full 13-numeric +
 5-flag tensor; reads `PlayerState.speed_*` / `.hitlag_left` /
 `.hitstun_frames_left`; normalizes via `mimic_norm.json` (z-score
-fallback for entries missing newer transform keys). Both minimal and
-fullfeat checkpoints work — minimal encoder slices internally.
+fallback for entries missing newer transform keys).
 
 **Diagnostics**: `tools/inspect_frame.py` (per-frame I/O dump),
 `tools/extract_wavedashes.py` (wavedash-only windows for overfit
@@ -896,12 +880,9 @@ references to the slippistats functions used. Past notes:
     with the other position encodings on 2026-10-22; recover them from
     git history if a future experiment needs them.
 
-12. **Full features are the default.** Omit `--mimic-minimal-features`
-    unless deliberately reproducing a minimal-path baseline. The
-    minimal path is bit-identical for back-compat with old
-    checkpoints; the full path exposes 13 numeric + 5 flags per
-    player and is worth ~1.5–3.5% val-loss reduction at no wall-clock
-    cost.
+12. **Full features are the only input.** The full path (13 numeric +
+    5 flags per player) was worth ~1.5–3.5% val over the old 9-col
+    minimal path, which was removed 2026-10-22.
 
 13. **Discord bot portability: keep paths relative in `.env`.** The
     bot's `.env` uses relative paths (`./emulator/...`, `./melee.iso`,
