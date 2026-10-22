@@ -344,6 +344,20 @@ the value off the preset dict so any new preset/alias automatically
 picks it up. String checks silently fall through for renamed or
 aliased presets.
 
+### Local research proxies
+
+- **Fast (~5 min, the research loop):** `tools/fast_proxy.sh NAME mimic-w256 1900 SEED [flags]`
+  — 5M model, Muon, val at the end, tail-SWA, fixed-subset val in
+  `checkpoints/fastproxy/results.tsv`. Seed gap ~0.0007; reproduces cond-heads (−3.9% vs −4.2%);
+  exaggerates optimizer/LR effects ~5× (right sign). Calibration in
+  `docs/research-notes-2026-10-22.md`.
+- **C cell (~45 min, confirmation):** `tools/proxy_run.sh NAME mimic data/mastfox_c9_half 6500 SEED`
+  — 20M production architecture, pinned to the pre-2026-10-22 settings (AdamW, no cond-heads,
+  val every 1%) for comparability with older proxies.
+- **Warm start (~15 min, shape-compatible changes only):** `--resume hf_eval/fox-master/model.pt
+  --no-load-optim --warm-restart --lr 1e-4`, 2k steps.
+- Score sliding-window models with `tools/eval_last_frame.py`.
+
 ### Do NOT run inference while training on the same GPU
 
 GPU contention causes frame drops in Dolphin, making the model appear

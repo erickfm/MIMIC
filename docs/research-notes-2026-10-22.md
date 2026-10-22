@@ -218,6 +218,26 @@ the window) vs CPU-9: 2–0 (3–0, 3–0), canaries green (center-stick 42%, L-
   or conditional variants above, kept for reproduction.
 - `FramePredictor.features()`: encoder + backbone + final norm, the input to the heads.
 
+## Fast local proxy (`tools/fast_proxy.sh`, ~5 min per run)
+
+`tools/fast_proxy.sh NAME PRESET STEPS SEED [flags]`: the current recipe (Muon, no cond-heads
+unless passed, eff batch 768, cosine, no warmup), validation only at the end, tail-SWA of the
+last 5 checkpoints, fixed-subset val. Measured steady rates (no val): `mimic-w256` 8.0 step/s
+(not data-bound; 3.6 uncompiled), `mimic-w384` 4.4, `mimic` 3.2; ~30 s startup. Calibration,
+fixed-subset val, one run each:
+
+| Proxy | Params / steps | Wall | Base s1 / s2 | Seed gap | Cond-heads | AdamW vs Muon |
+|---|---|---|---|---|---|---|
+| **F5** (`mimic-w256`) | 5.35M / 1,900 | ~300 s | 0.7976 / 0.7983 | 0.0007 | −3.9% | +8.6% |
+| F11 (`mimic-w384`) | 11.5M / 1,050 | ~280 s | 0.8063 / 0.8067 | 0.0004 | −3.5% | +9.6% |
+| F20 (`mimic`) | 20M / 770 | ~285 s | 0.8124 / 0.8127 | 0.0003 | −3.1% | +10.3% |
+| C cell (reference) | 20M / 6,500 | ~45 min | 0.7749 / 0.7757 | 0.0008 | −4.2% | +1.6% |
+
+F5 is the research-loop proxy: best absolute val in the budget and the closest cond-heads effect
+(~45× its seed gap). Every 5-minute run exaggerates convergence-speed effects (optimizer, LR)
+~5–6×, with the right sign; confirm those in the C cell. Only known-good effects were used to
+calibrate (owner's call), so F5's ability to catch regressions is untested.
+
 ## Review fixes (independent review of the day's commits)
 
 - `--eval-only` and `--resume` build the model from CLI flags; with cond-heads now the default
