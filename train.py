@@ -54,11 +54,11 @@ def _log(*args, **kwargs):
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 BATCH_SIZE      = 256
-LEARNING_RATE   = 5e-5
+LEARNING_RATE   = 3e-4
 WEIGHT_DECAY    = 1e-2
 NUM_WORKERS     = int(os.environ.get("MIMIC_NUM_WORKERS", "8"))
 SEQUENCE_LENGTH = 180
-REACTION_DELAY  = 1
+REACTION_DELAY  = 0     # v2 shards bake in the next-frame target; 1 only for legacy leaked shards
 DATA_DIR        = "./data/full"
 MAX_SAMPLES     = 2_000_000
 
@@ -1013,7 +1013,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     else:
         raise ValueError(f"unknown --optimizer {optimizer!r}")
 
-    _eta_min = cosine_min_lr if cosine_min_lr is not None else 0.0
+    _eta_min = cosine_min_lr if cosine_min_lr is not None else 1e-6
     # Decouple the cosine decay length from the total training length so a
     # longer run still gets a proper low-LR refinement window at the end
     # instead of stretching the cosine across the whole schedule. If
@@ -1747,11 +1747,11 @@ if __name__ == "__main__":
                         help="Disable torch.compile (debug)")
     parser.add_argument("--resume",     type=str, default=None,
                         help="Path to checkpoint (.pt) to resume from")
-    parser.add_argument("--model",      type=str, default="medium",
+    parser.add_argument("--model",      type=str, default="mimic",
                         choices=list(MODEL_PRESETS.keys()),
-                        help="Model size preset (default: medium ~32M params)")
+                        help="Model preset (default: mimic, the ~20M production model)")
     parser.add_argument("--lr",         type=float, default=None,
-                        help="Learning rate override (default: 5e-5)")
+                        help="Learning rate (default: 3e-4; the aux-AdamW groups under Muon)")
     parser.add_argument("--run-name",   type=str, default=None,
                         help="Wandb run name (auto-generated if not set)")
     parser.add_argument("--wandb-tags", type=str, default=None,
@@ -1800,14 +1800,14 @@ if __name__ == "__main__":
     parser.add_argument("--seq-len",    type=int, default=None,
                         help="Override sequence length (default: 60)")
     parser.add_argument("--reaction-delay", type=int, default=None,
-                        help="Reaction delay in frames (default: 1, HAL uses 0)")
+                        help="Reaction delay in frames (default: 0, correct for v2 shards)")
     parser.add_argument("--controller-offset", action="store_true",
                         help="Shift self-controller input by -1 frame (HAL-style: see prev frame's press)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
-    parser.add_argument("--encoder",   type=str, default="hybrid16",
+    parser.add_argument("--encoder",   type=str, default="mimic_flat",
                         choices=["default", "flat", "composite8", "hybrid16", "mimic_flat", "hal_flat"],
-                        help="Frame encoder variant (default: hybrid16)")
+                        help="Frame encoder variant (default: mimic_flat)")
     parser.add_argument("--d-intra",   type=int, default=None,
                         help="Intra-frame encoder width (default: 256)")
     parser.add_argument("--dropout",   type=float, default=None,
@@ -1833,8 +1833,8 @@ if __name__ == "__main__":
                         help="Button loss type (default: focal)")
     parser.add_argument("--opp-inputs", action="store_true",
                         help="Include opponent controller inputs (default: excluded)")
-    parser.add_argument("--self-inputs", action="store_true",
-                        help="Include self controller inputs (default: excluded)")
+    parser.add_argument("--self-inputs", action=argparse.BooleanOptionalAction, default=True,
+                        help="Include self controller inputs (default: on; required even on v2 shards)")
     parser.add_argument("--weight-decay", type=float, default=None,
                         help="Weight decay (default: 1e-2)")
     parser.add_argument("--seed", type=int, default=None,
@@ -1897,12 +1897,13 @@ if __name__ == "__main__":
                         help="Override number of attention heads")
     parser.add_argument("--lean-features", action="store_true",
                         help="Drop nana/projectile features to match HAL's lean input set")
-    parser.add_argument("--mimic-mode", "--hal-mode", dest="mimic_mode", action="store_true",
+    parser.add_argument("--mimic-mode", "--hal-mode", dest="mimic_mode",
+                        action=argparse.BooleanOptionalAction, default=True,
                         help="MIMIC-exact mode: single-label buttons, combined shoulder, LN heads, plain CE")
     parser.add_argument("--no-amp", action="store_true",
                         help="Disable AMP (train in FP32)")
     parser.add_argument("--cosine-min-lr", type=float, default=None,
-                        help="Minimum LR for cosine schedule (default: 0; 1e-6 matches standard MIMIC recipe)")
+                        help="Minimum LR for the cosine schedule (default: 1e-6)")
     parser.add_argument("--cosine-decay-steps", type=int, default=None,
                         help="Decouple cosine decay length from total training. "
                              "If set, cosine decays from peak to --cosine-min-lr "
@@ -1910,14 +1911,17 @@ if __name__ == "__main__":
                              "the remainder. Useful for long runs on small-data "
                              "characters to avoid stretching the refinement window.")
     parser.add_argument("--no-warmup", action="store_true",
-                        help="Disable LR warmup (start at full LR)")
-    parser.add_argument("--stick-clusters", type=str, default=None,
-                        help="Stick cluster set: 'hal37' for the 37 hand-designed clusters")
+                        help="No LR warmup: the default since 2026-10-22 (kept so old commands parse)")
+    parser.add_argument("--warmup", action="store_true",
+                        help="Enable the linear LR warmup (5%% of steps, or --warmup-steps)")
+    parser.add_argument("--stick-clusters", type=str, default="hal37",
+                        help="Stick cluster set: 'hal37' (default) for the 37 hand-designed clusters")
     parser.add_argument("--mimic-minimal-features", "--hal-minimal-features",
                         dest="mimic_minimal_features", action="store_true",
                         help="Minimal input set (drop ECB, speeds, hitlag/hitstun from numeric)")
     parser.add_argument("--mimic-controller-encoding", "--hal-controller-encoding",
-                        dest="mimic_controller_encoding", action="store_true",
+                        dest="mimic_controller_encoding", action=argparse.BooleanOptionalAction,
+                        default=True,
                         help="One-hot controller feedback encoding (requires controller_combos.json)")
     parser.add_argument("--character-filter", type=int, default=None,
                         help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
@@ -1996,7 +2000,7 @@ if __name__ == "__main__":
         cosine_min_lr=args.cosine_min_lr,
         cosine_decay_steps=args.cosine_decay_steps,
         lean_features=args.lean_features,
-        no_warmup=args.no_warmup,
+        no_warmup=not args.warmup,
         stick_clusters=args.stick_clusters,
         hal_minimal_features=args.mimic_minimal_features,
         reaction_delay_override=args.reaction_delay,

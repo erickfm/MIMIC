@@ -312,9 +312,11 @@ def run(pairings, n_envs, n_matches, seed, out_dir, replay_dir=None):
                     for k in keys}  # buffers already on device
             with torch.no_grad():
                 out = models[char](mega)
+            # cond-heads models sample their heads jointly inside forward: pass those samples on
+            keys_out = HEADS + (["cond_sample"] if "cond_sample" in out else [])
             for j, s in enumerate(slots):
                 slot_out[s] = {k: out[k][j:j + 1, -1:, :].contiguous().cpu().numpy()
-                               for k in HEADS}
+                               for k in keys_out}
         for env_id in active:
             conns[env_id].send({'a': slot_out[2 * env_id],
                                 'b': slot_out[2 * env_id + 1]})

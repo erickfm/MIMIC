@@ -169,8 +169,10 @@ def run(n_envs, seconds, model, cfg, ctx, device, replay_dir=None,
                 for k in keys}
         with torch.no_grad():
             out = model(mega)
+        # cond-heads models sample their heads jointly inside forward: pass those samples on
+        keys_out = HEADS + (["cond_sample"] if "cond_sample" in out else [])
         for j, i in enumerate(active):
-            resp = {k: out[k][j:j + 1, -1:, :].contiguous().cpu().numpy() for k in HEADS}
+            resp = {k: out[k][j:j + 1, -1:, :].contiguous().cpu().numpy() for k in keys_out}
             parent_conns[i].send(resp)
     dt = time.time() - t0
 
