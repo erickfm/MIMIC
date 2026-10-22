@@ -208,7 +208,7 @@ def env_proc(env_id, conn, port, jobs_q, stop_ev, n_matches, seed, out_dir,
 def run(pairings, n_envs, n_matches, seed, out_dir, replay_dir=None):
     import torch
     from tools.inference_utils import (
-        load_mimic_model, load_inference_context, build_mock_frame)
+        load_mimic_model, load_inference_context, build_mock_frame, require_full_causal)
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # chars actually needed by the schedule
@@ -217,6 +217,7 @@ def run(pairings, n_envs, n_matches, seed, out_dir, replay_dir=None):
     models, ctxs, seq_len = {}, {}, None
     for c in chars:
         m, cfg = load_mimic_model(f"{char_dir(c)}/model.pt", device); m.eval()
+        require_full_causal(m, "tools/h2h_batch_mp.py")
         models[c] = m
         ctx = dict(load_inference_context(char_dir(c)))
         ctx["combo_map"] = {}; ctx["n_combos"] = cfg.n_controller_combos

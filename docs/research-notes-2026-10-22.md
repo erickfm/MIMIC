@@ -37,6 +37,12 @@ baseline `p1-C-base-s1`, paired over 20,000 held-out frames (see "Metrics").
 - **`--optimizer` now defaults to `muon`** (`--muon-lr 0.02`, aux-AdamW at `--lr`). It was the
   only change that was better with no trade-off. Pre-2026-10-22 runs used AdamW: pass
   `--optimizer adamw` to reproduce or resume them; a mismatched `--resume` fails with a message.
+- **Later the same day, also made default:** `--cond-heads` (after passing the Dolphin canaries:
+  2–0 vs CPU-9, center-stick 41%, L-cancel 100%, land/kf 3.62; it had already beaten the
+  same-recipe control 611–445 in the sim), `--lean-metrics`, and validation every 2.5% of a run
+  (was 1%). `tools/proxy_run.sh` pins `--val-frac 0.01 --no-cond-heads` so proxies stay
+  comparable with the ones above. A `--resume` whose cond-heads setting differs from the flags
+  fails with a message (`--warm-restart` may switch).
 - Not made default: the sliding window (the Dolphin inference path still recomputes a 180-frame
   window, which mismatches a window-trained model, until the KV cache is wired into
   `tools/inference_utils.py`), and `--relpos-impl sdpa` (one run; the bf16 variant diverged).
@@ -170,6 +176,17 @@ reset mid-stream — 0 of 3,200 decisions differ from a full-history forward (ea
 graph). Speed, 64 envs, bf16, CUDA graph, idle GPU: 6.62 → 0.98 ms per step (9.7k → 65.5k
 env-frames/s). A 96-game same-model sim h2h with a window model ran clean (49–47).
 
+### Sliding-window models in Dolphin (`tools/inference_utils.PlayerState`)
+
+`PlayerState` streams window models through `RelPosKVCache` (batch 1), from an empty cache at
+the start, so `play.py`, `play_netplay.py`, the Discord bot and `sim_play.py` run them exactly as
+trained; full-causal models keep the mock-prefilled 180-window path. Streaming matches a
+full forward over 400 frames to 1.1e-5 (fp32, trained weights). Paths with their own fixed
+window (`h2h_batch_mp.py`, `ffw_batch_mp.py`, `rlvr/online` `_PolicyRunner`) refuse window models
+via `require_full_causal`. Realtime Dolphin, `p1-C-warmswa720-s1` (the champion warm-started into
+the window) vs CPU-9: 2–0 (3–0, 3–0), canaries green (center-stick 42%, L-cancel 98%, land/kf
+2.93).
+
 ### Training/inference mismatches (owner rule: inference must match training)
 
 - **Window models trained on 720-frame chunks never see more than 719 frames of history**, but
@@ -206,6 +223,6 @@ env-frames/s). A 96-game same-model sim h2h with a window model ran clean (49–
 - Production candidate: Muon + window 180 on 720-frame chunks at a reduced step budget, then
   h2h vs the champion (fp32, Dolphin canaries).
 - Convert existing production characters to the sliding window by fine-tuning (full data,
-  lower lr, chunks longer than the receptive field); then wire `RelPosKVCache` into
-  `tools/inference_utils.py` / `play.py` (the sim runner already streams window models).
+  lower lr, chunks longer than the receptive field); inference already streams window models in
+  Dolphin and the sim.
 - Use 2k-step warm starts from the champion for shape-compatible research changes.

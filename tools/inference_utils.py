@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.nn.functional as Fn
 
+from mimic.kv_cache import RelPosKVCache
 from mimic.model import FramePredictor, ModelConfig
 from mimic.features import (
     HAL_STICK_CLUSTERS_37, HAL_CSTICK_CLUSTERS_9, HAL_SHOULDER_CLUSTERS_3,
@@ -428,8 +429,31 @@ def build_mock_frame(ctx):
     }
 
 
+def is_window_model(model) -> bool:
+    """True for sliding-window relpos models (cfg.attn_window > 0): they must be run by streaming
+    through the KV cache (PlayerState does this), not by recomputing a fixed window."""
+    m = getattr(model, "_orig_mod", model)
+    return getattr(getattr(m, "cfg", None), "attn_window", 0) > 0
+
+
+def require_full_causal(model, where: str):
+    """Guard for inference paths that recompute a fixed window: refuse window models, which that
+    path would run with less context than they were trained with."""
+    if is_window_model(model):
+        raise NotImplementedError(
+            f"{where} recomputes a fixed context window; this model uses sliding-window attention "
+            f"(attn_window={getattr(model, '_orig_mod', model).cfg.attn_window}) and must stream "
+            f"through the KV cache (tools/inference_utils.PlayerState or rlvr/sim/batch.BatchedPolicy).")
+
+
 class PlayerState:
-    """Manages context window and prediction for one player."""
+    """Manages context and prediction for one player.
+
+    Full-causal models: a rolling seq_len-frame window, mock-prefilled at the start, recomputed
+    every frame. Sliding-window models (cfg.attn_window > 0): one frame per step through a KV
+    cache, from an empty cache at the start (a training chunk that starts at a game's first
+    frame), which is exactly the computation they were trained with.
+    """
 
     def __init__(self, model, seq_len, device, ctx=None):
         self.model = model
@@ -438,8 +462,21 @@ class PlayerState:
         self._ctx = ctx
         self._frame_cache = deque(maxlen=seq_len)
         self.prev_sent = None
+        self._kv = (RelPosKVCache(getattr(model, "_orig_mod", model), batch_size=1)
+                    if is_window_model(model) else None)
+        self._pending = None      # KV mode: the pushed frame not yet run
+        self._last_preds = None
+        if self._kv is not None:
+            logging.getLogger(__name__).info(
+                "PlayerState: sliding-window model (attn_window=%d), streaming via KV cache",
+                self._kv.w)
 
     def push_frame(self, frame):
+        if self._kv is not None:
+            if self._pending is not None:   # pushed twice without predict: run it, keep the cache in step
+                self.predict()
+            self._pending = frame
+            return
         if len(self._frame_cache) == 0:
             # Prefill with HAL-style mock frame (nonsensical values)
             if self._ctx is not None:
@@ -451,6 +488,12 @@ class PlayerState:
         self._frame_cache.append(frame)
 
     def predict(self):
+        if self._kv is not None:
+            if self._pending is not None:
+                frame = {k: v.unsqueeze(0).to(self.device) for k, v in self._pending.items()}
+                self._last_preds = self._kv.step(frame)   # (1, 1, ...) per head
+                self._pending = None
+            return self._last_preds
         frames = list(self._frame_cache)
         batch = {}
         for k in frames[0]:

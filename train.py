@@ -79,7 +79,7 @@ MAX_VAL_BATCHES    = 100
 # Intervals derived from max_steps at runtime (see _compute_intervals)
 WARMUP_FRAC        = 0.05     # 5% warmup
 LOG_FRAC           = 0.001    # log every ~0.1%
-VAL_FRAC           = 0.01     # validate every ~1%
+VAL_FRAC           = 0.025    # validate every ~2.5% (was 1% before 2026-10-22; --val-frac 0.01)
 CKPT_FRAC          = 0.05     # checkpoint every ~5%
 
 # -----------------------------------------------------------------------------
@@ -675,7 +675,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           character_filter: int = None,
           random_perspective: bool = False,
           input_gate_l1: float = 0.0,
-          cond_heads: bool = False,
+          cond_heads: bool = True,
           relpos_impl: str = "fp32",
           attn_window: int = 0,
           patch: int = 0,
@@ -1038,6 +1038,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     start_step = 0
     if resume:
         ckpt = torch.load(resume, map_location=DEVICE)
+        _ck_cond = bool((ckpt.get("config") or {}).get("cond_heads", False))
+        if _ck_cond != bool(cond_heads) and not warm_restart:   # warm starts may switch heads
+            raise ValueError(
+                f"{resume} was trained with cond_heads={_ck_cond} but this run has "
+                f"cond_heads={bool(cond_heads)}: pass {'--cond-heads' if _ck_cond else '--no-cond-heads'} "
+                f"(cond-heads became the default on 2026-10-22), or --warm-restart to start a new "
+                f"run from these weights.")
         model.load_state_dict(ckpt['model_state_dict'])
         if not no_load_optim:
             try:
@@ -1723,10 +1730,12 @@ if __name__ == "__main__":
                         help="Wandb group for related runs (e.g. 'sweep-v1')")
     parser.add_argument("--num-layers", type=int, default=None,
                         help="Override number of transformer layers")
-    parser.add_argument("--cond-heads", action="store_true",
+    parser.add_argument("--cond-heads", action=argparse.BooleanOptionalAction, default=True,
                         help="Condition each mimic head on the one-hot class of the earlier heads "
                              "(true class in training, sampled at inference) instead of their "
-                             "detached logits, so the heads model the joint distribution.")
+                             "detached logits, so the heads model the joint distribution. On by "
+                             "default since 2026-10-22; --no-cond-heads for the older heads (and to "
+                             "resume runs trained without it).")
     parser.add_argument("--relpos-impl", choices=["fp32", "bf16", "sdpa", "flex"], default="fp32",
                         help="Training kernel for the relpos attention (speed only; eval and "
                              "inference always use fp32). flex drops attention dropout.")
@@ -1748,10 +1757,11 @@ if __name__ == "__main__":
     parser.add_argument("--save-steps", type=str, default=None,
                         help="Comma-separated optimizer steps at which to save a weights-only "
                              "snapshot checkpoints/{run}_snapNNNNNN.pt (0 = initial weights).")
-    parser.add_argument("--lean-metrics", action="store_true",
+    parser.add_argument("--lean-metrics", action=argparse.BooleanOptionalAction, default=True,
                         help="Compute F1/accuracy metrics only on log steps and keep the loss terms "
                              "on the GPU between them (fewer GPU->CPU syncs per step). Logged F1s "
-                             "become log-step snapshots; training is unchanged.")
+                             "become log-step snapshots; training is unchanged. On by default since "
+                             "2026-10-22; --no-lean-metrics restores per-step metrics.")
     parser.add_argument("--input-gate-l1", type=float, default=0.0,
                         help="L1 penalty on per-input-column sigmoid gate in "
                              "the encoder's projection. >0 enables the gate; "
@@ -1810,7 +1820,7 @@ if __name__ == "__main__":
     parser.add_argument("--max-wall-time", type=float, default=None,
                         help="Hard wall-time limit in seconds; stop if exceeded")
     parser.add_argument("--val-frac", type=float, default=None,
-                        help="Override validation frequency as fraction of max_steps (default: 0.05)")
+                        help="Override validation frequency as fraction of max_steps (default: 0.025)")
     parser.add_argument("--warmup-steps", type=int, default=None,
                         help="Override warmup steps (default: 1%% of max_steps)")
     parser.add_argument("--scale-lr", action="store_true",

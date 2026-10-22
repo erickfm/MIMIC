@@ -251,17 +251,39 @@ one (a mismatched resume now fails with a message saying so). See
 **Opt-in speed variants (not defaults):** `--attn-window 180` with
 `--seq-len 720` (sliding-window relpos; ties quality on the proxy and
 enables the exact streaming KV cache in `mimic/kv_cache.py`, 22×
-cheaper batched inference) — not default because the Dolphin
-inference path (`tools/inference_utils.py`) still recomputes a
-180-frame window, which mismatches a window-trained model; wire the
-KV cache in first. The sim runner (`rlvr/sim/batch.py`) already
-streams window models through the cache automatically (exact; 6.8×
-faster sim policy step at 64 envs). Train window models on chunks
+cheaper batched inference). Window models stream through the cache
+automatically wherever they're supported: `tools/inference_utils.
+PlayerState` (so `play.py`, `play_netplay.py`, the Discord bot,
+`sim_play.py`) and the sim runner `rlvr/sim/batch.py` (6.8× faster
+policy step at 64 envs). Both start an episode from an empty cache —
+a training chunk that begins at a game's first frame — not from mock
+frames. Paths that keep their own fixed window (`h2h_batch_mp.py`,
+`ffw_batch_mp.py`, `rlvr/online` `_PolicyRunner`) refuse window models
+via `require_full_causal` rather than run them mismatched. Not the
+default because no production-quality window model exists yet
+(a warm-started champion conversion played clean in Dolphin, canaries
+green). Train window models on chunks
 longer than the receptive field (`num_layers × (W−1) + 1` = 1,075 for
 W=180), e.g. `--seq-len 1440`, so training matches streaming. `--relpos-impl sdpa` (~14% faster step, equal val
 on one run; its bf16 sibling diverged, so watch a long run before
 relying on it). Score sliding-window models with
 `tools/eval_last_frame.py`, not train.py's window-averaged val.
+
+**`--cond-heads` is the default (since 2026-10-22).** Each head is
+conditioned on the earlier heads' classes, so the four heads model the
+joint distribution; same parameters and training cost. It beat the
+same-recipe control 611–445 in the native sim (−4.2% val) and passed
+the Dolphin canaries (2026-10-22: 2–0 vs CPU-9, center 41%, L-cancel
+100%). `--no-cond-heads` for the older heads; `--resume` of a run
+trained without it now fails unless you pass `--no-cond-heads`
+(`--warm-restart` may switch heads on purpose).
+
+**Also default since 2026-10-22:** `--lean-metrics` (metrics only on
+log steps; `--no-lean-metrics` to disable) and validation every 2.5%
+of a run instead of 1% (`--val-frac 0.01` restores the old cadence;
+`tools/proxy_run.sh` pins 0.01 so proxies stay comparable with older
+ones). Don't pass `--ema-decay`: promotion uses the tail-SWA average,
+so the EMA costs ~2% per step plus an extra val pass for nothing.
 
 **`--self-inputs` is required even on v2 shards.** Without it the
 encoder has no controller-history input at all and val loss climbs

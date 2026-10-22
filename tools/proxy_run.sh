@@ -5,7 +5,9 @@
 #   tools/proxy_run.sh NAME MODEL DATA_DIR STEPS SEED [extra train.py flags...]
 #
 # Single GPU, eff batch 768 (768 x 1, or 384 x 2 for the 512-wide model), lr 3e-4 cosine to 1e-6,
-# no warmup, as the production runs. Results: checkpoints/proxy/results.tsv
+# no warmup, as the production runs. Pinned to the pre-2026-10-22 proxy settings (val every 1%,
+# no cond-heads) so results stay comparable with older proxies; extra flags override them.
+# Results: checkpoints/proxy/results.tsv
 set -euo pipefail
 cd "$(dirname "$0")/.."
 name=$1 model=$2 data=$3 steps=$4 seed=$5; shift 5
@@ -17,13 +19,13 @@ WANDB_MODE=${WANDB_MODE:-disabled} python3 train.py --model $model --encoder mim
     --mimic-controller-encoding --stick-clusters hal37 --plain-ce --lr 3e-4 --batch-size $bs \
     --grad-accum-steps $ga --max-samples $((bs * ga * steps)) --data-dir $data --self-inputs \
     --reaction-delay 0 --run-name $name --no-warmup --cosine-min-lr 1e-6 --lean-metrics \
-    --seed $seed "$@" > $out/logs/$name.log 2>&1
+    --val-frac 0.01 --no-cond-heads --seed $seed "$@" > $out/logs/$name.log 2>&1
 python3 tools/average_checkpoints.py --out $out/$name.avg.pt --run checkpoints/$name --last 5 \
     >> $out/logs/$name.log 2>&1
 # fixed val subset: same seed and batch size for every run
 WANDB_MODE=disabled python3 train.py --model $model --encoder mimic_flat --mimic-mode \
     --mimic-controller-encoding --stick-clusters hal37 --plain-ce --batch-size ${PROXY_EVAL_BS:-768} --data-dir $data \
-    --self-inputs --reaction-delay 0 --seed 0 --eval-only $out/$name.avg.pt "$@" \
+    --self-inputs --reaction-delay 0 --seed 0 --no-cond-heads --eval-only $out/$name.avg.pt "$@" \
     > $out/logs/$name.eval.log 2>&1
 line=$(grep "^EVAL_ONLY" $out/logs/$name.eval.log | tail -1)
 printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$(date -u +%FT%TZ)" "$name" "$model" "$(basename $data)" "$steps" \

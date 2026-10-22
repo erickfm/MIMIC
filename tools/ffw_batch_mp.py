@@ -217,9 +217,10 @@ def main():
         os.makedirs(args.replay_dir, exist_ok=True)
 
     import torch
-    from tools.inference_utils import load_mimic_model, load_inference_context
+    from tools.inference_utils import load_mimic_model, load_inference_context, require_full_causal
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, cfg = load_mimic_model(args.ckpt, device); model.eval()
+    require_full_causal(model, "tools/ffw_batch_mp.py")
     ctx = dict(load_inference_context(DATA_DIR))
     ctx["combo_map"] = {}; ctx["n_combos"] = cfg.n_controller_combos
     print(f"model loaded seq_len={cfg.max_seq_len} combos={cfg.n_controller_combos} device={device}", flush=True)
