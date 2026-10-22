@@ -192,7 +192,14 @@ the window) vs CPU-9: 2–0 (3–0, 3–0), canaries green (center-stick 42%, L-
 - **Window models trained on 720-frame chunks never see more than 719 frames of history**, but
   their receptive field (and streaming inference mid-game) reaches 1,075. They still tied when
   scored at the full receptive field, but the setup doesn't match: train on chunks longer than
-  the receptive field (`p1-C-muonswa1440-s1`, 1,440-frame chunks, was running at writing).
+  the receptive field (`p1-C-muonswa1440-s1`, 1,440-frame chunks).
+  Result, `p1-C-muonswa1440-s1` (Muon + window 180, 1,440-frame chunks, 96 chunks/step = the
+  same tokens/step): last-frame Δ −0.0106 ± 0.0034 vs the AdamW baseline, but +0.009 worse than
+  the 720-frame version (−0.0198 ± 0.0031); single seed, ~3 paired SE. Leading explanation:
+  at equal tokens per step, longer chunks halve the number of distinct sequences per batch, and
+  that diversity costs more than covering the full receptive field gains. Untested ways to keep
+  training matched to streaming without the cost: chunks just past the receptive field
+  (~1,100 frames), or more chunks per step.
 - **Current production models are pre-filled with 179 mock frames at game start**
   (`PlayerState.push_frame`, HAL convention), while training windows never contain mock frames
   (a window at a game's start just has less history). This affects about the first 3 s of
