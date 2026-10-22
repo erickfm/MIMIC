@@ -629,6 +629,24 @@ def _auto_run_name(preset: str, lr: float, seq_len: int, extra: dict = None) -> 
     return "-".join(parts)
 
 
+_ARCH_FLAGS = {"cond_heads": "--cond-heads / --no-cond-heads", "attn_window": "--attn-window N",
+               "patch": "--patch P", "mtp": "--mtp K"}
+
+
+def _arch_mismatch(ck_cfg, cfg):
+    """Architecture fields that differ between a checkpoint's config and this run's (same parameter
+    shapes, so load_state_dict alone wouldn't notice). None/False/0 all mean off."""
+    ck_cfg = ck_cfg or {}
+    return [(k, ck_cfg.get(k) or 0, getattr(cfg, k, 0) or 0) for k in _ARCH_FLAGS
+            if (ck_cfg.get(k) or 0) != (getattr(cfg, k, 0) or 0)]
+
+
+def _arch_error(path, diffs, what):
+    return ValueError(f"{path} differs from this run's flags ({what}): " + "; ".join(
+        f"{k}: checkpoint {a!r} vs run {b!r} ({_ARCH_FLAGS[k]})" for k, a, b in diffs)
+        + ". Pass matching flags (cond-heads became the default on 2026-10-22).")
+
+
 def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMPLES,
           data_dir: str = DATA_DIR,
           debug: bool = False, resume: str = None, compile_model: bool = True,
@@ -862,6 +880,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     else:
         _shoulder_centers_for_decode = None
         n_shoulder_bins = len(shoulder_centers_np)
+    if cond_heads and not hal_mode:   # the default; only the mimic heads have a conditional chain
+        _log("  --cond-heads needs --mimic-mode; running without it")
+        cond_heads = False
     def _cc(t):   # --cond-heads: true earlier-head classes to condition on (None otherwise)
         if not cond_heads:
             return None
@@ -1038,15 +1059,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     start_step = 0
     if resume:
         ckpt = torch.load(resume, map_location=DEVICE)
-        _ck_cond = bool((ckpt.get("config") or {}).get("cond_heads", False))
-        if _ck_cond != bool(cond_heads) and not warm_restart:   # warm starts may switch heads
-            raise ValueError(
-                f"{resume} was trained with cond_heads={_ck_cond} but this run has "
-                f"cond_heads={bool(cond_heads)}: pass {'--cond-heads' if _ck_cond else '--no-cond-heads'} "
-                f"(cond-heads became the default on 2026-10-22), or --warm-restart to start a new "
-                f"run from these weights.")
+        _diffs = _arch_mismatch(ckpt.get("config"), cfg)
+        if _diffs and not warm_restart:   # warm starts may switch architecture on purpose
+            raise _arch_error(resume, _diffs, "resume; use --warm-restart to start a new run from "
+                                              "these weights with a different architecture")
         model.load_state_dict(ckpt['model_state_dict'])
         if not no_load_optim:
+            _base_lrs = [g['lr'] for g in optimiser.param_groups]   # this run's per-group base LRs
             try:
                 optimiser.load_state_dict(ckpt['optimizer_state_dict'])
             except ValueError as e:
@@ -1060,10 +1079,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             # load_state_dict just set to the checkpoint's (low, end-of-cosine)
             # value — so we must reset lr back to the base AND rebuild the
             # scheduler, else the "fresh" cosine continues from ~eta_min.
-            if warm_restart:
-                for g in optimiser.param_groups:
-                    g['lr'] = actual_lr
-                    g['initial_lr'] = actual_lr
+            if warm_restart:   # per group: Muon's matrices keep --muon-lr, aux groups --lr
+                for g, lr0 in zip(optimiser.param_groups, _base_lrs):
+                    g['lr'] = lr0
+                    g['initial_lr'] = lr0
                 scheduler = _make_scheduler()
             elif ckpt.get("scheduler_state_dict"):
                 scheduler.load_state_dict(ckpt["scheduler_state_dict"])
@@ -1087,6 +1106,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         _teacher = FramePredictor(ModelConfig(**{k: v for k, v in _tck["config"].items() if k in _tf})).to(DEVICE)
         _teacher.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in _tck["model_state_dict"].items()})
         _teacher.eval().requires_grad_(False)
+        _teacher_cond = bool(getattr(_teacher.cfg, "cond_heads", False))
+        if _teacher_cond != bool(cond_heads):
+            _log(f"  WARNING: teacher cond_heads={_teacher_cond}, student cond_heads={bool(cond_heads)}: "
+                 f"the per-head KL compares differently conditioned distributions")
         if compile_model:
             _teacher = torch.compile(_teacher)
         del _tck
@@ -1199,6 +1222,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     # (same compute_loss / flags / MAX_VAL_BATCHES), print val/total, and exit. ---
     if eval_only:
         _ec = torch.load(eval_only, map_location=DEVICE, weights_only=False)
+        if isinstance(_ec, dict) and "config" in _ec:
+            _diffs = _arch_mismatch(_ec["config"], cfg)
+            if _diffs:   # the model is built from the CLI flags: a mismatch would score the wrong arch
+                raise _arch_error(eval_only, _diffs, "eval-only")
         _sd = _ec["model_state_dict"] if isinstance(_ec, dict) and "model_state_dict" in _ec else _ec
         _msd = _raw_model.state_dict()
         _want = any(k.startswith("_orig_mod.") for k in _msd)
@@ -1340,7 +1367,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     micro_loss = micro_loss + mtp_weight * torch.stack(lk).sum() / grad_accum_steps
             if _teacher is not None:
                 with torch.no_grad(), autocast("cuda", dtype=AMP_DTYPE):
-                    t_preds = _teacher(state)
+                    # a cond teacher conditions on the true earlier-head classes (not its own samples)
+                    t_preds = _teacher(state, cond_classes=_cond_head_classes(
+                        target, _shoulder_centers_for_decode if _shoulder_centers_for_decode is not None
+                        else _shoulder_centers, cfg.num_c_dirs) if _teacher_cond else None)
                 kd = sum(F.kl_div(F.log_softmax(preds[k].float(), -1), F.log_softmax(t_preds[k].float(), -1),
                                   log_target=True, reduction="none").sum(-1).mean()
                          for k in ("main_xy", "shoulder_val", "c_dir_logits", "btn_logits"))

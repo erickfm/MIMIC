@@ -179,6 +179,9 @@ def load_mimic_model(checkpoint_path, device):
                 if k in ModelConfig.__dataclass_fields__}
     cfg = ModelConfig(**cfg_dict)
     model = FramePredictor(cfg).to(device)
+    if getattr(cfg, "attn_window", 0) > 0:
+        raise NotImplementedError("validate_checkpoint scores fixed cfg.max_seq_len windows; for "
+                                  "sliding-window models use tools/eval_last_frame.py")
     sd = {k.removeprefix("_orig_mod."): v for k, v in ckpt["model_state_dict"].items()}
     model.load_state_dict(sd)
     model.eval()

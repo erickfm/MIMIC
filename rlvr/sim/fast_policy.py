@@ -34,6 +34,9 @@ def _last_query_attention(attn, x):
 
 def forward_last(model, frames):
     """model(frames) restricted to the last position: the same dict of head outputs, T = 1."""
+    if getattr(model, "patch_proj", None) is not None or getattr(model.cfg, "attn_window", 0) > 0:
+        raise NotImplementedError("forward_last supports full-causal, unpatched models only; stream "
+                                  "sliding-window models with mimic/kv_cache.RelPosKVCache")
     x = model.encoder(frames)
     if model.pos_emb is not None:
         x = x + model.pos_emb[:, :x.size(1)]

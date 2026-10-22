@@ -54,9 +54,21 @@ def targets(data_dir, n, min_hist, seed):
             if b - a > min_hist:
                 games.append((name, a, b))
     per = max(1, math.ceil(n / len(games)))
-    out = [(name, rng.randint(a + min_hist - 1, b - 1)) for name, a, b in games for _ in range(per)]
+    out = []   # (shard, frame, game id): distinct frames within each game
+    for gi, (name, a, b) in enumerate(games):
+        pool = range(a + min_hist - 1, b)
+        out += [(name, t, gi) for t in rng.sample(pool, min(per, len(pool)))]
     rng.shuffle(out)
     return sorted(out[:n])
+
+
+def clustered_se(x, groups):
+    """Standard error of mean(x) with targets clustered by game (frames of one game correlate)."""
+    x = torch.as_tensor(x, dtype=torch.float64)
+    g = torch.as_tensor(groups)
+    resid = x - x.mean()
+    sums = torch.zeros(int(g.max()) + 1, dtype=torch.float64).index_add_(0, g, resid)
+    return float(sums.pow(2).sum().sqrt() / len(x))
 
 
 def main():
@@ -82,7 +94,7 @@ def main():
         for name, (m, cfg, ctx, stick, shoulder) in models.items():
             st, tt = {k: [] for k in KEYS}, None
             tl = []
-            for sname, t in chunk:
+            for sname, t, _ in chunk:
                 if sname not in shards:
                     shards[sname] = torch.load(Path(args.data_dir) / sname, weights_only=True, mmap=True)
                 sh = shards[sname]
@@ -106,13 +118,15 @@ def main():
                                            n_cdir=cfg.num_c_dirs, lite=True)
                 per[name].append(float(sum(l.item() for l in losses)))
     ref = next(iter(models))
-    print(f"targets: {len(tg)} val frames, each with >= {min_hist} frames of history")
+    print(f"targets: {len(tg)} val frames from {len(set(gi for _, _, gi in tg))} games, "
+          f"each with >= {min_hist} frames of history")
     for name, (m, cfg, ctx, _, _) in models.items():
         x = torch.tensor(per[name])
-        line = f"{name:24s} ctx={ctx:5d}  last-frame loss {x.mean():.4f} ± {x.std() / math.sqrt(len(x)):.4f}"
+        groups = [gi for _, _, gi in tg]
+        line = f"{name:24s} ctx={ctx:5d}  last-frame loss {x.mean():.4f} ± {clustered_se(x, groups):.4f}"
         if name != ref:
             d = x - torch.tensor(per[ref])
-            line += f"   vs {ref}: {d.mean():+.4f} ± {d.std() / math.sqrt(len(d)):.4f} (paired)"
+            line += f"   vs {ref}: {d.mean():+.4f} ± {clustered_se(d, groups):.4f} (paired, clustered by game)"
         print(line)
 
 

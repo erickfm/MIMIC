@@ -49,6 +49,9 @@ def load_model(checkpoint_path, device):
     cfg_dict = {k: v for k, v in ckpt["config"].items() if k in ModelConfig.__dataclass_fields__}
     cfg = ModelConfig(**cfg_dict)
     model = FramePredictor(cfg)
+    if getattr(cfg, "attn_window", 0) > 0:
+        raise NotImplementedError("inspect_frame recomputes a fixed window; sliding-window models "
+                                  "must stream (mimic/kv_cache.py)")
     sd = {k.removeprefix("_orig_mod."): v for k, v in ckpt["model_state_dict"].items()}
     model.load_state_dict(sd)
     model.eval().to(device)

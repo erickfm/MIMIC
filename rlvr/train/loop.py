@@ -90,6 +90,8 @@ def train(
 
     # Load model (trainable) + frozen reference copy from same ckpt.
     model, cfg = load_mimic_model(str(base_ckpt), device)
+    from tools.inference_utils import require_full_causal
+    require_full_causal(model, "rlvr/train/loop.py (rlvr/rollout/batched.py)")
     ref_model, _ = load_mimic_model(str(base_ckpt), device)
     for p in ref_model.parameters():
         p.requires_grad_(False)

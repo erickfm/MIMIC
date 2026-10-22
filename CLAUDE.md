@@ -274,9 +274,12 @@ conditioned on the earlier heads' classes, so the four heads model the
 joint distribution; same parameters and training cost. It beat the
 same-recipe control 611–445 in the native sim (−4.2% val) and passed
 the Dolphin canaries (2026-10-22: 2–0 vs CPU-9, center 41%, L-cancel
-100%). `--no-cond-heads` for the older heads; `--resume` of a run
-trained without it now fails unless you pass `--no-cond-heads`
-(`--warm-restart` may switch heads on purpose).
+100%). `--no-cond-heads` for the older heads. `--resume` and `--eval-only`
+both build the model from the CLI flags, so they now refuse a
+checkpoint whose cond-heads / attn-window / patch / mtp settings differ
+from the flags (an old checkpoint needs `--no-cond-heads`, and
+`--optimizer adamw` to resume its optimizer state); `--warm-restart`
+may switch architecture on purpose.
 
 **Also default since 2026-10-22:** `--lean-metrics` (metrics only on
 log steps; `--no-lean-metrics` to disable) and validation every 2.5%

@@ -218,6 +218,27 @@ the window) vs CPU-9: 2–0 (3–0, 3–0), canaries green (center-stick 42%, L-
   or conditional variants above, kept for reproduction.
 - `FramePredictor.features()`: encoder + backbone + final norm, the input to the heads.
 
+## Review fixes (independent review of the day's commits)
+
+- `--eval-only` and `--resume` build the model from CLI flags; with cond-heads now the default
+  an old checkpoint was silently scored with the wrong heads (0.8390 vs 0.7773). Both now refuse
+  a checkpoint whose cond_heads / attn_window / patch / mtp differ from the flags
+  (`--warm-restart` exempt).
+- `--warm-restart` with loaded optimizer state reset every group's lr to `--lr`, so Muon's
+  matrices dropped from 0.02 to 3e-4; it now restores each group's own base lr.
+- Distillation: a cond teacher now conditions on the true earlier-head classes (it used to sample
+  its own); a cond/non-cond teacher–student mismatch is logged.
+- bf16/sdpa relpos paths with a window now index by distance (lengths > 1,024 crashed);
+  `attn_window` > block_size and windows on non-relpos blocks are rejected.
+- `--cond-heads` (default) is turned off with a log line when `--mimic-mode` isn't set.
+- Guards: `forward_last` refuses window/patch models; `sim_rl` refuses window policies (its
+  observations come from the window buffer the KV path doesn't fill); `rlvr/online` refuses
+  cond-heads models (independent head sampling); `rlvr/train/loop.py`, `rlvr/eval/runner.py`,
+  `inspect_frame.py`, `validate_checkpoint.py` refuse window models.
+- `proxy_run.sh` also pins `--optimizer adamw`. `eval_last_frame.py` samples distinct frames per
+  game and clusters standard errors by game (re-run: seed gap +0.0034 ± 0.0021, Muon −0.0123 ±
+  0.0024, cond −0.0318 ± 0.0027 — conclusions unchanged).
+
 ## Not done / test status
 
 - Single seed everywhere; proxy scale only. Nothing here is h2h-validated in play except the

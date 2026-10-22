@@ -100,6 +100,8 @@ def run_eval(
             "either model+ctx or ckpt_path+data_dir must be provided"
         )
         model, cfg = load_mimic_model(str(ckpt_path), device)
+        from tools.inference_utils import require_full_causal
+        require_full_causal(model, "rlvr/eval/runner.py (rlvr/rollout/batched.py)")
         ctx = load_inference_context(data_dir)
     assert ctx is not None, "ctx required when passing a live model"
 

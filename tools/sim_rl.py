@@ -68,6 +68,9 @@ def main():
     learner, cfg = load_mimic_model(ckpt_path, "cuda")
     if getattr(learner.heads, "cond", False):
         raise SystemExit("ppo_update scores heads independently; --cond-heads policies are not supported yet")
+    if getattr(getattr(learner, "cfg", None), "attn_window", 0) > 0:
+        raise SystemExit("sim_rl records observations from the 180-frame window buffer, which the KV "
+                         "path doesn't fill; sliding-window policies are not supported yet")
     ref = copy.deepcopy(learner).eval()
     for p in ref.parameters():
         p.requires_grad_(False)

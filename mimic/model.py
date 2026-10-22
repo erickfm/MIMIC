@@ -408,6 +408,7 @@ class CausalSelfAttentionRelPos(nn.Module):
                  window: int = 0):
         super().__init__()
         assert impl in ("fp32", "bf16", "sdpa", "flex"), impl
+        assert 0 <= window <= block_size, f"attn_window {window} exceeds the relpos table ({block_size})"
         self.impl = impl
         self.window = window          # >0: each query sees only the last `window` keys (incl. itself)
         self._flex_masks = {}
@@ -471,17 +472,26 @@ class CausalSelfAttentionRelPos(nn.Module):
         y = y.transpose(1, 2).contiguous().view(B, L, D)
         return self.resid_dropout(self.c_proj(y))
 
+    def _srel(self, q, L):
+        """Shaw relative term Srel[i, j] = q_i . Er[block_size-1-(i-j)] for the dense paths. With a
+        window, indexed by distance (< window), so L may exceed block_size; else the skew trick."""
+        if self.window > 0:
+            w = self.window
+            QEr = q @ self.Er.flip(0)[:w].transpose(0, 1).to(q.dtype)          # (B, H, L, w)
+            ar = torch.arange(L, device=q.device)
+            d = (ar[:, None] - ar[None, :]).clamp(0, w - 1)                     # masked entries clamp
+            return QEr.gather(-1, d.expand(q.size(0), q.size(1), L, L))
+        return _skew(q @ self.Er[self.block_size - L:, :].transpose(0, 1).to(q.dtype))
+
     def _fast_attention(self, q, k, v, L):
         """Training-only kernels for the same Q@K^T + Srel attention (see relpos_impl)."""
         scale = 1.0 / math.sqrt(k.size(-1))
-        Er_t = self.Er[self.block_size - L:, :].transpose(0, 1).to(q.dtype)
-        QEr = q @ Er_t
         if self.impl == "bf16":
-            att = (q @ k.transpose(-2, -1) + _skew(QEr)).float() * scale
+            att = (q @ k.transpose(-2, -1) + self._srel(q, L)).float() * scale
             att = att.masked_fill(self._mask(L) == 0, float("-inf"))
             return self.attn_dropout(Fn.softmax(att, dim=-1).to(v.dtype)) @ v
         if self.impl == "sdpa":
-            bias = (_skew(QEr) * scale).masked_fill(self._mask(L) == 0, float("-inf"))
+            bias = (self._srel(q, L) * scale).masked_fill(self._mask(L) == 0, float("-inf"))
             return Fn.scaled_dot_product_attention(q, k, v, attn_mask=bias,
                                                    dropout_p=self.attn_dropout.p)
         # flex: column r of QEr is relative offset r - (L-1); pad so masked j > i stays in range
@@ -493,7 +503,8 @@ class CausalSelfAttentionRelPos(nn.Module):
                 return score + QEr[b, h, i, torch.clamp(i - j, 0, w - 1)]
             mask_mod = lambda b, h, i, j: (i >= j) & (i - j < w)
         else:
-            QEr = Fn.pad(QEr * scale, (0, L - 1))
+            QEr = Fn.pad((q @ self.Er[self.block_size - L:, :].transpose(0, 1).to(q.dtype)) * scale,
+                         (0, L - 1))
             def score_mod(score, b, h, i, j):
                 return score + QEr[b, h, i, j - i + L - 1]
             mask_mod = lambda b, h, i, j: i >= j
@@ -1057,6 +1068,8 @@ class FramePredictor(nn.Module):
             self.pos_emb = None  # relpos / rope / alibi have no separate pos_emb
 
         use_relpos_block = cfg.pos_enc in ("relpos", "mimic_rope")   # the mimic block
+        if getattr(cfg, "attn_window", 0) > 0 and cfg.pos_enc != "relpos":
+            raise ValueError(f"attn_window is implemented for Shaw relpos only, not pos_enc={cfg.pos_enc!r}")
         self.mlp = None
         if getattr(cfg, "backbone", "transformer") == "mlp":
             # The MLP reads the raw per-frame features: drop the encoder's projection and dropout.

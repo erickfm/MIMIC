@@ -150,6 +150,10 @@ class _PolicyRunner:
     def __init__(self, model, seq_len: int, device, ctx: dict):
         from tools.inference_utils import require_full_causal
         require_full_causal(model, "rlvr/online _PolicyRunner")
+        if getattr(getattr(getattr(model, "_orig_mod", model), "heads", None), "cond", False):
+            raise NotImplementedError("rlvr/online samples the four heads independently and recomputes "
+                                      "their logprobs; --cond-heads models sample inside the heads, so "
+                                      "actions and logprobs would not match")
         self.model = model
         # torch.compile the inference path only — the raw `model` handle
         # is still what PPO sees (so its variable-batch training path is

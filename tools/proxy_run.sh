@@ -6,7 +6,7 @@
 #
 # Single GPU, eff batch 768 (768 x 1, or 384 x 2 for the 512-wide model), lr 3e-4 cosine to 1e-6,
 # no warmup, as the production runs. Pinned to the pre-2026-10-22 proxy settings (val every 1%,
-# no cond-heads) so results stay comparable with older proxies; extra flags override them.
+# no cond-heads, AdamW) so results stay comparable with older proxies; extra flags override them.
 # Results: checkpoints/proxy/results.tsv
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -19,7 +19,7 @@ WANDB_MODE=${WANDB_MODE:-disabled} python3 train.py --model $model --encoder mim
     --mimic-controller-encoding --stick-clusters hal37 --plain-ce --lr 3e-4 --batch-size $bs \
     --grad-accum-steps $ga --max-samples $((bs * ga * steps)) --data-dir $data --self-inputs \
     --reaction-delay 0 --run-name $name --no-warmup --cosine-min-lr 1e-6 --lean-metrics \
-    --val-frac 0.01 --no-cond-heads --seed $seed "$@" > $out/logs/$name.log 2>&1
+    --val-frac 0.01 --no-cond-heads --optimizer adamw --seed $seed "$@" > $out/logs/$name.log 2>&1
 python3 tools/average_checkpoints.py --out $out/$name.avg.pt --run checkpoints/$name --last 5 \
     >> $out/logs/$name.log 2>&1
 # fixed val subset: same seed and batch size for every run
