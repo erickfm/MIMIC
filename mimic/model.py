@@ -92,6 +92,22 @@ class ModelConfig:
     # earlier heads (the true class in training, the sampled class at inference) instead of their
     # detached logits, so the four heads model the joint distribution. Same parameter shapes.
     cond_heads: bool                = False
+    # Training-time kernel for the Shaw relpos attention (--relpos-impl): "fp32" (the explicit
+    # FP32 math), "bf16" (same math, bf16 matmuls, fp32 softmax), "sdpa" (Shaw term as an
+    # additive mask into fused SDPA) or "flex" (FlexAttention; no attention dropout, needs
+    # torch.compile). Speed only: eval and inference always run the fp32 path.
+    relpos_impl: str                = "fp32"
+    # Sliding-window relpos attention (--attn-window): >0 limits every layer to the last N frames,
+    # so training can use long chunks and inference can stream with a KV cache (mimic/kv_cache.py).
+    attn_window: int                = 0
+    # Temporal patching (--patch P): the transformer runs over P-frame patches (1/P the tokens);
+    # a small per-frame MLP predicts frame t from the last finished patch's output plus the raw
+    # frames t-P+1..t, so every prediction stays causal and sees the newest frame.
+    patch: int                      = 0
+    # Multi-token prediction (--mtp K): K extra training-only head sets; set k predicts the
+    # controller k frames further ahead from the same features (through its own Linear+GELU).
+    mtp: int                        = 0
+    patch_local_hidden: int         = 1024
     n_controller_combos: int        = 5       # number of button combo classes (from controller_combos.json)
 
     # Legacy hal_* fields — kept for checkpoint backwards compatibility.
@@ -388,8 +404,13 @@ class CausalSelfAttentionRelPos(nn.Module):
     """
 
     def __init__(self, n_embd: int = 512, n_head: int = 8,
-                 block_size: int = 1024, dropout: float = 0.2):
+                 block_size: int = 1024, dropout: float = 0.2, impl: str = "fp32",
+                 window: int = 0):
         super().__init__()
+        assert impl in ("fp32", "bf16", "sdpa", "flex"), impl
+        self.impl = impl
+        self.window = window          # >0: each query sees only the last `window` keys (incl. itself)
+        self._flex_masks = {}
         self.n_head = n_head
         self.hs = n_embd // n_head
         self.c_attn = nn.Linear(n_embd, 3 * n_embd)
@@ -400,7 +421,17 @@ class CausalSelfAttentionRelPos(nn.Module):
         self.register_buffer("bias",
             torch.tril(torch.ones(block_size, block_size)).view(
                 1, 1, block_size, block_size))
+        if window > 0:   # separate, non-persistent: `bias` stays the plain causal mask in checkpoints
+            band = self.bias - torch.tril(torch.ones(block_size, block_size), diagonal=-window)
+            self.register_buffer("band", band, persistent=False)
         self.block_size = block_size
+
+    def _mask(self, L: int) -> torch.Tensor:
+        if self.window > 0 and L > self.block_size:
+            ar = torch.arange(L, device=self.bias.device)
+            dd = ar[:, None] - ar[None, :]
+            return ((dd >= 0) & (dd < self.window)).float()[None, None]
+        return (self.band if self.window > 0 else self.bias)[:, :, :L, :L]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, L, D = x.size()
@@ -408,25 +439,69 @@ class CausalSelfAttentionRelPos(nn.Module):
         k = k.view(B, L, self.n_head, self.hs).transpose(1, 2)
         q = q.view(B, L, self.n_head, self.hs).transpose(1, 2)
         v = v.view(B, L, self.n_head, self.hs).transpose(1, 2)
+        if self.training and self.impl != "fp32" and (
+                self.impl != "flex" or torch.compiler.is_compiling()):
+            y = self._fast_attention(q, k, v, L)
+            y = y.transpose(1, 2).contiguous().view(B, L, D)
+            return self.resid_dropout(self.c_proj(y))
 
         # Attention math in FP32 to avoid BF16 overflow on Q@K^T + Srel
         with torch.autocast("cuda", enabled=False):
             q, k = q.float(), k.float()
-            start = self.block_size - L
-            Er_t = self.Er[start:, :].float().transpose(0, 1)
-            QEr = q @ Er_t
-            Srel = _skew(QEr)
+            if self.window > 0:   # score by distance (< window), so L may exceed block_size
+                w = self.window
+                QEr = q @ self.Er.flip(0)[:w].float().transpose(0, 1)          # (B, H, L, w)
+                ar = torch.arange(L, device=q.device)
+                d = (ar[:, None] - ar[None, :]).clamp(0, w - 1)                 # masked entries clamp
+                Srel = QEr.gather(-1, d.expand(B, self.n_head, L, L))
+            else:
+                start = self.block_size - L
+                Er_t = self.Er[start:, :].float().transpose(0, 1)
+                QEr = q @ Er_t
+                Srel = _skew(QEr)
 
             QK_t = q @ k.transpose(-2, -1)
             scale = 1.0 / math.sqrt(k.size(-1))
             att = (QK_t + Srel) * scale
-            att = att.masked_fill(self.bias[:, :, :L, :L] == 0, float("-inf"))
+            att = att.masked_fill(self._mask(L) == 0, float("-inf"))
             att = Fn.softmax(att, dim=-1)
 
         att = self.attn_dropout(att)
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, L, D)
         return self.resid_dropout(self.c_proj(y))
+
+    def _fast_attention(self, q, k, v, L):
+        """Training-only kernels for the same Q@K^T + Srel attention (see relpos_impl)."""
+        scale = 1.0 / math.sqrt(k.size(-1))
+        Er_t = self.Er[self.block_size - L:, :].transpose(0, 1).to(q.dtype)
+        QEr = q @ Er_t
+        if self.impl == "bf16":
+            att = (q @ k.transpose(-2, -1) + _skew(QEr)).float() * scale
+            att = att.masked_fill(self._mask(L) == 0, float("-inf"))
+            return self.attn_dropout(Fn.softmax(att, dim=-1).to(v.dtype)) @ v
+        if self.impl == "sdpa":
+            bias = (_skew(QEr) * scale).masked_fill(self._mask(L) == 0, float("-inf"))
+            return Fn.scaled_dot_product_attention(q, k, v, attn_mask=bias,
+                                                   dropout_p=self.attn_dropout.p)
+        # flex: column r of QEr is relative offset r - (L-1); pad so masked j > i stays in range
+        from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+        w = self.window
+        if w > 0:   # only distances 0..w-1 exist: Er[block_size-1-d] scores distance d
+            QEr = (q @ self.Er.flip(0)[:w].transpose(0, 1).to(q.dtype)) * scale   # (B,H,L,w)
+            def score_mod(score, b, h, i, j):
+                return score + QEr[b, h, i, torch.clamp(i - j, 0, w - 1)]
+            mask_mod = lambda b, h, i, j: (i >= j) & (i - j < w)
+        else:
+            QEr = Fn.pad(QEr * scale, (0, L - 1))
+            def score_mod(score, b, h, i, j):
+                return score + QEr[b, h, i, j - i + L - 1]
+            mask_mod = lambda b, h, i, j: i >= j
+        key = (L, q.device)
+        if key not in self._flex_masks:
+            self._flex_masks[key] = create_block_mask(mask_mod, None, None, L, L, device=q.device)
+        return flex_attention(q, k, v, score_mod=score_mod, block_mask=self._flex_masks[key],
+                              scale=scale)
 
 
 class CausalSelfAttentionMimicRoPE(nn.Module):
@@ -479,7 +554,9 @@ class MimicTransformerBlock(nn.Module):
         else:
             self.self_attn = CausalSelfAttentionRelPos(
                 n_embd=cfg.d_model, n_head=cfg.nhead,
-                block_size=1024, dropout=cfg.dropout)
+                block_size=1024, dropout=cfg.dropout,
+                impl=getattr(cfg, "relpos_impl", "fp32"),
+                window=getattr(cfg, "attn_window", 0))
         self.ln_2 = Norm(cfg.d_model)
         if use_swiglu:
             self.mlp = SwiGLU(cfg.d_model, cfg.dim_feedforward, cfg.dropout)
@@ -1002,6 +1079,15 @@ class FramePredictor(nn.Module):
             self.blocks = nn.ModuleList(blocks)
         else:
             self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.num_layers)])
+        P = getattr(cfg, "patch", 0)
+        self.patch_proj = None
+        if P > 1:
+            D = cfg.d_model
+            self.patch_proj = nn.Linear(P * D, D)
+            self.patch_start = nn.Parameter(torch.zeros(1, 1, D))   # context for the first patch
+            self.local = nn.Sequential(
+                nn.Linear((P + 1) * D, cfg.patch_local_hidden), nn.GELU(), nn.Dropout(cfg.dropout),
+                nn.Linear(cfg.patch_local_hidden, D))
         FinalNorm = RMSNorm if getattr(cfg, 'use_rmsnorm', False) else nn.LayerNorm
         self.final_norm = FinalNorm(cfg.d_model)
         if cfg.mimic_mode:
@@ -1022,6 +1108,16 @@ class FramePredictor(nn.Module):
                 n_shoulder_bins=cfg.n_shoulder_bins,
                 autoregressive=cfg.autoregressive_heads,
             )
+
+        self.mtp_heads = None
+        if getattr(cfg, "mtp", 0) > 0 and cfg.mimic_mode:
+            self.mtp_heads = nn.ModuleList([nn.ModuleDict(dict(
+                proj=nn.Sequential(nn.Linear(cfg.d_model, cfg.d_model), nn.GELU()),
+                heads=MimicPredictionHeads(
+                    cfg.d_model, n_stick_clusters=cfg.n_stick_clusters, n_shoulder_bins=3,
+                    n_cdir=cfg.num_c_dirs,
+                    n_btn_classes=cfg.n_controller_combos if cfg.mimic_controller_encoding else 5)))
+                for _ in range(cfg.mtp)])
 
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * max(cfg.num_layers, 1))
@@ -1049,18 +1145,44 @@ class FramePredictor(nn.Module):
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, std=0.02)
 
-    def forward(self, frames: Dict[str, torch.Tensor],
-                btn_targets: Optional[torch.Tensor] = None,
-                cond_classes: Optional[tuple] = None) -> Dict[str, torch.Tensor]:
+    def _patched(self, x: torch.Tensor) -> torch.Tensor:
+        """Transformer over P-frame patches, then the per-frame local MLP (see cfg.patch)."""
+        B, T, D = x.shape
+        P = self.cfg.patch
+        assert T % P == 0, f"seq len {T} must be a multiple of patch {P}"
+        c = self.patch_proj(x.reshape(B, T // P, P * D))
+        for blk in self.blocks:
+            c = blk(c)
+        # frame t in patch p gets patch p-1's output (frames < pP) plus raw frames t-P+1..t
+        ctx = torch.cat([self.patch_start.expand(B, 1, D), c[:, :-1]], dim=1).repeat_interleave(P, dim=1)
+        recent = [x] + [Fn.pad(x, (0, 0, k, 0))[:, :T] for k in range(1, P)]
+        return x + self.local(torch.cat([ctx] + recent, dim=-1))
+
+    def features(self, frames: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Encoder + backbone + final norm: the (B, T, d_model) input to the heads."""
         x = self.encoder(frames)                         # (B, T, d_model)
         if self.mlp is not None:
             x = self.mlp(x)
         if self.pos_emb is not None:
             T = x.size(1)
             x = x + self.pos_emb[:, :T]
-        for blk in self.blocks:
-            x = blk(x)
-        x = self.final_norm(x)                           # (B, T, d_model)
+        if self.patch_proj is not None:
+            x = self._patched(x)
+        else:
+            for blk in self.blocks:
+                x = blk(x)
+        return self.final_norm(x)
+
+    def forward(self, frames: Dict[str, torch.Tensor],
+                btn_targets: Optional[torch.Tensor] = None,
+                cond_classes: Optional[tuple] = None) -> Dict[str, torch.Tensor]:
+        x = self.features(frames)                        # (B, T, d_model)
+        if self.mtp_heads is not None and self.training:
+            # "_mtp"[k-1] predicts the targets k frames later, so it covers positions 0..T-1-k
+            out = (self.heads(x, btn_targets=btn_targets, cond_classes=cond_classes)
+                   if cond_classes is not None else self.heads(x, btn_targets=btn_targets))
+            out["_mtp"] = [m["heads"](m["proj"](x[:, :-(k + 1)])) for k, m in enumerate(self.mtp_heads)]
+            return out
         if cond_classes is not None:
             return self.heads(x, btn_targets=btn_targets, cond_classes=cond_classes)
         return self.heads(x, btn_targets=btn_targets)    # all T positions

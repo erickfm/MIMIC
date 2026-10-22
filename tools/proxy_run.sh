@@ -11,17 +11,18 @@ cd "$(dirname "$0")/.."
 name=$1 model=$2 data=$3 steps=$4 seed=$5; shift 5
 bs=768 ga=1
 [ "$model" = mimic ] && bs=384 && ga=2
+bs=${PROXY_BS:-$bs} ga=${PROXY_GA:-$ga}   # e.g. long-chunk runs keep tokens/step with fewer, longer windows
 out=checkpoints/proxy; mkdir -p $out/logs
 WANDB_MODE=${WANDB_MODE:-disabled} python3 train.py --model $model --encoder mimic_flat --mimic-mode \
     --mimic-controller-encoding --stick-clusters hal37 --plain-ce --lr 3e-4 --batch-size $bs \
-    --grad-accum-steps $ga --max-samples $((768 * steps)) --data-dir $data --self-inputs \
+    --grad-accum-steps $ga --max-samples $((bs * ga * steps)) --data-dir $data --self-inputs \
     --reaction-delay 0 --run-name $name --no-warmup --cosine-min-lr 1e-6 --lean-metrics \
     --seed $seed "$@" > $out/logs/$name.log 2>&1
 python3 tools/average_checkpoints.py --out $out/$name.avg.pt --run checkpoints/$name --last 5 \
     >> $out/logs/$name.log 2>&1
 # fixed val subset: same seed and batch size for every run
 WANDB_MODE=disabled python3 train.py --model $model --encoder mimic_flat --mimic-mode \
-    --mimic-controller-encoding --stick-clusters hal37 --plain-ce --batch-size 768 --data-dir $data \
+    --mimic-controller-encoding --stick-clusters hal37 --plain-ce --batch-size ${PROXY_EVAL_BS:-768} --data-dir $data \
     --self-inputs --reaction-delay 0 --seed 0 --eval-only $out/$name.avg.pt "$@" \
     > $out/logs/$name.eval.log 2>&1
 line=$(grep "^EVAL_ONLY" $out/logs/$name.eval.log | tail -1)

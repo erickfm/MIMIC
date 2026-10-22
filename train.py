@@ -543,7 +543,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               n_heads_override=None, hal_mode=False, lean_features=False,
               hal_minimal_features=False,
               hal_controller_encoding=False, n_controller_combos=5,
-              use_input_gate=False, cond_heads=False):
+              use_input_gate=False, cond_heads=False, relpos_impl="fp32", attn_window=0,
+              patch=0, mtp=0):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -588,6 +589,14 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["use_input_gate"] = True
     if cond_heads:
         overrides["cond_heads"] = True
+    if relpos_impl != "fp32":
+        overrides["relpos_impl"] = relpos_impl
+    if attn_window:
+        overrides["attn_window"] = attn_window
+    if patch:
+        overrides["patch"] = patch
+    if mtp:
+        overrides["mtp"] = mtp
     seq_len = overrides.pop("max_seq_len", SEQUENCE_LENGTH)
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
@@ -667,6 +676,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           random_perspective: bool = False,
           input_gate_l1: float = 0.0,
           cond_heads: bool = False,
+          relpos_impl: str = "fp32",
+          attn_window: int = 0,
+          patch: int = 0,
+          mtp: int = 0,
+          mtp_weight: float = 0.5,
+          distill_from: str = None,
+          distill_alpha: float = 1.0,
           wd_fix: bool = False,
           lean_metrics: bool = False,
           optimizer: str = "adamw",
@@ -876,7 +892,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            hal_controller_encoding=hal_controller_encoding,
                            n_controller_combos=_n_combos,
                            use_input_gate=(input_gate_l1 > 0),
-                           cond_heads=cond_heads)
+                           cond_heads=cond_heads, relpos_impl=relpos_impl,
+                           attn_window=attn_window, patch=patch, mtp=mtp)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={val_interval}  "
@@ -1046,6 +1063,21 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if is_distributed:
         model = DDP(model, device_ids=[local_rank])
     _raw_model = model.module if is_distributed else model
+
+    # --- Distillation (--distill-from): a frozen teacher's per-head distributions as soft
+    # targets; loss += alpha * sum over heads of KL(teacher || student), on every position. ---
+    _teacher = None
+    if distill_from:
+        import dataclasses
+        _tck = torch.load(distill_from, map_location="cpu", weights_only=False)
+        _tf = {f.name for f in dataclasses.fields(ModelConfig)}
+        _teacher = FramePredictor(ModelConfig(**{k: v for k, v in _tck["config"].items() if k in _tf})).to(DEVICE)
+        _teacher.load_state_dict({k.replace("_orig_mod.", ""): v for k, v in _tck["model_state_dict"].items()})
+        _teacher.eval().requires_grad_(False)
+        if compile_model:
+            _teacher = torch.compile(_teacher)
+        del _tck
+        _log(f"  Distilling from {distill_from} (alpha={distill_alpha})")
 
     # --- EMA: exponential moving average of weights. When enabled, validation
     # and the promoted (best) checkpoint use the EMA weights; training continues
@@ -1258,6 +1290,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 with autocast("cuda", dtype=AMP_DTYPE):
                     preds = model(state, btn_targets=btn_tgt if not hal_mode else None,
                                   cond_classes=_cc(target))
+                mtp_preds = preds.pop("_mtp", None)
                 metrics, task_losses = compute_loss(
                     preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
                     lite=lean_metrics and not (step % log_interval == 0 or step == 1),
@@ -1284,6 +1317,21 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
             loss_vec = torch.stack(task_losses)
             micro_loss = (loss_weights * loss_vec).sum() / grad_accum_steps
+            if mtp_preds:   # --mtp: extra heads on targets k frames later, weight mtp_weight each
+                for k, pk in enumerate(mtp_preds, 1):
+                    _, lk = compute_loss(pk, {kk: v[:, k:] for kk, v in target.items()},
+                                         btn_loss_type=cfg.btn_loss, plain_ce=plain_ce, lite=True,
+                                         hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode
+                                         if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                                         n_cdir=cfg.num_c_dirs)
+                    micro_loss = micro_loss + mtp_weight * torch.stack(lk).sum() / grad_accum_steps
+            if _teacher is not None:
+                with torch.no_grad(), autocast("cuda", dtype=AMP_DTYPE):
+                    t_preds = _teacher(state)
+                kd = sum(F.kl_div(F.log_softmax(preds[k].float(), -1), F.log_softmax(t_preds[k].float(), -1),
+                                  log_target=True, reduction="none").sum(-1).mean()
+                         for k in ("main_xy", "shoulder_val", "c_dir_logits", "btn_logits"))
+                micro_loss = micro_loss + distill_alpha * kd / grad_accum_steps
 
             # L1 penalty on encoder input gate (learned feature importance).
             # Divide by grad_accum_steps so the effective penalty matches the
@@ -1673,6 +1721,21 @@ if __name__ == "__main__":
                         help="Condition each mimic head on the one-hot class of the earlier heads "
                              "(true class in training, sampled at inference) instead of their "
                              "detached logits, so the heads model the joint distribution.")
+    parser.add_argument("--relpos-impl", choices=["fp32", "bf16", "sdpa", "flex"], default="fp32",
+                        help="Training kernel for the relpos attention (speed only; eval and "
+                             "inference always use fp32). flex drops attention dropout.")
+    parser.add_argument("--attn-window", type=int, default=0,
+                        help="Sliding-window relpos attention: each layer sees only the last N frames "
+                             "(0 = full causal). Pair with a longer --seq-len; stream with mimic/kv_cache.py.")
+    parser.add_argument("--patch", type=int, default=0,
+                        help="Temporal patching: transformer over P-frame patches plus a per-frame "
+                             "local MLP (see ModelConfig.patch). 0 = off.")
+    parser.add_argument("--mtp", type=int, default=0,
+                        help="Multi-token prediction: K extra training-only head sets for frames t+1..t+K.")
+    parser.add_argument("--mtp-weight", type=float, default=0.5)
+    parser.add_argument("--distill-from", type=str, default=None,
+                        help="Checkpoint of a frozen teacher; adds alpha * KL(teacher || student) per head.")
+    parser.add_argument("--distill-alpha", type=float, default=1.0)
     parser.add_argument("--wd-fix", action="store_true",
                         help="AdamW: exclude norm gains, embeddings and relpos Er tables from "
                              "weight decay (by module type). Default keeps the historical rule.")
@@ -1896,6 +1959,13 @@ if __name__ == "__main__":
         random_perspective=args.random_perspective,
         input_gate_l1=args.input_gate_l1,
         cond_heads=args.cond_heads,
+        relpos_impl=args.relpos_impl,
+        attn_window=args.attn_window,
+        patch=args.patch,
+        mtp=args.mtp,
+        mtp_weight=args.mtp_weight,
+        distill_from=args.distill_from,
+        distill_alpha=args.distill_alpha,
         wd_fix=args.wd_fix,
         save_steps=args.save_steps,
         lean_metrics=args.lean_metrics,
