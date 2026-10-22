@@ -672,7 +672,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           optimizer: str = "adamw",
           muon_lr: float = 0.02,
           soap_lr: float = 3e-3,
-          mirror_aug: float = 0.0):
+          mirror_aug: float = 0.0,
+          save_steps: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
 
@@ -1194,6 +1195,34 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         _log(f"EVAL_ONLY {os.path.basename(eval_only)}: val/total={_res['total']:.4f} (batches={_c})")
         return
 
+    # --save-steps: weights-only snapshots at the listed optimizer steps (0 = the initial weights),
+    # named _snap so the _step* resume/averaging globs never pick them up.
+    _save_steps = {int(x) for x in save_steps.split(",") if x.strip()} if save_steps else set()
+
+    def _save_snapshot(step):
+        if not _is_main:
+            return
+        os.makedirs("checkpoints", exist_ok=True)
+        _p = f"checkpoints/{run_name}_snap{step:06d}.pt"
+        c = {
+            "global_step":      step,
+            "model_state_dict": _raw_model.state_dict(),
+            "loss_weights":     loss_weights.cpu(),
+            "norm_stats":       ds.norm_stats,
+            "config":           {**cfg.__dict__, "model_preset": model_preset, "run_name": run_name},
+        }
+        if stick_centers_np is not None:
+            c["stick_centers"] = stick_centers_np.tolist()
+        if shoulder_centers_np is not None:
+            c["shoulder_centers"] = shoulder_centers_np.tolist()
+        if hal_controller_encoding and _combo_map:
+            c["controller_combos"] = [list(c_) for c_ in sorted(_combo_map.keys(), key=_combo_map.get)]
+        torch.save(c, _p)
+        _log(f"  -- snapshot {_p}")
+
+    if start_step == 0 and 0 in _save_steps:
+        _save_snapshot(0)
+
     for step in range(start_step + 1, max_steps + 1):
         if max_wall_time and (time.time() - t0) > max_wall_time:
             _log(f"WALL TIME LIMIT ({max_wall_time}s) exceeded at step {step}")
@@ -1545,6 +1574,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                          f"cf1={val_nsi_avg['val_nsi/cdir_f1']:.1%}")
                 _raw_model.encoder.si_drop_prob = _saved_si_prob
 
+        if step in _save_steps:
+            _save_snapshot(step)
+
         # Checkpoint
         if step % ckpt_interval == 0 or step == max_steps:
             if _is_main:
@@ -1644,6 +1676,9 @@ if __name__ == "__main__":
     parser.add_argument("--wd-fix", action="store_true",
                         help="AdamW: exclude norm gains, embeddings and relpos Er tables from "
                              "weight decay (by module type). Default keeps the historical rule.")
+    parser.add_argument("--save-steps", type=str, default=None,
+                        help="Comma-separated optimizer steps at which to save a weights-only "
+                             "snapshot checkpoints/{run}_snapNNNNNN.pt (0 = initial weights).")
     parser.add_argument("--lean-metrics", action="store_true",
                         help="Compute F1/accuracy metrics only on log steps and keep the loss terms "
                              "on the GPU between them (fewer GPU->CPU syncs per step). Logged F1s "
@@ -1862,6 +1897,7 @@ if __name__ == "__main__":
         input_gate_l1=args.input_gate_l1,
         cond_heads=args.cond_heads,
         wd_fix=args.wd_fix,
+        save_steps=args.save_steps,
         lean_metrics=args.lean_metrics,
         optimizer=args.optimizer,
         muon_lr=args.muon_lr,
