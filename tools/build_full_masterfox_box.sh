@@ -53,7 +53,7 @@ echo "[TR $(date +%H:%M)] train 20M on full master-Fox (3 GPU, eff-batch 768)"
 ARGS=(--model mimic --encoder mimic_flat --mimic-mode --mimic-controller-encoding
       --stick-clusters hal37 --plain-ce --lr 3e-4 --batch-size 256 --grad-accum-steps 1
       --max-samples 215040000 --data-dir "$DATA" --self-inputs --reaction-delay 0
-      --seed 42 --no-warmup --cosine-min-lr 1e-6 --ema-decay 0.999 --run-name "$RUN")
+      --seed 42 --no-warmup --cosine-min-lr 1e-6 --run-name "$RUN")
 attempt=1
 while [ "$attempt" -le 40 ]; do
   latest=$(ls -t checkpoints/${RUN}_step*.pt 2>/dev/null | head -1)

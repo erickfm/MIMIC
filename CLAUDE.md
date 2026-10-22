@@ -292,8 +292,8 @@ may switch architecture on purpose.
 log steps; `--no-lean-metrics` to disable) and validation every 2.5%
 of a run instead of 1% (`--val-frac 0.01` restores the old cadence;
 `tools/proxy_run.sh` pins 0.01 so proxies stay comparable with older
-ones). Don't pass `--ema-decay`: promotion uses the tail-SWA average,
-so the EMA costs ~2% per step plus an extra val pass for nothing.
+ones). The weight EMA (`--ema-decay`) was removed 2026-10-22: promotion
+uses the tail-SWA average (`tools/average_checkpoints.py`).
 
 **`--self-inputs` is required even on v2 shards** (it's the default;
 `--no-self-inputs` turns it off). Without it the encoder has no

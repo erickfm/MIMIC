@@ -6,7 +6,7 @@
 #     games where every target-char port is master (the mixed-rank pools are
 #     only ~60% master otherwise — see CLAUDE.md "Ranked dataset").
 #   - c-stick-fixed shards (nearest-of-9 history; needs repo >= fb7bb1a).
-#   - current recipe: fullfeat, no mirror, seed 42, EMA 0.999.
+#   - current recipe: fullfeat, no mirror, seed 42 (Muon and cond-heads are train.py defaults).
 #   - MIMIC_NUM_WORKERS for the dataloader; GPU-count toggle: single GPU runs
 #     python3 (bs 256 x ga 2), multi-GPU runs torchrun with per-GPU batch
 #     512/NGPU (integer-truncated: non-power-of-2 GPU counts drift the
@@ -17,8 +17,7 @@
 #     new best val).
 #   - stage-only "upload": upload_char.py --no-push stages into
 #     _hf_staging_single/<char>/ (its hardcoded path). Nothing is pushed to
-#     HF without explicit user approval (promotion policy). The EMA bestloss
-#     checkpoint is copied alongside as model_ema.pt.
+#     HF without explicit user approval (promotion policy).
 #   - PREP_ONLY=1 runs data prep for every char and skips training (useful
 #     while the GPU is unavailable; reruns skip chars whose shards exist).
 #
@@ -228,7 +227,7 @@ train_char() {
     --lr 3e-4 --max-samples 16777216
     --data-dir "data/${C}_v2"
     --self-inputs --reaction-delay 0
-    --seed 42 --ema-decay 0.999
+    --seed 42
     --run-name "${RUN_NAME}"
     --no-warmup --cosine-min-lr 1e-6
   )
@@ -293,7 +292,6 @@ train_char() {
   grep -E 'Best val_loss=' "${LOG_FILE}" >> "${PIPE_LOG}" || true
 
   local BEST_CKPT="${REPO_ROOT}/checkpoints/${RUN_NAME}_bestloss.pt"
-  local EMA_CKPT="${REPO_ROOT}/checkpoints/${RUN_NAME}_ema_bestloss.pt"
   if [[ -f "${BEST_CKPT}" ]]; then
     log "[stage/${C}] staging to ${STAGE_ROOT}/${C} (NO push — user approves)"
     python3 "${REPO_ROOT}/tools/upload_char.py" \
@@ -302,8 +300,6 @@ train_char() {
         > "${LOG_ROOT}/stage_${C}.log" 2>&1 \
       && log "[stage/${C}] staged" \
       || { log "[stage/${C}] staging FAILED (checkpoint kept in checkpoints/)"; return 0; }
-    [[ -f "${EMA_CKPT}" && -d "${STAGE_ROOT}/${C}" ]] \
-      && cp "${EMA_CKPT}" "${STAGE_ROOT}/${C}/model_ema.pt"
     # Keep norm/meta + val shards for later eval; drop train shards for disk.
     rm -f "${DATA_DIR}"/train_shard_*.pt
   else

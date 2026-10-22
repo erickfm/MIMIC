@@ -57,7 +57,7 @@ ARGS=(--model mimic --encoder mimic_flat --mimic-mode --mimic-controller-encodin
       --lr 3e-4 --batch-size 256 --grad-accum-steps 1
       --max-samples 215040000
       --data-dir "$DATA" --self-inputs --reaction-delay 0
-      --seed 42 --no-warmup --cosine-min-lr 1e-6 --ema-decay 0.999
+      --seed 42 --no-warmup --cosine-min-lr 1e-6
       --run-name "$RUN")
 attempt=1
 while [ "$attempt" -le 40 ]; do

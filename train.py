@@ -463,7 +463,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           grad_clip_norm: float = None,
           no_load_optim: bool = False,
           warm_restart: bool = False,
-          ema_decay: float = 0.0,
           eval_only: str = None,
           n_heads_override: int = None,
           no_amp: bool = False,
@@ -784,21 +783,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         del _tck
         _log(f"  Distilling from {distill_from} (alpha={distill_alpha})")
 
-    # --- EMA: exponential moving average of weights. When enabled, validation
-    # and the promoted (best) checkpoint use the EMA weights; training continues
-    # on the raw weights. Captures the cosine-decay-equivalent val earlier. ---
-    _ema = None
-    _ema_backup = None
-    if ema_decay and ema_decay > 0.0:
-        _ema = {n: p.detach().clone().float()
-                for n, p in _raw_model.named_parameters()}
-        if resume and not warm_restart and isinstance(ckpt, dict) and ckpt.get("ema_state_dict"):
-            for n, t in ckpt["ema_state_dict"].items():
-                if n in _ema:
-                    _ema[n].copy_(t.to(_ema[n].device).float())
-            _log(f"  EMA: resumed {len(_ema)} averaged tensors from checkpoint")
-        else:
-            _log(f"  EMA enabled (decay={ema_decay}); initialized from current weights")
 
 
     if not run_name:
@@ -866,7 +850,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     _oom_retries = 0
     best_val_f1 = -1.0
     best_val_loss = float("inf")
-    best_ema_loss = float("inf")
     best_val_loss_step = 0
     evals_since_improve = 0
     _log(f"\n=== Training {max_steps} steps ===")
@@ -1048,10 +1031,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
         optimiser.step()
         scheduler.step()
-        if _ema is not None:
-            with torch.no_grad():
-                for n, p in _raw_model.named_parameters():
-                    _ema[n].mul_(ema_decay).add_(p.detach().float(), alpha=1.0 - ema_decay)
 
         total_loss_val = accum_loss.item() if isinstance(accum_loss, torch.Tensor) else accum_loss
         if math.isfinite(total_loss_val):
@@ -1119,8 +1098,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                          "cdir_active_acc",
                          "main_top1_acc", "shoulder_top1_acc"]
 
-            # One val pass over up to MAX_VAL_BATCHES on _raw_model's CURRENT weights.
-            # Caller swaps EMA weights in/out around it for the EMA pass.
+            # One val pass over up to MAX_VAL_BATCHES on _raw_model's current weights.
             def _val_pass():
                 _sums = {k: 0.0 for k in _VAL_KEYS}
                 _ct = 0
@@ -1222,32 +1200,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             if is_distributed:
                 dist.barrier()
 
-            # --- EMA val pass: swap EMA weights in, eval (same si_drop=0 regime as
-            # the raw primary val), log val_ema/*, save a SEPARATE ema bestloss, swap
-            # raw weights back. EMA never affects training — this is a clean A/B. ---
-            if _ema is not None:
-                _bk = {n: p.detach().clone() for n, p in _raw_model.named_parameters()}
-                with torch.no_grad():
-                    for n, p in _raw_model.named_parameters():
-                        p.copy_(_ema[n].to(p.dtype))
-                _ema_sums, _ema_ct = _val_pass()
-                if _ema_ct > 0:
-                    ema_avg = {f"val_ema/{k}": _ema_sums[k] / _ema_ct for k in _VAL_KEYS}
-                    wandb.log(ema_avg, step=step)
-                    _cur_ema = ema_avg["val_ema/total"]
-                    _log(f"  -- val_ema total={_cur_ema:.4f}  "
-                         f"mf1={ema_avg['val_ema/main_f1']:.1%}  (raw best {best_val_loss:.4f})")
-                    if _cur_ema < best_ema_loss:
-                        best_ema_loss = _cur_ema
-                        if _is_main:
-                            os.makedirs("checkpoints", exist_ok=True)
-                            _p = f"checkpoints/{run_name}_ema_bestloss.pt"
-                            torch.save(_build_best_ckpt(), _p)
-                            _log(f"  -- new best EMA val loss={_cur_ema:.4f} → {_p}")
-                with torch.no_grad():
-                    for n, p in _raw_model.named_parameters():
-                        p.copy_(_bk[n])
-
         if step in _save_steps:
             _save_snapshot(step)
 
@@ -1272,8 +1224,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     ckpt_data["shoulder_centers"] = shoulder_centers_np.tolist()
                 if hal_controller_encoding and _combo_map:
                     ckpt_data["controller_combos"] = [list(c) for c in sorted(_combo_map.keys(), key=_combo_map.get)]
-                if _ema is not None:
-                    ckpt_data["ema_state_dict"] = {n: t.detach().cpu() for n, t in _ema.items()}
                 torch.save(ckpt_data, ckpt_path)
                 _log(f"  -- saved {ckpt_path}")
             if is_distributed:
@@ -1406,10 +1356,6 @@ if __name__ == "__main__":
     parser.add_argument("--warm-restart", action="store_true",
                         help="On resume: keep Adam optimizer state but reset the LR "
                              "schedule + step counter (fresh cosine from the warm weights)")
-    parser.add_argument("--ema-decay", type=float, default=0.0,
-                        help="If >0, maintain an EMA of weights (e.g. 0.999) and "
-                             "log val_ema/* alongside the raw val (dual-logged); "
-                             "saves {run}_ema_bestloss.pt separately. Off by default.")
     parser.add_argument("--eval-only", default=None,
                         help="Path to a checkpoint: score it with the exact training "
                              "val loop (val/total), print EVAL_ONLY ..., and exit. "
@@ -1491,7 +1437,6 @@ if __name__ == "__main__":
         grad_clip_norm=args.grad_clip_norm,
         no_load_optim=args.no_load_optim,
         warm_restart=args.warm_restart,
-        ema_decay=args.ema_decay,
         eval_only=args.eval_only,
         n_heads_override=args.n_heads,
         no_amp=args.no_amp,
