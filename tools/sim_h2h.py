@@ -78,6 +78,37 @@ def lcancel_by_variant(games, envs, names):
     return {n: dict(success=s, miss=m, rate=s / max(1, s + m)) for n, (s, m) in tally.items()}
 
 
+def damage_by_variant(games, names):
+    """Damage dealt per game by each variant, from the recorded games: the sum of every percent
+    increase on the opponent (post-frame percent; resets on death don't count). Returns per-variant
+    means and the per-game difference (A dealt minus B dealt) with its standard error."""
+    from tools.sim_replay_check import slp_events
+    na, nb = names
+    dealt = {na: [], nb: []}
+    diff = []
+    for g in games:
+        if "slp" not in g:
+            continue
+        last, taken = {}, {}
+        for c, p in slp_events(g["slp"]):
+            if c == 0x38 and p[5] == 0:
+                pct = struct.unpack(">f", p[21:25])[0]
+                if p[4] in last and pct > last[p[4]]:
+                    taken[p[4]] = taken.get(p[4], 0.0) + pct - last[p[4]]
+                last[p[4]] = pct
+        port = {name: pt for pt, name in g["players"]}
+        da, db = taken.get(port[nb], 0.0), taken.get(port[na], 0.0)   # what each side dealt
+        dealt[na].append(da)
+        dealt[nb].append(db)
+        diff.append(da - db)
+    n = len(diff)
+    if n < 2:
+        return None
+    mean = sum(diff) / n
+    sd = math.sqrt(sum((x - mean) ** 2 for x in diff) / (n - 1))
+    return dict(games=n, dealt={k: sum(v) / n for k, v in dealt.items()}, diff=mean, diff_se=sd / math.sqrt(n))
+
+
 def variant(spec):
     """name=CKPT_DIR[:fp32|bf16] -> (name, policy dict)."""
     name, rest = spec.split("=", 1)
@@ -156,7 +187,7 @@ def main():
         for r in v.results:   # each env's first per_env games, in completion order
             if kept[r["env"]] < per_env:
                 kept[r["env"]] += 1
-                games.append(dict(r, order=f"{order[0]}_first",
+                games.append(dict(r, order=f"{order[0]}_first", players=v.envs[r["env"]]["players"],
                                   a_side=(r["env"] // nt) % 2, template=r["env"] % nt))
         envs = v.envs
         v.close()
@@ -180,7 +211,8 @@ def main():
     n = wa + wb
     lo, hi = wilson(wa, n)
     lc = lcancel_by_variant(games, envs, (na, nb)) if a.record_dir and a.char == "FOX" else None
-    rep = dict(char=a.char, a=a.a, b=a.b, games=len(games), a_wins=wa, b_wins=wb, draws=draws, lcancel=lc,
+    dmg = damage_by_variant(games, (na, nb)) if a.record_dir else None
+    rep = dict(char=a.char, a=a.a, b=a.b, games=len(games), a_wins=wa, b_wins=wb, draws=draws, lcancel=lc, damage=dmg,
                by_template_side={f"t{t}_aside{sd}": v_ for (t, sd), v_ in sorted(by.items())},
                by_order={o: [sum(1 for r in games if r["order"] == o and r["final"][na][0] > r["final"][nb][0]),
                              sum(1 for r in games if r["order"] == o and r["final"][nb][0] > r["final"][na][0])]
@@ -194,6 +226,9 @@ def main():
           f"  ({rep['seconds']}s)")
     print("  by order (A wins, B wins): " + "  ".join(f"{o} {w}-{l}" for o, (w, l) in rep["by_order"].items()))
     print("  by template/A side (A, B, draws): " + "  ".join(f"{k} {w}-{l}-{d}" for k, (w, l, d) in rep["by_template_side"].items()))
+    if dmg:
+        print(f"  damage dealt per game: {na} {dmg['dealt'][na]:.1f}%  {nb} {dmg['dealt'][nb]:.1f}%  "
+              f"difference {dmg['diff']:+.1f}% ± {dmg['diff_se']:.1f} (1 SE, {dmg['games']} games)")
     if lc:
         print("  L-cancel: " + "  ".join(f"{n} {d['success']}/{d['success'] + d['miss']} = {100 * d['rate']:.1f}%"
                                         for n, d in lc.items()))

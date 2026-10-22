@@ -129,6 +129,15 @@ MODEL_PRESETS = {
                          dropout=0.2, max_seq_len=180, pos_enc="relpos",
                          num_stages=6, num_characters=27, num_actions=396,
                          num_c_dirs=9),
+    # Narrower `mimic` for research-scale proxies (same head_dim=64, 4x FFN, depth 6).
+    "mimic-w256":   dict(d_model=256,  nhead=4,  num_layers=6, dim_feedforward=1024,
+                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
+    "mimic-w384":   dict(d_model=384,  nhead=6,  num_layers=6, dim_feedforward=1536,
+                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
+                         num_stages=6, num_characters=27, num_actions=396,
+                         num_c_dirs=9),
     # "Simply wider" variants of `mimic`: ONLY d_model scaled (nhead held at
     # head_dim=64, FFN held at the 4x ratio, depth=6 unchanged). For the
     # does-extra-width-help width sweep (512 baseline / 768 / 1024). Everything
