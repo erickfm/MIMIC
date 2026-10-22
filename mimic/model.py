@@ -3,7 +3,7 @@
 # ------------------------------------
 # 1. Hyper-parameter bundle
 # 2. Shaw relative-position attention & the mimic transformer block
-# 3. PredictionHeads
+# 3. Prediction heads (MimicPredictionHeads)
 # 4. FramePredictor (Encoder ➜ Transformer ➜ Heads)
 # ------------------------------------
 
@@ -59,18 +59,13 @@ class ModelConfig:
     # values act as learned feature importance (0 = pruned, 1 = kept).
     use_input_gate: bool = False
 
-    # loss / output configuration
-    stick_loss: str      = "clusters"
-    btn_loss: str        = "focal"
+    # inputs
     no_opp_inputs: bool  = True
     no_self_inputs: bool = True
 
-    # prediction heads
-    head_hidden: int                = 256
+    # prediction heads (the mimic heads: single-label buttons, combined 3-class shoulder, LN)
     n_stick_clusters: int           = 63
-    n_shoulder_bins: int            = 4
-    autoregressive_heads: bool      = True
-    mimic_mode: bool                = False  # single-label buttons, combined shoulder, LN heads
+    mimic_mode: bool                = True   # the only mode; False only in pre-mimic checkpoints
     lean_features: bool             = False  # drop nana/projectiles/nana-flags
     mimic_minimal_features: bool    = False  # drop ECB/speeds/hitlag from numeric
     mimic_controller_encoding: bool = False  # one-hot controller feedback (stick clusters + button combos)
@@ -358,118 +353,6 @@ class SwiGLU(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Output heads
 # ─────────────────────────────────────────────────────────────────────────────
-class PredictionHeads(nn.Module):
-    """Autoregressive prediction heads with discrete cluster outputs.
-
-    Sticks use n_stick_clusters logits for main, n_shoulder_bins for L/R.
-
-    Heads are chained autoregressively:
-      L(h) -> R(h,L) -> cdir(h,L,R) -> main(h,L,R,cdir)
-      -> btn_A(h,...) -> btn_B(h,...,A) -> btn_X(h,...,A,B) -> ...
-    with .detach() on conditioning to prevent gradient cascade.
-
-    Button order: A, B, X, Y, Z, L, R, START, D_UP, D_DOWN, D_LEFT, D_RIGHT
-    """
-
-    # Button prediction order: action buttons first, modifiers last
-    # Drop START(7) and D-pad(8-11) — ~0% press rate, pure noise
-    BTN_ORDER = [0, 1, 2, 3, 4, 5, 6]  # A, B, X, Y, Z, L, R
-    N_BUTTONS = 12  # total button dim in targets (unchanged for compatibility)
-    N_ACTIVE_BUTTONS = 7  # buttons we actually predict
-
-    def __init__(self, d_model: int, hidden: int = 256, btn_threshold: float = 0.2,
-                 stick_loss: str = "clusters",
-                 n_stick_clusters: int = 63, n_shoulder_bins: int = 4,
-                 autoregressive: bool = True):
-        super().__init__()
-        self.btn_threshold = btn_threshold
-        self.stick_loss = stick_loss
-        self.n_stick_clusters = n_stick_clusters
-        self.n_shoulder_bins = n_shoulder_bins
-
-        main_out = n_stick_clusters
-        lr_out = n_shoulder_bins
-
-        def _head(in_dim: int, out_dim: int):
-            return nn.Sequential(
-                nn.Linear(in_dim, hidden), nn.GELU(), nn.Linear(hidden, out_dim),
-            )
-
-        ctx_after_L    = lr_out
-        ctx_after_R    = ctx_after_L + lr_out
-        ctx_after_cdir = ctx_after_R + 5
-        ctx_after_main = ctx_after_cdir + main_out
-
-        self.L_head    = _head(d_model,                    lr_out)
-        self.R_head    = _head(d_model + ctx_after_L,      lr_out)
-        self.cdir_head = _head(d_model + ctx_after_R,      5)
-        self.main_head = _head(d_model + ctx_after_cdir,   main_out)
-
-        # Autoregressive button heads: each predicts 1 logit, conditioned on
-        # the backbone context + all previously predicted buttons
-        # Only predict active buttons (A,B,X,Y,Z,L,R); skip START/D-pad
-        btn_base_dim = d_model + ctx_after_main
-        self.btn_heads = nn.ModuleList([
-            _head(btn_base_dim + i, 1)  # +i for the i previous button predictions
-            for i in range(self.N_ACTIVE_BUTTONS)
-        ])
-
-    def forward(self, h: torch.Tensor, btn_targets: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        """Forward pass. During training, btn_targets (B,T,12) provides ground
-        truth for teacher forcing the autoregressive button chain. During
-        inference, btn_targets=None and each button uses its own prediction."""
-        L = self.L_head(h)
-        ctx = L.detach()
-        R = self.R_head(torch.cat([h, ctx], dim=-1))
-        ctx = torch.cat([ctx, R.detach()], dim=-1)
-        cdir = self.cdir_head(torch.cat([h, ctx], dim=-1))
-        ctx = torch.cat([ctx, cdir.detach()], dim=-1)
-        main = self.main_head(torch.cat([h, ctx], dim=-1))
-        ctx = torch.cat([ctx, main.detach()], dim=-1)
-
-        # Autoregressive button prediction (active buttons only: A,B,X,Y,Z,L,R)
-        btn_base = torch.cat([h, ctx], dim=-1)  # (B, T, btn_base_dim)
-        btn_logits_list = []
-        btn_ctx_parts = []
-
-        for i, idx in enumerate(self.BTN_ORDER):
-            # Input: base context + all previous button values
-            if btn_ctx_parts:
-                btn_input = torch.cat([btn_base] + btn_ctx_parts, dim=-1)
-            else:
-                btn_input = btn_base
-
-            logit = self.btn_heads[i](btn_input)  # (B, T, 1)
-            btn_logits_list.append(logit)
-
-            # For conditioning the next button: use ground truth during training,
-            # own prediction during inference
-            if btn_targets is not None:
-                btn_val = btn_targets[..., idx:idx+1].float().detach()
-            else:
-                btn_val = (torch.sigmoid(logit) > self.btn_threshold).float().detach()
-            btn_ctx_parts.append(btn_val)
-
-        # Stack into (B, T, 12) — active buttons get predicted logits,
-        # dropped buttons (START, D-pad) stay at 0 (= sigmoid 0.5, but never
-        # above threshold so they're never pressed)
-        btn_logits = torch.full((*h.shape[:-1], self.N_BUTTONS), -10.0,
-                                device=h.device, dtype=h.dtype)  # large negative = sigmoid ~0
-        for i, idx in enumerate(self.BTN_ORDER):
-            btn_logits[..., idx] = btn_logits_list[i].squeeze(-1)
-
-        return dict(
-            main_xy=main,
-            L_val=L,
-            R_val=R,
-            c_dir_logits=cdir,
-            btn_logits=btn_logits,
-        )
-
-    def threshold_buttons(self, btn_logits: torch.Tensor) -> torch.Tensor:
-        return torch.sigmoid(btn_logits) >= self.btn_threshold
-
-
 def _cond_sample(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     """One class per position from softmax(logits / T) via Gumbel-max (argmax when T <= 0 or the
     logits are not finite): the cond heads' inference sampler, CUDA-graph capturable."""
@@ -573,9 +456,8 @@ class MimicPredictionHeads(nn.Module):
 class FramePredictor(nn.Module):
     """
     1. Encodes structured frames via FrameEncoder → (B, T, d_model)
-    2. Adds learned positional embeddings
-    3. Runs a stack of causal Transformer blocks
-    4. Feeds all positions into PredictionHeads (autoregressive training)
+    2. Runs a stack of causal relpos Transformer blocks
+    3. Feeds all positions into the mimic heads (autoregressive training)
     """
     def __init__(self, cfg: ModelConfig, encoder: Optional[nn.Module] = None):
         super().__init__()
@@ -613,24 +495,17 @@ class FramePredictor(nn.Module):
         self.blocks = nn.ModuleList([MimicTransformerBlock(cfg) for _ in range(cfg.num_layers)])
         FinalNorm = RMSNorm if getattr(cfg, 'use_rmsnorm', False) else nn.LayerNorm
         self.final_norm = FinalNorm(cfg.d_model)
-        if cfg.mimic_mode:
-            self.heads = MimicPredictionHeads(
-                cfg.d_model,
-                n_stick_clusters=cfg.n_stick_clusters,
-                n_shoulder_bins=3,  # 3-class combined shoulder (LOW/MID/HIGH)
-                n_cdir=cfg.num_c_dirs,
-                n_btn_classes=cfg.n_controller_combos if cfg.mimic_controller_encoding else 5,
-                cond=getattr(cfg, "cond_heads", False),
-            )
-        else:
-            self.heads = PredictionHeads(
-                cfg.d_model,
-                hidden=cfg.head_hidden,
-                stick_loss=cfg.stick_loss,
-                n_stick_clusters=cfg.n_stick_clusters,
-                n_shoulder_bins=cfg.n_shoulder_bins,
-                autoregressive=cfg.autoregressive_heads,
-            )
+        if not cfg.mimic_mode:
+            raise ValueError("only the mimic heads are implemented (the multi-label PredictionHeads "
+                             "were removed 2026-10-22; git history)")
+        self.heads = MimicPredictionHeads(
+            cfg.d_model,
+            n_stick_clusters=cfg.n_stick_clusters,
+            n_shoulder_bins=3,  # 3-class combined shoulder (LOW/MID/HIGH)
+            n_cdir=cfg.num_c_dirs,
+            n_btn_classes=cfg.n_controller_combos if cfg.mimic_controller_encoding else 5,
+            cond=getattr(cfg, "cond_heads", False),
+        )
 
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * max(cfg.num_layers, 1))

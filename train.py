@@ -65,13 +65,6 @@ MAX_SAMPLES     = 2_000_000
 GRAD_CLIP_NORM      = 1.0
 TASK_NAMES          = ["main", "l", "r", "cdir", "btn"]
 
-FOCAL_GAMMA         = 2.0
-LABEL_SMOOTHING     = 0.1
-
-_focal_gamma = FOCAL_GAMMA
-_label_smoothing = LABEL_SMOOTHING
-_btn_focal_gamma = FOCAL_GAMMA
-
 AMP_DTYPE = torch.bfloat16
 
 MAX_VAL_BATCHES    = 100
@@ -104,39 +97,6 @@ def collate_fn(batch):
 # -----------------------------------------------------------------------------
 # 3. Loss
 # -----------------------------------------------------------------------------
-_bce = nn.BCEWithLogitsLoss()
-
-def focal_loss(logits, targets, gamma=None, label_smoothing=None):
-    if gamma is None: gamma = _focal_gamma
-    if label_smoothing is None: label_smoothing = _label_smoothing
-    n_classes = logits.shape[-1]
-    with torch.no_grad():
-        smooth = label_smoothing / n_classes
-        targets_smooth = torch.full_like(logits, smooth)
-        targets_smooth.scatter_(1, targets.unsqueeze(1), 1.0 - label_smoothing + smooth)
-
-    log_p = F.log_softmax(logits, dim=-1)
-    p     = log_p.exp()
-
-    p_t = p.gather(1, targets.unsqueeze(1)).squeeze(1)
-    focal_weight = (1.0 - p_t).pow(gamma)
-
-    ce = -(targets_smooth * log_p).sum(dim=-1)
-    loss = focal_weight * ce
-    return loss.mean()
-
-
-def focal_bce(pred, target, gamma=None):
-    if gamma is None: gamma = _btn_focal_gamma
-    """Focal binary cross-entropy for multi-label classification.
-
-    Downweights easy-to-classify examples (the vast majority of unpressed
-    buttons) and focuses gradient on uncertain / rare presses.
-    """
-    bce = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-    p = torch.sigmoid(pred)
-    pt = p * target + (1 - p) * (1 - target)
-    return ((1 - pt).pow(gamma) * bce).mean()
 
 
 def _multiclass_prf(pred_idx, tgt_idx, n_classes):
@@ -159,23 +119,6 @@ def _multiclass_prf(pred_idx, tgt_idx, n_classes):
     if support.any():
         return f1[support].mean().item(), prec[support].mean().item(), rec[support].mean().item()
     return 0.0, 0.0, 0.0
-
-
-def _multi_hot_to_single_label(btn_tgt):
-    """Convert multi-hot (B, 12) button targets to single-label (B,) with 5 classes.
-    Classes: A=0, B=1, jump(X|Y)=2, Z=3, NO_BUTTON=4.
-    Priority: A > B > jump > Z > no_button."""
-    a = btn_tgt[..., 0] > 0.5
-    b = btn_tgt[..., 1] > 0.5
-    jump = (btn_tgt[..., 2] > 0.5) | (btn_tgt[..., 3] > 0.5)
-    z = btn_tgt[..., 4] > 0.5
-    # Default = NO_BUTTON (4)
-    single = torch.full(btn_tgt.shape[:-1], 4, device=btn_tgt.device, dtype=torch.long)
-    single[z] = 3
-    single[jump] = 2
-    single[b] = 1
-    single[a] = 0
-    return single
 
 
 # Module-level state for combo encoding (set by train() when --hal-controller-encoding)
@@ -231,7 +174,7 @@ _CDIR_5_TO_9 = torch.tensor([0, 4, 3, 2, 1], dtype=torch.long)
 
 
 def _cond_head_classes(targets, shoulder_centers, n_cdir):
-    """(shoulder, c_dir, main) target classes, exactly as _compute_loss_hal derives its CE
+    """(shoulder, c_dir, main) target classes, exactly as compute_loss derives its CE
     targets: what --cond-heads conditions the later heads on in training."""
     l_bin, r_bin = targets["l_bin"].long(), targets["r_bin"].long()
     shldr = (_combine_shoulder_targets(l_bin, r_bin, shoulder_centers)
@@ -243,8 +186,8 @@ def _cond_head_classes(targets, shoulder_centers, n_cdir):
     return (shldr, cdir, targets["main_cluster"].long())
 
 
-def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5, lite=False):
-    """HAL-style loss: plain CE on all heads, single-label buttons, combined shoulder."""
+def compute_loss(preds, targets, shoulder_centers=None, n_cdir=5, lite=False):
+    """The mimic loss: plain CE on all heads, single-label buttons, combined shoulder."""
     main_pred = preds["main_xy"].float()
     shldr_pred = preds["shoulder_val"].float()
     c_logits = preds["c_dir_logits"].float()
@@ -282,7 +225,7 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5, lite=Fals
     elif _combo_map is not None:
         btn_single = _multi_hot_to_combo_label(btn_tgt)
     else:
-        btn_single = _multi_hot_to_single_label(btn_tgt)
+        raise ValueError("no btns_single targets and no controller_combos.json combo map")
     loss_btn = F.cross_entropy(btn_pred.reshape(-1, btn_pred.size(-1)), btn_single.reshape(-1))
     task_losses = (loss_main, loss_shldr, torch.tensor(0.0, device=loss_main.device), loss_cdir, loss_btn)
     if lite:
@@ -341,115 +284,6 @@ def _compute_loss_hal(preds, targets, shoulder_centers=None, n_cdir=5, lite=Fals
     }
     return metrics, task_losses
 
-
-def compute_loss(preds, targets, btn_loss_type="focal", plain_ce=False, hal_mode=False,
-                  shoulder_centers=None, n_cdir=5, lite=False):
-    if hal_mode:
-        return _compute_loss_hal(preds, targets, shoulder_centers, n_cdir=n_cdir, lite=lite)
-
-    c_logits = preds["c_dir_logits"].float()
-    btn_pred = preds["btn_logits"].float()
-
-    cdir_tgt = targets["c_dir"].long()
-    btn_tgt  = targets.get("btns", targets.get("btns_float")).float()
-
-    main_pred = preds["main_xy"].float()
-    l_pred = preds["L_val"].float()
-    r_pred = preds["R_val"].float()
-    n_main = main_pred.size(-1)
-    n_shldr = l_pred.size(-1)
-
-    main_cluster_tgt = targets["main_cluster"].long()
-    l_bin_tgt = targets["l_bin"].long()
-    r_bin_tgt = targets["r_bin"].long()
-
-    _ce = F.cross_entropy if plain_ce else focal_loss
-    loss_main = _ce(main_pred.reshape(-1, n_main),
-                    main_cluster_tgt.reshape(-1))
-    loss_l = _ce(l_pred.reshape(-1, n_shldr),
-                 l_bin_tgt.reshape(-1))
-    loss_r = _ce(r_pred.reshape(-1, n_shldr),
-                 r_bin_tgt.reshape(-1))
-
-    main_pred_flat = main_pred.reshape(-1, n_main)
-    main_tgt_flat = main_cluster_tgt.reshape(-1)
-    main_pred_idx = main_pred_flat.argmax(-1)
-    main_top1 = (main_pred_idx == main_tgt_flat).float().mean().item()
-    main_f1, main_prec, main_rec = _multiclass_prf(main_pred_idx, main_tgt_flat, n_main)
-
-    l_pred_flat = l_pred.reshape(-1, n_shldr)
-    l_tgt_flat = l_bin_tgt.reshape(-1)
-    r_pred_flat = r_pred.reshape(-1, n_shldr)
-    r_tgt_flat = r_bin_tgt.reshape(-1)
-    l_pred_idx = l_pred_flat.argmax(-1)
-    r_pred_idx = r_pred_flat.argmax(-1)
-    l_top1 = (l_pred_idx == l_tgt_flat).float().mean().item()
-    r_top1 = (r_pred_idx == r_tgt_flat).float().mean().item()
-    shldr_pred_idx = torch.cat([l_pred_idx, r_pred_idx])
-    shldr_tgt_idx = torch.cat([l_tgt_flat, r_tgt_flat])
-    shldr_f1, shldr_prec, shldr_rec = _multiclass_prf(shldr_pred_idx, shldr_tgt_idx, n_shldr)
-
-    cdir_classes = cdir_tgt.argmax(dim=-1)
-    c_logits_flat = c_logits.reshape(-1, c_logits.size(-1))
-    cdir_flat     = cdir_classes.reshape(-1)
-    loss_cdir = _ce(c_logits_flat, cdir_flat)
-    # Only compute button loss on active buttons (first 7: A,B,X,Y,Z,L,R)
-    active_btn_pred = btn_pred[..., :7]
-    active_btn_tgt = btn_tgt[..., :7]
-    if plain_ce:
-        loss_btn = _bce(active_btn_pred, active_btn_tgt)
-    else:
-        loss_btn = focal_bce(active_btn_pred, active_btn_tgt) if btn_loss_type == "focal" else _bce(active_btn_pred, active_btn_tgt)
-
-    cdir_pred = c_logits_flat.argmax(dim=-1)
-    cdir_acc  = (cdir_pred == cdir_flat).float().mean().item()
-    cdir_f1, cdir_prec, cdir_rec = _multiclass_prf(cdir_pred, cdir_flat, c_logits.size(-1))
-
-    btn_prob = torch.sigmoid(active_btn_pred)
-    btn_hat  = btn_prob > 0.5
-    btn_ref  = active_btn_tgt > 0.5
-    btn_acc  = (btn_hat == btn_ref).float().mean().item()
-
-    tp = (btn_hat & btn_ref).sum().float()
-    fp = (btn_hat & ~btn_ref).sum().float()
-    fn = (~btn_hat & btn_ref).sum().float()
-    btn_precision = (tp / (tp + fp)).item() if (tp + fp) > 0 else 0.0
-    btn_recall    = (tp / (tp + fn)).item() if (tp + fn) > 0 else 0.0
-    btn_f1 = (2 * btn_precision * btn_recall / (btn_precision + btn_recall)
-              if (btn_precision + btn_recall) > 0 else 0.0)
-
-    cdir_active_mask = cdir_flat != 0
-    if cdir_active_mask.any():
-        cdir_active_acc = (cdir_pred[cdir_active_mask] == cdir_flat[cdir_active_mask]).float().mean().item()
-    else:
-        cdir_active_acc = 0.0
-
-    metrics = {
-        "loss_main": loss_main.item(),
-        "loss_l":    loss_l.item(),
-        "loss_r":    loss_r.item(),
-        "loss_cdir": loss_cdir.item(),
-        "loss_btn":  loss_btn.item(),
-        "cdir_acc":  cdir_acc,
-        "btn_acc":   btn_acc,
-        "btn_f1":       btn_f1,
-        "btn_precision": btn_precision,
-        "btn_recall":    btn_recall,
-        "main_f1":       main_f1,
-        "main_precision": main_prec,
-        "main_recall":    main_rec,
-        "shldr_f1":       shldr_f1,
-        "shldr_precision": shldr_prec,
-        "shldr_recall":    shldr_rec,
-        "cdir_f1":       cdir_f1,
-        "cdir_precision": cdir_prec,
-        "cdir_recall":    cdir_rec,
-        "cdir_active_acc": cdir_active_acc,
-        "main_top1_acc":    main_top1,
-        "shoulder_top1_acc": (l_top1 + r_top1) / 2,
-    }
-    task_losses = (loss_main, loss_l, loss_r, loss_cdir, loss_btn)
-    return metrics, task_losses
 
 # -----------------------------------------------------------------------------
 # 4. Helpers
@@ -527,9 +361,9 @@ def get_dataloader(ds, shuffle=True, persistent=True, sampler=None):
 def get_model(compile_model=True, model_preset=None, num_layers_override=None,
               encoder_type=None, d_intra=None, dropout_override=None,
               k_query=None, intra_layers=None, scaled_emb=False,
-              btn_loss=None, no_opp_inputs=True, no_self_inputs=True,
-              n_stick_clusters=None, n_shoulder_bins=None,
-              n_heads_override=None, hal_mode=False, lean_features=False,
+              no_opp_inputs=True, no_self_inputs=True,
+              n_stick_clusters=None,
+              n_heads_override=None, lean_features=False,
               hal_minimal_features=False,
               hal_controller_encoding=False, n_controller_combos=5,
               use_input_gate=False, cond_heads=False, relpos_impl="fp32", attn_window=0):
@@ -548,14 +382,11 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["encoder_nlayers"] = intra_layers
     if scaled_emb:
         overrides["scaled_emb"] = True
-    if btn_loss:
-        overrides["btn_loss"] = btn_loss
     overrides["no_opp_inputs"] = no_opp_inputs
     overrides["no_self_inputs"] = no_self_inputs
     if n_heads_override:
         overrides["nhead"] = n_heads_override
-    if hal_mode:
-        overrides["hal_mode"] = True
+    overrides["mimic_mode"] = True   # the only mode
     if lean_features:
         overrides["lean_features"] = True
     if hal_minimal_features:
@@ -565,8 +396,6 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["n_controller_combos"] = n_controller_combos
     if n_stick_clusters is not None:
         overrides["n_stick_clusters"] = n_stick_clusters
-    if n_shoulder_bins is not None:
-        overrides["n_shoulder_bins"] = n_shoulder_bins
     if use_input_gate:
         overrides["use_input_gate"] = True
     if cond_heads:
@@ -634,7 +463,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           encoder_type: str = None, d_intra: int = None,
           dropout_override: float = None, k_query: int = None,
           intra_layers: int = None, scaled_emb: bool = False,
-          btn_loss: str = None,
           no_opp_inputs: bool = True,
           no_self_inputs: bool = False,
           clusters_path: str = None,
@@ -651,9 +479,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           warm_restart: bool = False,
           ema_decay: float = 0.0,
           eval_only: str = None,
-          plain_ce: bool = False,
           n_heads_override: int = None,
-          hal_mode: bool = False,
           no_amp: bool = False,
           cosine_min_lr: float = None,
           cosine_decay_steps: int = None,
@@ -804,16 +630,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
             f"No stick_clusters.json found "
             f"(checked: {clusters_path}, {data_dir}, data/full/)")
     n_stick_clusters = len(stick_centers_np)
-    if hal_minimal_features and hal_mode:
+    if hal_minimal_features:
         # Force 3-class shoulder output, but keep data's centers for decoding
         _shoulder_centers_for_decode = torch.tensor(shoulder_centers_np, dtype=torch.float32, device=DEVICE)
         n_shoulder_bins = 3
     else:
         _shoulder_centers_for_decode = None
         n_shoulder_bins = len(shoulder_centers_np)
-    if cond_heads and not hal_mode:   # the default; only the mimic heads have a conditional chain
-        _log("  --cond-heads needs --mimic-mode; running without it")
-        cond_heads = False
     def _cc(t):   # --cond-heads: true earlier-head classes to condition on (None otherwise)
         if not cond_heads:
             return None
@@ -831,12 +654,10 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            encoder_type=encoder_type, d_intra=d_intra,
                            dropout_override=dropout_override, k_query=k_query,
                            intra_layers=intra_layers, scaled_emb=scaled_emb,
-                           btn_loss=btn_loss, no_opp_inputs=no_opp_inputs,
+                           no_opp_inputs=no_opp_inputs,
                            no_self_inputs=no_self_inputs,
                            n_stick_clusters=n_stick_clusters,
-                           n_shoulder_bins=n_shoulder_bins,
                            n_heads_override=n_heads_override,
-                           hal_mode=hal_mode,
                            lean_features=lean_features,
                            hal_minimal_features=hal_minimal_features,
                            hal_controller_encoding=hal_controller_encoding,
@@ -1145,8 +966,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     vt["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
                 with autocast("cuda", dtype=AMP_DTYPE):
                     vpreds = _raw_model(vs, cond_classes=_cc(vt))
-                vm, vtl = compute_loss(vpreds, vt, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                                       hal_mode=hal_mode,
+                vm, vtl = compute_loss(vpreds, vt,
                                        shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
                                        n_cdir=cfg.num_c_dirs)
                 _bt = sum(t.item() for t in vtl)
@@ -1219,14 +1039,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     dists = torch.cdist(xy.reshape(-1, 2), _stick_centers)
                     target["main_cluster"] = dists.argmin(dim=-1).reshape(xy.shape[:-1])
 
-                btn_tgt = target.get("btns", target.get("btns_float"))
                 with autocast("cuda", dtype=AMP_DTYPE):
-                    preds = model(state, btn_targets=btn_tgt if not hal_mode else None,
-                                  cond_classes=_cc(target))
+                    preds = model(state, cond_classes=_cc(target))
                 metrics, task_losses = compute_loss(
-                    preds, target, btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
+                    preds, target,
                     lite=lean_metrics and not (step % log_interval == 0 or step == 1),
-                    hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                    shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
                     n_cdir=cfg.num_c_dirs)
             except torch.cuda.OutOfMemoryError:
                 mem = torch.cuda.max_memory_allocated() / 1e9
@@ -1385,8 +1203,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                         with autocast("cuda", dtype=AMP_DTYPE):
                             vpreds = _raw_model(vs, cond_classes=_cc(vt))  # unwrapped — no DDP collectives during eval
                         vm, vtl = compute_loss(vpreds, vt,
-                                               btn_loss_type=cfg.btn_loss, plain_ce=plain_ce,
-                                               hal_mode=hal_mode, shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
+                                               shoulder_centers=_shoulder_centers_for_decode if _shoulder_centers_for_decode is not None else _shoulder_centers,
                                                n_cdir=cfg.num_c_dirs)
                         batch_total = sum(t.item() for t in vtl)
                         if math.isfinite(batch_total):
@@ -1650,9 +1467,6 @@ if __name__ == "__main__":
                         help="Scale embedding dim by vocab size (emb = max(16, card^0.25*16))")
     parser.add_argument("--clusters-path", type=str, default="data/full/stick_clusters.json",
                         help="Path to stick_clusters.json")
-    parser.add_argument("--btn-loss", type=str, default=None,
-                        choices=["bce", "focal"],
-                        help="Button loss type (default: focal)")
     parser.add_argument("--opp-inputs", action="store_true",
                         help="Include opponent controller inputs (default: excluded)")
     parser.add_argument("--self-inputs", action=argparse.BooleanOptionalAction, default=True,
@@ -1661,12 +1475,6 @@ if __name__ == "__main__":
                         help="Weight decay (default: 1e-2)")
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed for reproducibility")
-    parser.add_argument("--focal-gamma", type=float, default=FOCAL_GAMMA,
-                        help="Focal CE gamma for sticks/shoulders/cdir (default: 2.0)")
-    parser.add_argument("--btn-focal-gamma", type=float, default=None,
-                        help="Focal BCE gamma for buttons (default: same as --focal-gamma)")
-    parser.add_argument("--label-smoothing", type=float, default=LABEL_SMOOTHING,
-                        help="Label smoothing (default: 0.1, set 0 to disable)")
     parser.add_argument("--target-val-f1", type=float, default=None,
                         help="Stop training when val btn_f1 >= this value (e.g. 0.985)")
     parser.add_argument("--max-wall-time", type=float, default=None,
@@ -1707,14 +1515,15 @@ if __name__ == "__main__":
                         help="LR for the Muon group (2D hidden matrices) when "
                              "--optimizer muon; the aux-AdamW group keeps --lr.")
     parser.add_argument("--plain-ce", action="store_true",
-                        help="Use plain cross-entropy instead of focal loss for all heads")
+                        help="No-op: the mimic loss is always plain cross-entropy (kept so old "
+                             "commands parse)")
     parser.add_argument("--n-heads", type=int, default=None,
                         help="Override number of attention heads")
     parser.add_argument("--lean-features", action="store_true",
                         help="Drop nana/projectile features to match HAL's lean input set")
-    parser.add_argument("--mimic-mode", "--hal-mode", dest="mimic_mode",
-                        action=argparse.BooleanOptionalAction, default=True,
-                        help="MIMIC-exact mode: single-label buttons, combined shoulder, LN heads, plain CE")
+    parser.add_argument("--mimic-mode", "--hal-mode", dest="mimic_mode", action="store_true",
+                        help="No-op: mimic mode (single-label buttons, combined shoulder, LN heads, "
+                             "plain CE) is the only mode (kept so old commands parse)")
     parser.add_argument("--no-amp", action="store_true",
                         help="Disable AMP (train in FP32)")
     parser.add_argument("--cosine-min-lr", type=float, default=None,
@@ -1741,11 +1550,6 @@ if __name__ == "__main__":
     parser.add_argument("--character-filter", type=int, default=None,
                         help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
     args = parser.parse_args()
-
-    import train as _self_module
-    _self_module._focal_gamma = args.focal_gamma
-    _self_module._label_smoothing = args.label_smoothing
-    _self_module._btn_focal_gamma = args.btn_focal_gamma if args.btn_focal_gamma is not None else args.focal_gamma
 
     if args.seed is not None:
         import random
@@ -1777,7 +1581,6 @@ if __name__ == "__main__":
         k_query=args.k_query,
         intra_layers=args.intra_layers,
         scaled_emb=args.scaled_emb,
-        btn_loss=args.btn_loss,
         no_opp_inputs=not args.opp_inputs,
         no_self_inputs=not args.self_inputs,
         clusters_path=args.clusters_path,
@@ -1794,9 +1597,7 @@ if __name__ == "__main__":
         warm_restart=args.warm_restart,
         ema_decay=args.ema_decay,
         eval_only=args.eval_only,
-        plain_ce=args.plain_ce,
         n_heads_override=args.n_heads,
-        hal_mode=args.mimic_mode,
         no_amp=args.no_amp,
         cosine_min_lr=args.cosine_min_lr,
         cosine_decay_steps=args.cosine_decay_steps,

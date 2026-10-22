@@ -113,8 +113,8 @@ def main():
                     p = m.heads(h)
             for b in range(len(chunk)):    # per-target losses for paired statistics
                 _, losses = T.compute_loss({k: v[b:b + 1] for k, v in p.items()},
-                                           {k: v[b:b + 1] for k, v in tt.items()}, plain_ce=True,
-                                           hal_mode=True, shoulder_centers=shoulder,
+                                           {k: v[b:b + 1] for k, v in tt.items()},
+                                           shoulder_centers=shoulder,
                                            n_cdir=cfg.num_c_dirs, lite=True)
                 per[name].append(float(sum(l.item() for l in losses)))
     ref = next(iter(models))

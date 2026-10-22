@@ -228,6 +228,14 @@ torchrun --nproc_per_node=2 train.py \
   --nccl-timeout 3600
 ```
 
+Since 2026-10-22 most of these flags are defaults (`--model mimic`,
+`--encoder mimic_flat`, `--mimic-controller-encoding`, `--stick-clusters
+hal37`, `--self-inputs`, `--reaction-delay 0`, `--lr 3e-4`, no warmup,
+`--cosine-min-lr 1e-6`) and `--mimic-mode` / `--plain-ce` are accepted
+no-ops (mimic mode and plain CE are the only mode and loss; focal loss
+and the multi-label heads were removed). A bare `train.py --data-dir D
+--run-name N` trains the production recipe.
+
 **Full features are the default** — omit `--mimic-minimal-features`
 so the encoder exposes the full 13-numeric + 5-flag per-player
 gamestate. Worth ~1.5–3.5% val-loss reduction over the minimal path
