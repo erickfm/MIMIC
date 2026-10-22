@@ -274,3 +274,33 @@ calibrate (owner's call), so F5's ability to catch regressions is untested.
   lower lr, chunks longer than the receptive field); inference already streams window models in
   Dolphin and the sim.
 - Use 2k-step warm starts from the champion for shape-compatible research changes.
+
+## Legacy cleanup (owner-approved, end of day)
+
+All 29 served checkpoints (`hf_eval/*`, `hf_checkpoints/*`, `AVG_c9nm`, `AVG_mastfox`) give
+bit-identical outputs after every step; the champion's fixed-subset val stays 0.6812.
+Everything removed is in git history.
+
+- **Bug fixes:** `h2h_batch_mp.py` / `ffw_batch_mp.py` now pass cond-heads models' joint samples
+  (`cond_sample`) to `decode_and_press`. `train.py`'s defaults are the production recipe
+  (`--model mimic`, `--encoder mimic_flat`, mimic mode, controller encoding, self-inputs, hal37
+  clusters, rd 0, lr 3e-4, cosine floor 1e-6, no warmup).
+- **Model:** Shaw relpos is the only attention (generic block, RoPE/xPos/ALiBi/flexbias/learned
+  position encodings and their presets gone; kept `mimic`, `mimic-w256/w384/w768/w1024`,
+  `mimic-xl`, `mimic-xxl`); the mimic heads and plain CE are the only heads and loss (focal
+  losses, multi-label heads gone); `mimic_flat` is the only encoder (`hal_flat` alias kept);
+  the minimal-features input and the HAL bare-state-dict loader in `inference_utils` are gone
+  (`tools/run_hal_model.py` still loads HAL weights); the MLP backbone, `--patch`, `--mtp` and
+  the bf16 relpos kernel are gone.
+- **Training options gone:** SOAP, the self-input drop curriculum, mirror augmentation,
+  `--random-perspective`, `--controller-offset` and the rd=0 leak check, the pre-windowed shard
+  format, the weight EMA, `--wd-fix`, the `--cosine-decay-steps` flat tail, `--scale-lr`,
+  `--target-val-f1`, the `--hal-*` alias flags. `--mimic-mode` / `--plain-ce` parse as no-ops.
+- **RL:** the Dolphin RL loop (`rlvr/online`: actors, savestate drills, VR reward modules,
+  streaming slippistats ports) and offline RLVR (`rlvr/train`, `rollout`, `eval`, `sampler`,
+  `tagger`, `tasks`) are gone; `ppo.py`, `trajectory.py` and the L-cancel constants moved into
+  `rlvr/sim/`. `tools/sim_rl.py` (1 PPO update) and `tools/sim_h2h.py` (24 games with L-cancel
+  scoring) checked after the move.
+- **Tools gone:** `download_fox.py`, `build_clusters.py`, `build_controller_combos.py`,
+  `run_all_chars.sh`, `retrain_all_baseline.sh`, `gen_h2h_schedule.py`, `plot_h2h.py`,
+  `plot_winrate_steps.py`.
