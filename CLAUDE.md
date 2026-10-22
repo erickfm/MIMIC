@@ -236,6 +236,29 @@ at no wall-clock cost. Old checkpoints trained with the flag still
 load unchanged (the flag flows through the pickled config and the
 minimal-path behavior is bit-identical for back-compat).
 
+**Muon is the default optimizer (since 2026-10-22).** `--optimizer muon`
+(implicit): Muon at `--muon-lr 0.02` on the hidden 2D matrices,
+aux-AdamW at `--lr` on embeddings / heads / relpos tables / norms /
+biases, one cosine schedule over all groups. On the 20M proxy it beat
+AdamW by −1.6% val, and a 3,500-step Muon run beat a 6,500-step AdamW
+run (≥1.8× fewer steps, ~4% more time per step). lr 0.04 was worse
+than AdamW; SOAP (lr 3e-3) much worse. Proxy-scale, single seed — not
+yet h2h-validated at production scale. **Every run before 2026-10-22
+used AdamW:** pass `--optimizer adamw` to reproduce or `--resume`
+one (a mismatched resume now fails with a message saying so). See
+`docs/research-notes-2026-10-22.md`.
+
+**Opt-in speed variants (not defaults):** `--attn-window 180` with
+`--seq-len 720` (sliding-window relpos; ties quality on the proxy and
+enables the exact streaming KV cache in `mimic/kv_cache.py`, 22×
+cheaper batched inference) — not default because the Dolphin
+inference path (`tools/inference_utils.py`) still recomputes a
+180-frame window, which mismatches a window-trained model; wire the
+KV cache in first. `--relpos-impl sdpa` (~14% faster step, equal val
+on one run; its bf16 sibling diverged, so watch a long run before
+relying on it). Score sliding-window models with
+`tools/eval_last_frame.py`, not train.py's window-averaged val.
+
 **`--self-inputs` is required even on v2 shards.** Without it the
 encoder has no controller-history input at all and val loss climbs
 ~3.5× (main-stick F1 drops from ~57% to ~15%). `--controller-offset`

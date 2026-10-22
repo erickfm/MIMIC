@@ -32,6 +32,15 @@ baseline `p1-C-base-s1`, paired over 20,000 held-out frames (see "Metrics").
   multi-token prediction (Δ +0.0010, 5% slower), window 90 (Δ +0.0078), bf16 attention math
   (diverged at ~step 1k), FlexAttention without attention dropout (small cost, ~+0.0025).
 
+## Defaults changed
+
+- **`--optimizer` now defaults to `muon`** (`--muon-lr 0.02`, aux-AdamW at `--lr`). It was the
+  only change that was better with no trade-off. Pre-2026-10-22 runs used AdamW: pass
+  `--optimizer adamw` to reproduce or resume them; a mismatched `--resume` fails with a message.
+- Not made default: the sliding window (the Dolphin inference path still recomputes a 180-frame
+  window, which mismatches a window-trained model, until the KV cache is wired into
+  `tools/inference_utils.py`), and `--relpos-impl sdpa` (one run; the bf16 variant diverged).
+
 ## Setup
 
 - **Proxy:** `tools/proxy_run.sh NAME mimic data/mastfox_c9_half 6500 SEED [flags]` — the

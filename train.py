@@ -685,7 +685,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           distill_alpha: float = 1.0,
           wd_fix: bool = False,
           lean_metrics: bool = False,
-          optimizer: str = "adamw",
+          optimizer: str = "muon",
           muon_lr: float = 0.02,
           soap_lr: float = 3e-3,
           mirror_aug: float = 0.0,
@@ -1040,7 +1040,13 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         ckpt = torch.load(resume, map_location=DEVICE)
         model.load_state_dict(ckpt['model_state_dict'])
         if not no_load_optim:
-            optimiser.load_state_dict(ckpt['optimizer_state_dict'])
+            try:
+                optimiser.load_state_dict(ckpt['optimizer_state_dict'])
+            except ValueError as e:
+                raise ValueError(
+                    f"optimizer state in {resume} doesn't match --optimizer {optimizer}. Runs from "
+                    f"before 2026-10-22 used AdamW: pass --optimizer adamw to resume them (or "
+                    f"--no-load-optim to start a fresh optimizer).") from e
             # warm-restart: keep Adam momentum but reset the LR schedule (fresh
             # cosine over the full new horizon from step 0). CosineAnnealingLR
             # updates recurrently from the optimizer's CURRENT lr, which
@@ -1829,12 +1835,13 @@ if __name__ == "__main__":
                              "val loop (val/total), print EVAL_ONLY ..., and exit. "
                              "For scoring averaged/loaded checkpoints reproducibly.")
     parser.add_argument("--optimizer", choices=["adamw", "muon", "soap"],
-                        default="adamw",
-                        help="Optimizer for hidden matrices. 'adamw' (default) is "
-                             "the existing path, byte-identical. 'muon' runs Muon on "
+                        default="muon",
+                        help="Optimizer for hidden matrices. 'muon' (default since 2026-10-22; "
+                             "docs/research-notes-2026-10-22.md) runs Muon on "
                              "2D weight matrices + aux-AdamW on embeddings/heads/"
-                             "norms/biases. 'soap' runs SOAP (Adam in the Shampoo "
-                             "eigenbasis) on all params.")
+                             "norms/biases. 'adamw' is the pre-2026-10-22 default: use it to "
+                             "reproduce or resume older runs. 'soap' runs SOAP (Adam in the "
+                             "Shampoo eigenbasis) on all params.")
     parser.add_argument("--muon-lr", type=float, default=0.02,
                         help="LR for the Muon group (2D hidden matrices) when "
                              "--optimizer muon; the aux-AdamW group keeps --lr.")
