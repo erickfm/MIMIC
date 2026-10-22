@@ -359,11 +359,10 @@ def get_dataloader(ds, shuffle=True, persistent=True, sampler=None):
     )
 
 def get_model(compile_model=True, model_preset=None, num_layers_override=None,
-              encoder_type=None, d_intra=None, dropout_override=None,
-              k_query=None, intra_layers=None, scaled_emb=False,
+              encoder_type=None, dropout_override=None,
               no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None,
-              n_heads_override=None, lean_features=False,
+              n_heads_override=None,
               hal_minimal_features=False,
               hal_controller_encoding=False, n_controller_combos=5,
               use_input_gate=False, cond_heads=False, relpos_impl="fp32", attn_window=0):
@@ -372,23 +371,13 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
         overrides["num_layers"] = num_layers_override
     if encoder_type:
         overrides["encoder_type"] = encoder_type
-    if d_intra is not None:
-        overrides["d_intra"] = d_intra
     if dropout_override is not None:
         overrides["dropout"] = dropout_override
-    if k_query is not None:
-        overrides["k_query"] = k_query
-    if intra_layers is not None:
-        overrides["encoder_nlayers"] = intra_layers
-    if scaled_emb:
-        overrides["scaled_emb"] = True
     overrides["no_opp_inputs"] = no_opp_inputs
     overrides["no_self_inputs"] = no_self_inputs
     if n_heads_override:
         overrides["nhead"] = n_heads_override
     overrides["mimic_mode"] = True   # the only mode
-    if lean_features:
-        overrides["lean_features"] = True
     if hal_minimal_features:
         overrides["hal_minimal_features"] = True
     if hal_controller_encoding:
@@ -460,9 +449,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           wandb_tags: list = None, wandb_group: str = None,
           num_layers_override: int = None, seq_len_override: int = None,
           batch_size_override: int = None,
-          encoder_type: str = None, d_intra: int = None,
-          dropout_override: float = None, k_query: int = None,
-          intra_layers: int = None, scaled_emb: bool = False,
+          encoder_type: str = None,
+          dropout_override: float = None,
           no_opp_inputs: bool = True,
           no_self_inputs: bool = False,
           clusters_path: str = None,
@@ -483,7 +471,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           no_amp: bool = False,
           cosine_min_lr: float = None,
           cosine_decay_steps: int = None,
-          lean_features: bool = False,
           no_warmup: bool = False,
           stick_clusters: str = None,
           hal_minimal_features: bool = False,
@@ -651,14 +638,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
 
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
                            num_layers_override=num_layers_override,
-                           encoder_type=encoder_type, d_intra=d_intra,
-                           dropout_override=dropout_override, k_query=k_query,
-                           intra_layers=intra_layers, scaled_emb=scaled_emb,
+                           encoder_type=encoder_type,
+                           dropout_override=dropout_override,
                            no_opp_inputs=no_opp_inputs,
                            no_self_inputs=no_self_inputs,
                            n_stick_clusters=n_stick_clusters,
                            n_heads_override=n_heads_override,
-                           lean_features=lean_features,
                            hal_minimal_features=hal_minimal_features,
                            hal_controller_encoding=hal_controller_encoding,
                            n_controller_combos=_n_combos,
@@ -1453,18 +1438,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
     parser.add_argument("--encoder",   type=str, default="mimic_flat",
-                        choices=["default", "flat", "composite8", "hybrid16", "mimic_flat", "hal_flat"],
-                        help="Frame encoder variant (default: mimic_flat)")
-    parser.add_argument("--d-intra",   type=int, default=None,
-                        help="Intra-frame encoder width (default: 256)")
+                        choices=["mimic_flat", "hal_flat"],
+                        help="Frame encoder (mimic_flat; hal_flat is its pre-rename alias)")
     parser.add_argument("--dropout",   type=float, default=None,
                         help="Dropout rate (default: 0.1)")
-    parser.add_argument("--k-query",   type=int, default=None,
-                        help="Number of query tokens in intra-frame attention")
-    parser.add_argument("--intra-layers", type=int, default=None,
-                        help="Number of intra-frame attention layers (0=no attn)")
-    parser.add_argument("--scaled-emb", action="store_true",
-                        help="Scale embedding dim by vocab size (emb = max(16, card^0.25*16))")
     parser.add_argument("--clusters-path", type=str, default="data/full/stick_clusters.json",
                         help="Path to stick_clusters.json")
     parser.add_argument("--opp-inputs", action="store_true",
@@ -1519,8 +1496,6 @@ if __name__ == "__main__":
                              "commands parse)")
     parser.add_argument("--n-heads", type=int, default=None,
                         help="Override number of attention heads")
-    parser.add_argument("--lean-features", action="store_true",
-                        help="Drop nana/projectile features to match HAL's lean input set")
     parser.add_argument("--mimic-mode", "--hal-mode", dest="mimic_mode", action="store_true",
                         help="No-op: mimic mode (single-label buttons, combined shoulder, LN heads, "
                              "plain CE) is the only mode (kept so old commands parse)")
@@ -1576,11 +1551,7 @@ if __name__ == "__main__":
         seq_len_override=args.seq_len,
         batch_size_override=args.batch_size,
         encoder_type=args.encoder,
-        d_intra=args.d_intra,
         dropout_override=args.dropout,
-        k_query=args.k_query,
-        intra_layers=args.intra_layers,
-        scaled_emb=args.scaled_emb,
         no_opp_inputs=not args.opp_inputs,
         no_self_inputs=not args.self_inputs,
         clusters_path=args.clusters_path,
@@ -1601,7 +1572,6 @@ if __name__ == "__main__":
         no_amp=args.no_amp,
         cosine_min_lr=args.cosine_min_lr,
         cosine_decay_steps=args.cosine_decay_steps,
-        lean_features=args.lean_features,
         no_warmup=not args.warmup,
         stick_clusters=args.stick_clusters,
         hal_minimal_features=args.mimic_minimal_features,

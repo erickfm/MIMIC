@@ -38,11 +38,7 @@ class ModelConfig:
     dropout: float       = 0.1
 
     # frame encoder
-    encoder_type: str    = "hybrid16"
-    d_intra: int         = 256
-    encoder_nlayers: int = 2
-    k_query: int         = 1
-    scaled_emb: bool     = False
+    encoder_type: str    = "mimic_flat"
 
     # sequence length
     max_seq_len: int     = 60
@@ -66,7 +62,6 @@ class ModelConfig:
     # prediction heads (the mimic heads: single-label buttons, combined 3-class shoulder, LN)
     n_stick_clusters: int           = 63
     mimic_mode: bool                = True   # the only mode; False only in pre-mimic checkpoints
-    lean_features: bool             = False  # drop nana/projectiles/nana-flags
     mimic_minimal_features: bool    = False  # drop ECB/speeds/hitlag from numeric
     mimic_controller_encoding: bool = False  # one-hot controller feedback (stick clusters + button combos)
     # Conditional heads (--cond-heads): each mimic head is conditioned on the one-hot CLASS of the
@@ -455,7 +450,7 @@ class MimicPredictionHeads(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 class FramePredictor(nn.Module):
     """
-    1. Encodes structured frames via FrameEncoder → (B, T, d_model)
+    1. Encodes structured frames via MimicFlatEncoder → (B, T, d_model)
     2. Runs a stack of causal relpos Transformer blocks
     3. Feeds all positions into the mimic heads (autoregressive training)
     """
@@ -467,22 +462,11 @@ class FramePredictor(nn.Module):
         self.encoder = encoder or build_encoder(
             encoder_type=cfg.encoder_type,
             d_model=cfg.d_model,
-            d_intra=cfg.d_intra,
             dropout=cfg.dropout,
-            nlayers=cfg.encoder_nlayers,
-            k_query=cfg.k_query,
-            scaled_emb=cfg.scaled_emb,
             num_stages=cfg.num_stages,
-            num_ports=cfg.num_ports,
             num_characters=cfg.num_characters,
             num_actions=cfg.num_actions,
-            num_costumes=cfg.num_costumes,
-            num_proj_types=cfg.num_proj_types,
-            num_proj_subtypes=cfg.num_proj_subtypes,
-            num_c_dirs=cfg.num_c_dirs,
-            no_opp_inputs=cfg.no_opp_inputs,
             no_self_inputs=cfg.no_self_inputs,
-            lean_features=cfg.lean_features,
             mimic_minimal_features=cfg.mimic_minimal_features,
             mimic_controller_encoding=cfg.mimic_controller_encoding,
             n_controller_combos=cfg.n_controller_combos,
