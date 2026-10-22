@@ -29,11 +29,10 @@ class StreamingMeleeDataset(IterableDataset):
         self,
         data_dir: str,
         sequence_length: int = 60,
-        reaction_delay: int = 1,
+        reaction_delay: int = 0,
         split: str = "train",
         rank: int = 0,
         world_size: int = 1,
-        controller_offset: bool = False,
         hal_controller_encoding: bool = False,
         controller_combo_map: dict = None,
         n_controller_combos: int = 5,
@@ -48,10 +47,6 @@ class StreamingMeleeDataset(IterableDataset):
         self._world_size     = world_size
         self._distributed    = kwargs.pop("distributed", True)
         self._char_filter    = kwargs.pop("character_filter", None)  # e.g. 1 for Fox
-        self._random_perspective = kwargs.pop("random_perspective", False)
-        # Left-right mirror augmentation probability (train split only); 0 = off.
-        self._mirror_aug     = float(kwargs.pop("mirror_aug", 0.0))
-        self._controller_offset = controller_offset
         self._hal_ctrl_enc   = hal_controller_encoding
         self._combo_map      = controller_combo_map
         self._n_combos       = n_controller_combos
@@ -135,18 +130,6 @@ class StreamingMeleeDataset(IterableDataset):
                         stacklevel=2,
                     )
 
-            # Random perspective selection: shards store consecutive p1/p2
-            # perspective pairs per game. When enabled, randomly pick one
-            # perspective per pair — matches HAL's random.choice(["p1","p2"]).
-            if self._random_perspective and len(game_ranges) >= 2:
-                selected = []
-                for i in range(0, len(game_ranges) - 1, 2):
-                    pick = random.choice([i, i + 1])
-                    selected.append(game_ranges[pick])
-                if len(game_ranges) % 2 == 1:
-                    selected.append(game_ranges[-1])
-                game_ranges = selected
-
             # Random window sampling: N random windows per game per shard visit.
             # HAL samples one random window per __getitem__ call; across training
             # each game is visited ~5000 times. We amortize shard loading by
@@ -164,18 +147,6 @@ class StreamingMeleeDataset(IterableDataset):
                 else:
                     state = {k: v[abs_start: abs_start + W] for k, v in states.items()}
                 target = {k: v[abs_start + R: abs_start + W + R] for k, v in targets.items()}
-                # HAL-style: shift self-controller by -1 so position i sees frame i-1's controller
-                if self._controller_offset and W > 1:
-                    # Shift whichever controller keys exist (raw or pre-encoded)
-                    ctrl_keys = (["self_controller"] if "self_controller" in state
-                                 else ["self_buttons", "self_analog", "self_c_dir"])
-                    for ck in ctrl_keys:
-                        if ck in state:
-                            orig = state[ck]
-                            shifted = torch.zeros_like(orig)
-                            shifted[1:] = orig[:-1]
-                            state[ck] = shifted
-
                 # HAL-style: encode controller as one-hot vector (only if not pre-encoded in shard)
                 if (self._hal_ctrl_enc and self._combo_map is not None
                         and "self_controller" not in state
@@ -196,16 +167,4 @@ class StreamingMeleeDataset(IterableDataset):
 
     # ------------------------------------------------------------------
     def __iter__(self):
-        src = self._iter_pergame()
-        if self._mirror_aug <= 0.0:
-            yield from src
-            return
-        # Per-window left-right mirror with prob _mirror_aug. Dedicated RNG seeded
-        # per DataLoader worker so the coin stream is reproducible + independent.
-        from .features import mirror_window
-        wi = get_worker_info()
-        mrng = random.Random(982451653 + (wi.id if wi is not None else 0))
-        for state, target in src:
-            if mrng.random() < self._mirror_aug:
-                mirror_window(state, target)
-            yield state, target
+        yield from self._iter_pergame()

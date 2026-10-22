@@ -465,16 +465,13 @@ def _compute_intervals(max_steps):
 
 
 def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
-                  rank=0, world_size=1, controller_offset=False,
+                  rank=0, world_size=1,
                   hal_controller_encoding=False,
                   controller_combo_map=None, n_controller_combos=5,
-                  character_filter=None, random_perspective=False,
-                  mirror_aug=0.0):
+                  character_filter=None):
     _log(f"  Using streaming dataset from {data_dir}")
     if character_filter is not None:
         _log(f"  Character filter: self_character={character_filter}")
-    if random_perspective:
-        _log(f"  Random perspective selection: enabled (HAL-style)")
     ctrl_kw = dict(
         hal_controller_encoding=hal_controller_encoding,
         controller_combo_map=controller_combo_map,
@@ -493,14 +490,9 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         split="train",
         rank=rank,
         world_size=world_size,
-        controller_offset=controller_offset,
         character_filter=character_filter,
-        random_perspective=random_perspective,
-        mirror_aug=mirror_aug,
         **ctrl_kw,
     )
-    if mirror_aug > 0.0:
-        _log(f"  Mirror augmentation: p={mirror_aug} (train split only)")
     train_ds._state_keys = _HAL_STATE_KEYS
     val_ds = StreamingMeleeDataset(
         data_dir=data_dir,
@@ -509,10 +501,8 @@ def get_datasets(data_dir, no_opp_inputs=False, no_self_inputs=True,
         split="val",
         rank=rank,
         world_size=world_size,
-        controller_offset=controller_offset,
         distributed=False,  # all ranks see all val data — prevents DDP deadlock
         character_filter=character_filter,
-        random_perspective=random_perspective,
         **ctrl_kw,
     )
     val_ds._state_keys = _HAL_STATE_KEYS
@@ -680,10 +670,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           stick_clusters: str = None,
           hal_minimal_features: bool = False,
           reaction_delay_override: int = None,
-          controller_offset: bool = False,
           hal_controller_encoding: bool = False,
           character_filter: int = None,
-          random_perspective: bool = False,
           input_gate_l1: float = 0.0,
           cond_heads: bool = True,
           relpos_impl: str = "fp32",
@@ -694,7 +682,6 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           lean_metrics: bool = False,
           optimizer: str = "muon",
           muon_lr: float = 0.02,
-          mirror_aug: float = 0.0,
           save_steps: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
@@ -766,52 +753,16 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     ds, val_ds = get_datasets(data_dir, no_opp_inputs=no_opp_inputs,
                               no_self_inputs=no_self_inputs,
                               rank=rank, world_size=world_size,
-                              controller_offset=controller_offset,
                               hal_controller_encoding=hal_controller_encoding,
                               controller_combo_map=_combo_map,
                               n_controller_combos=_n_combos,
-                              character_filter=character_filter,
-                              random_perspective=random_perspective,
-                              mirror_aug=mirror_aug)
+                              character_filter=character_filter)
     n_train = len(ds)
     n_val   = len(val_ds)
     n_train_games = getattr(ds, "n_games", len(getattr(ds, "files", [])))
     n_val_games   = getattr(val_ds, "n_games", len(getattr(val_ds, "files", [])))
     _log(f"  Train: {n_train:,} windows from {n_train_games} games")
     _log(f"  Val:   {n_val:,} windows from {n_val_games} games")
-
-    # --- Gamestate-leaks-button sanity check ---
-    # Verify that the game state at frame i does NOT already reflect button[i].
-    # In Melee, if the game state is recorded after input processing, then
-    # action=KNEE_BEND already appears on the same frame as JUMP button press,
-    # letting the model read the answer from the action embedding instead of
-    # learning to initiate actions.  This check samples the first train shard
-    # and reports how often this leak occurs.
-    if _is_main and hal_mode and REACTION_DELAY == 0:
-        _shard_files = sorted(Path(data_dir).glob("train_shard_*.pt"))
-        if _shard_files:
-            _cs = torch.load(_shard_files[0], map_location="cpu", weights_only=True)
-            _c_action = _cs["states"]["self_action"]
-            _c_btns = _cs["targets"]["btns_single"]
-            _n = len(_c_action)
-            # JUMP onset: btns goes from non-JUMP to JUMP; check for KNEE_BEND (24)
-            _jump_onsets = 0
-            _jump_leaked = 0
-            for _ci in range(1, _n):
-                if _c_btns[_ci].item() == 3 and _c_btns[_ci - 1].item() != 3:
-                    _jump_onsets += 1
-                    if _c_action[_ci].item() == 24:  # KNEE_BEND
-                        _jump_leaked += 1
-            if _jump_onsets > 0:
-                _leak_pct = _jump_leaked / _jump_onsets * 100
-                _log(f"  ⚠ Gamestate leak check (rd=0): {_jump_leaked}/{_jump_onsets} "
-                     f"JUMP onsets ({_leak_pct:.1f}%) already show KNEE_BEND in self_action. "
-                     f"The model can read the answer from the action embedding.")
-                if _leak_pct > 50:
-                    _log(f"  ⚠ CRITICAL: >50% leak rate. With rd=0, the model learns to copy "
-                         f"action→button instead of learning to initiate actions. "
-                         f"Consider --reaction-delay 1.")
-            del _cs, _c_action, _c_btns
 
     train_sampler, val_sampler = None, None
     if is_distributed and not isinstance(ds, IterableDataset):
@@ -1692,8 +1643,6 @@ if __name__ == "__main__":
                         help="Override sequence length (default: 60)")
     parser.add_argument("--reaction-delay", type=int, default=None,
                         help="Reaction delay in frames (default: 0, correct for v2 shards)")
-    parser.add_argument("--controller-offset", action="store_true",
-                        help="Shift self-controller input by -1 frame (HAL-style: see prev frame's press)")
     parser.add_argument("--batch-size", type=int, default=None,
                         help="Override batch size (default: 200)")
     parser.add_argument("--encoder",   type=str, default="mimic_flat",
@@ -1775,10 +1724,6 @@ if __name__ == "__main__":
     parser.add_argument("--muon-lr", type=float, default=0.02,
                         help="LR for the Muon group (2D hidden matrices) when "
                              "--optimizer muon; the aux-AdamW group keeps --lr.")
-    parser.add_argument("--mirror-aug", type=float, default=0.0,
-                        help="Left-right mirror augmentation probability per train "
-                             "window (e.g. 0.5). Exploits Melee's L-R symmetry to "
-                             "double unique signal. Val stays un-mirrored. 0=off.")
     parser.add_argument("--plain-ce", action="store_true",
                         help="Use plain cross-entropy instead of focal loss for all heads")
     parser.add_argument("--n-heads", type=int, default=None,
@@ -1813,8 +1758,6 @@ if __name__ == "__main__":
                         help="One-hot controller feedback encoding (requires controller_combos.json)")
     parser.add_argument("--character-filter", type=int, default=None,
                         help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
-    parser.add_argument("--random-perspective", action="store_true",
-                        help="Randomly pick one perspective per game pair (HAL-style regularization)")
     args = parser.parse_args()
 
     import train as _self_module
@@ -1883,10 +1826,8 @@ if __name__ == "__main__":
         stick_clusters=args.stick_clusters,
         hal_minimal_features=args.mimic_minimal_features,
         reaction_delay_override=args.reaction_delay,
-        controller_offset=args.controller_offset,
         hal_controller_encoding=args.mimic_controller_encoding,
         character_filter=args.character_filter,
-        random_perspective=args.random_perspective,
         input_gate_l1=args.input_gate_l1,
         cond_heads=args.cond_heads,
         relpos_impl=args.relpos_impl,
@@ -1898,5 +1839,4 @@ if __name__ == "__main__":
         lean_metrics=args.lean_metrics,
         optimizer=args.optimizer,
         muon_lr=args.muon_lr,
-        mirror_aug=args.mirror_aug,
     )

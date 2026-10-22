@@ -162,8 +162,8 @@ by one frame: `target[i] = buttons[i+1]`. The model sees the current
 game state and predicts what to press NEXT. This matches inference
 exactly.
 
-**Rule: do NOT use `--controller-offset` or `--reaction-delay 1` with
-v2 shards.** The alignment is already correct; adding an offset
+**Rule: do NOT use `--reaction-delay 1` with v2 shards** (the default
+is 0; `--controller-offset` was removed 2026-10-22). The alignment is already correct; adding an offset
 double-shifts the data.
 
 **Old shards** (`data/fox_hal_full`, `data/fox_hal_match_shards`) have
@@ -288,11 +288,10 @@ of a run instead of 1% (`--val-frac 0.01` restores the old cadence;
 ones). Don't pass `--ema-decay`: promotion uses the tail-SWA average,
 so the EMA costs ~2% per step plus an extra val pass for nothing.
 
-**`--self-inputs` is required even on v2 shards.** Without it the
-encoder has no controller-history input at all and val loss climbs
-~3.5× (main-stick F1 drops from ~57% to ~15%). `--controller-offset`
-is still not needed (v2 alignment is baked into the shard), but
-`--self-inputs` is critical.
+**`--self-inputs` is required even on v2 shards** (it's the default;
+`--no-self-inputs` turns it off). Without it the encoder has no
+controller-history input at all and val loss climbs ~3.5× (main-stick
+F1 drops from ~57% to ~15%).
 
 **Use `--model mimic` (Shaw relpos).** `mimic-rope*` presets are
 deprecated — see Pitfalls.
@@ -305,11 +304,11 @@ The legacy `--hal-*` flags and `--model hal` / `--encoder hal_flat`
 names still work as aliases; checkpoints from before the HAL→MIMIC
 rename load unchanged.
 
-### Legacy leaked-shards command
+### Legacy leaked-shards runs
 
-For reproducing pre-v2 runs against `data/fox_hal_*`: same as above
-but add `--mimic-minimal-features --controller-offset --reaction-delay 1`.
-Rarely needed.
+Reproducing pre-v2 runs against `data/fox_hal_*` (minimal features,
+`--controller-offset`, rd=1) needs the code from before the 2026-10-22
+legacy cleanup (git history).
 
 ### BF16 + relpos stability
 

@@ -58,7 +58,7 @@ ARGS=(--model mimic --encoder mimic_flat --mimic-mode --mimic-controller-encodin
       --max-samples 215040000
       --data-dir "$DATA" --self-inputs --reaction-delay 0
       --seed 42 --no-warmup --cosine-min-lr 1e-6 --ema-decay 0.999
-      --mirror-aug 0.5 --run-name "$RUN")
+      --run-name "$RUN")
 attempt=1
 while [ "$attempt" -le 40 ]; do
   latest=$(ls -t checkpoints/${RUN}_step*.pt 2>/dev/null | head -1)
