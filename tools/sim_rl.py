@@ -66,6 +66,11 @@ def main():
                     help="dense mode: store each learner decision with probability 1/N")
     ap.add_argument("--frames-per-update", type=int, default=4096,
                     help="dense mode: sampled decisions (with finished returns) per update")
+    ap.add_argument("--critic", action="store_true",
+                    help="dense mode: learned value baseline V(s) on the frozen BC's features; advantage "
+                         "= return - V, z-scored. V is fit after use (lagged), on the last 3 updates")
+    ap.add_argument("--critic-lr", type=float, default=1e-3)
+    ap.add_argument("--critic-epochs", type=int, default=20)
     a = ap.parse_args()
 
     import torch
@@ -171,6 +176,12 @@ def main():
     if opt_path and opt_path.exists():
         opt.load_state_dict(torch.load(opt_path, map_location="cuda", weights_only=False))
     pcfg = OnlinePPOConfig(kl_beta=a.kl_beta)
+    critic = None
+    if a.critic:   # value baseline on the frozen BC's final-norm features at the decision frame
+        critic = torch.nn.Sequential(torch.nn.Linear(cfg.d_model, 256), torch.nn.GELU(),
+                                     torch.nn.Linear(256, 1)).cuda()
+        critic_opt = torch.optim.Adam(critic.parameters(), lr=a.critic_lr)
+        critic_replay = []
     log = open(out / "metrics.jsonl", "a")
     t_start = time.time()
     from rlvr.sim.trajectory import Episode
@@ -250,6 +261,32 @@ def main():
                 lp = _logprob_at_indices(learner(batch), idx).cpu()
                 for fr, x in zip(chunk, lp):
                     fr.logprob_old = x
+        critic_stats = {}
+        if critic is not None and episodes:
+            with torch.no_grad():
+                feats = []
+                for i in range(0, len(frames), pcfg.minibatch_frames):
+                    chunk = frames[i:i + pcfg.minibatch_frames]
+                    batch = {k: torch.stack([fr.obs[k] for fr in chunk]).cuda() for k in chunk[0].obs}
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        feats.append(ref.features(batch)[:, -1].float())
+                feats = torch.cat(feats)
+                G = torch.tensor([ep.terminal_reward for ep in episodes], device="cuda")
+                resid = G - critic(feats).squeeze(-1)     # the critic has not seen this batch
+                critic_stats["explained_var"] = float(1 - resid.var() / G.var().clamp_min(1e-12))
+                adv = (resid - resid.mean()) / (resid.std() + 1e-8)
+            for ep, x in zip(episodes, adv.tolist()):
+                ep.metadata["advantage"] = x
+            pcfg.use_metadata_advantage = True
+            critic_replay = (critic_replay + [(feats, G)])[-3:]
+            X = torch.cat([f for f, _ in critic_replay]); Y = torch.cat([g for _, g in critic_replay])
+            for _ in range(a.critic_epochs):
+                perm = torch.randperm(len(X), device="cuda")
+                for j in range(0, len(X), 512):
+                    sel = perm[j:j + 512]
+                    loss = torch.nn.functional.mse_loss(critic(X[sel]).squeeze(-1), Y[sel])
+                    critic_opt.zero_grad(); loss.backward(); critic_opt.step()
+            critic_stats["critic_mse"] = float(loss)
         extra = None
         if a.global_kl_beta > 0 and anchor:
             abatch = {k: torch.stack([w[k] for w in anchor]).cuda() for k in anchor[0]}
@@ -286,7 +323,8 @@ def main():
                        vr={i: dict(learn=round(float(x) / n * 3600, 4), opp=round(float(y) / n * 3600, 4))
                            for i, x, y in zip(vr_ids, dstats["vr_learn"], dstats["vr_opp"])},
                        games=dict(win=dstats["win"], loss=dstats["loss"], draw=dstats["draw"]),
-                       return_mean=float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None)
+                       return_mean=float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None,
+                       **critic_stats)
         print(json.dumps(rec), flush=True)
         log.write(json.dumps(rec) + "\n")
         log.flush()
