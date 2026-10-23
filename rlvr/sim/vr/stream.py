@@ -403,7 +403,8 @@ class RecoveryResult:
 class RecoveryTracker:
     """slippistats' commented-out recovery_compute sketch, completed: a recovery opens on the frame
     the player goes off-stage (position test) while in hitstun; it fails if the player dies
-    (DEAD action range) and succeeds on a ledge action or on landing (not airborne). The sketch's
+    (DEAD action range) after having been actionable off-stage (dying straight out of the hit is a
+    kill, not counted), and succeeds on a ledge action or on landing (not airborne). The sketch's
     Randall exclusion (Yoshi's cloud) needs last_ground_id, which libmelee doesn't expose: landing
     on Randall counts as landing."""
 
@@ -413,6 +414,7 @@ class RecoveryTracker:
 
     def reset(self) -> None:
         self._active = False
+        self._control = False
         self._prev_offstage = None
 
     def update(self, state_history) -> Optional[RecoveryResult]:
@@ -427,11 +429,16 @@ class RecoveryTracker:
         if not self._active:
             if just_off and in_hitstun(ps):
                 self._active = True
+                self._control = False
             return None
         a = act(ps)
+        if not self._control and not in_hitstun(ps) and not is_dying(a):
+            self._control = True   # actionable off-stage: from here on it's a recovery attempt
         if is_dying(a):
             self._active = False
-            return RecoveryResult(succeeded=False)
+            # Died without ever being actionable: the hit killed outright (a kill, which stock_delta
+            # scores), not a failed recovery. A third of "failed recoveries" were this (2026-10-23).
+            return RecoveryResult(succeeded=False) if self._control else None
         if is_ledge_action(a) or bool(ps.on_ground):
             self._active = False
             return RecoveryResult(succeeded=True)

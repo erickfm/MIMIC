@@ -58,7 +58,8 @@ def run(vr, frames):
 
 def test_registry_and_build():
     assert set(V.VRS) == {"l_cancel", "shield_escape", "combo_extend", "stock_delta", "damage_delta",
-                          "low_percent_kill", "combo_length", "neutral_win_loss", "recovery", "tech"}
+                          "low_percent_kill", "combo_length", "neutral_win_loss", "recovery", "tech",
+                          "l_cancel_miss"}
     mods = V.build("stock_delta:1,damage_delta:0.5,tech", self_port=2)
     assert [(m.id, w, m.self_port) for m, w in mods] == [
         ("stock_delta", 1.0, 2), ("damage_delta", 0.5, 2), ("tech", 1.0, 2)]
