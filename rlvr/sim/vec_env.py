@@ -67,6 +67,11 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
     feats = {(ch, k): _Shm(*s[:2], name=s[2]) for (ch, k), s in spec["feats"].items()}
     pads = _Shm(*spec["pads"][:2], name=spec["pads"][2])
     info = _Shm(*spec["info"][:2], name=spec["info"][2])
+    vr_ids = opts.get("vr_ids") or []
+    if vr_ids:   # verifiable rewards: computed here, where each frame's libmelee GameState lives
+        from collections import deque
+        from rlvr.sim.vr import HISTORY, VRS
+        vr = _Shm(*spec["vr"][:2], name=spec["vr"][2])
     ctxs = {ch: _make_ctx(load_inference_context(d), _Cfg(n)) for ch, (d, n) in spec["ctx"].items()}
     rng = random.Random(opts["seed"] * 1000 + wid)
     builds = (build_frame, build_frame_p2)
@@ -75,12 +80,20 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
         t = envs[e]["template"]
         S[e] = dict(sim=MeleeSim(t, rng=opts["rng"]), parser=None, writer=None, episodes=0,
                     gs=None, t=t)
+        if vr_ids:   # one module per VR for each side, rewarding that side's player
+            S[e]["vr"] = [[VRS[i](self_port=port + 1) for i in vr_ids] for port, _ in envs[e]["players"]]
+            S[e]["hist"] = deque(maxlen=HISTORY)
 
     def start(e):
         s = S[e]
         s["sim"].seed = rng.getrandbits(32)
         s["parser"] = SlippiParser(s["t"])
         s["writer"] = SlpWriter(s["t"]) if opts["record_dir"] else None
+        if vr_ids:
+            s["hist"].clear()
+            for mods in s["vr"]:
+                for m in mods:
+                    m.reset()
         return s["sim"].reset()
 
     def emit(e, frame):
@@ -89,6 +102,11 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
             s["writer"].add(frame)
         gs = s["parser"].parse(frame)
         s["gs"] = gs
+        if vr_ids:   # this frame's unweighted reward per (side, VR)
+            s["hist"].append(gs)
+            for side, mods in enumerate(s["vr"]):
+                for i, m in enumerate(mods):
+                    vr.a[e, side, i] = m.observe(s["hist"])
         for side, (port, _) in enumerate(envs[e]["players"]):   # RL bookkeeping (INFO_FIELDS)
             ps = gs.players.get(port + 1)
             if ps is not None:
@@ -107,6 +125,9 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
         res = dict(env=e, episode=s["episodes"], seed=s["sim"].seed, frames=int(gs.frame) if gs else 0,
                    final={ch: (int(gs.players[p + 1].stock), float(gs.players[p + 1].percent))
                           for p, ch in envs[e]["players"]} if gs else {})
+        if vr_ids:   # end-of-match terms and per-match diagnostics, per side
+            res["vr_final"] = [[float(m.finalize(s["hist"])) for m in mods] for mods in s["vr"]]
+            res["vr_meta"] = [{m.id: m.metadata() for m in mods} for mods in s["vr"]]
         if s["writer"] is not None:
             path = os.path.join(opts["record_dir"], f"env{e:03d}_ep{s['episodes']:04d}.slp")
             s["writer"].write(path)
@@ -145,10 +166,13 @@ class _Cfg:   # what _make_ctx reads from a model config
 
 class VecSim:
     def __init__(self, templates, policies, n_envs, n_workers, rng="online", seed=0, temperature=1.0,
-                 record_dir=None, max_frames=0, amp=True, compile=True, device="cuda", assign=None):
+                 record_dir=None, max_frames=0, amp=True, compile=True, device="cuda", assign=None,
+                 vr_ids=None):
         """policies: {name: checkpoint dir, or dict(dir=..., char=..., amp=..., compile=...)}; a
         plain name is the CHARACTER it plays. templates: 1v1 .slp paths (cycled over envs).
-        assign(env, side, char) -> policy name for that slot (default: the character's name)."""
+        assign(env, side, char) -> policy name for that slot (default: the character's name).
+        vr_ids: rlvr/sim/vr ids; each frame, self.vr.a[env, side, i] is VR i's unweighted reward for
+        that side's player, and each finished episode's result carries vr_final / vr_meta."""
         import torch
         import sys
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
@@ -204,10 +228,12 @@ class VecSim:
         # Per env and side, this frame's (frame index, action state, on_ground, hitstun frames,
         # valid): what RL episode tracking needs, without a second parse in the parent.
         self.info = _Shm((n_envs, 2, len(INFO_FIELDS)), np.float32)
+        self.vr_ids = list(vr_ids or [])
+        self.vr = _Shm((n_envs, 2, max(1, len(self.vr_ids))), np.float32)
         self.on_decide = None   # hook(policy_name, (S, 4) head indices, BatchedPolicy) per step
         spec = dict(feats={k: v.spec() for k, v in self.feats.items()}, pads=self.pads.spec(),
-                    info=self.info.spec(), ctx=ctx_spec)
-        opts = dict(rng=rng, seed=seed, record_dir=record_dir, max_frames=max_frames)
+                    info=self.info.spec(), vr=self.vr.spec(), ctx=ctx_spec)
+        opts = dict(rng=rng, seed=seed, record_dir=record_dir, max_frames=max_frames, vr_ids=self.vr_ids)
         if record_dir:
             os.makedirs(record_dir, exist_ok=True)
         ctxm = mp.get_context("spawn")
@@ -263,6 +289,6 @@ class VecSim:
             p.join(timeout=10)
             if p.is_alive():
                 p.kill()
-        for s in list(self.feats.values()) + [self.pads, self.info]:
+        for s in list(self.feats.values()) + [self.pads, self.info, self.vr]:
             s.shm.close()
             s.shm.unlink()

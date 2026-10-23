@@ -23,10 +23,19 @@ from rlvr.sim.vr.situational import (
 
 _flags.install()
 
+
+class LCancelMissVR(LCancelVR):
+    """L-cancel as a penalty only (success 0, miss -1): the variant to mix with other VRs, since
+    the default +1/0 pays for more landings."""
+    id = "l_cancel_miss"
+
+    def __init__(self, self_port: int):
+        super().__init__(self_port, success=0.0, miss=-1.0)
+
 HISTORY = 8
 
 VRS = {cls.id: cls for cls in (
-    LCancelVR, ShieldEscapeVR, ComboExtendVR, StockDeltaVR, DamageDeltaVR, LowPercentKillVR,
+    LCancelVR, LCancelMissVR, ShieldEscapeVR, ComboExtendVR, StockDeltaVR, DamageDeltaVR, LowPercentKillVR,
     ComboLengthVR, NeutralWinLossVR, RecoveryVR, TechVR,
 )}
 

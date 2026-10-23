@@ -13,8 +13,15 @@ update's own numerics), so the rollout precision cannot bias the ratio.
 
   python3 tools/sim_rl.py --policy-dir hf_eval/fox-master --templates replays_doc_rt \
       --out-dir checkpoints/simrl_lcancel --updates 60
+
+Dense verifiable rewards (--vr "stock_delta:1,damage_delta:0.01"): rlvr/sim/vr modules run in the
+sim workers on every frame; their weighted sum is the reward stream. A sampled learner decision
+(probability 1/--sample-every) gets the discounted return of the next --horizon frames (or until
+the match ends, plus each module's end-of-match term) and becomes a one-frame episode, so
+ppo_update's batch normalization turns returns into advantages. Every finished rollout game is
+also a game against frozen BC: the log carries the learner's record.
 """
-import argparse, copy, json, os, sys, time
+import argparse, copy, json, os, random as _random_mod, sys, time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +58,14 @@ def main():
     ap.add_argument("--rng", default="online", choices=["online", "offline"])
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--resume", help="rl_uNNNN.pt to continue from (its opt_uNNNN.pt restores AdamW state)")
+    ap.add_argument("--vr", default=None,
+                    help="dense VR mode: 'id:weight,...' over rlvr/sim/vr ids (replaces the L-cancel episodes)")
+    ap.add_argument("--gamma", type=float, default=0.99, help="dense mode: per-frame discount")
+    ap.add_argument("--horizon", type=int, default=300, help="dense mode: return horizon in frames")
+    ap.add_argument("--sample-every", type=int, default=8,
+                    help="dense mode: store each learner decision with probability 1/N")
+    ap.add_argument("--frames-per-update", type=int, default=4096,
+                    help="dense mode: sampled decisions (with finished returns) per update")
     a = ap.parse_args()
 
     import torch
@@ -88,16 +103,27 @@ def main():
         make_ditto(src, "FOX", tdir / src.name)
         templates.append(tdir / src.name)
     assign = lambda e, side, ch: ("LEARN", "OPP")[(e + side) % 2]
+    vr_ids, vr_w = [], []
+    if a.vr:
+        for part in a.vr.split(","):
+            i, _, w = part.partition(":")
+            vr_ids.append(i.strip())
+            vr_w.append(float(w) if w else 1.0)
+    import numpy as np
+    vr_w = np.asarray(vr_w, np.float32)
     v = VecSim(templates, {"LEARN": dict(dir=a.policy_dir, model=learner, cfg=cfg, amp=True, compile=False),
                            "OPP": dict(dir=a.policy_dir, amp=True, compile=True)},
-               a.envs, a.workers, rng=a.rng, seed=a.seed, assign=assign)
+               a.envs, a.workers, rng=a.rng, seed=a.seed, assign=assign, vr_ids=vr_ids)
 
     # One tracker per learner slot; where that slot's player sits in the env.
     slots = []
     for e, env in enumerate(v.envs):
         for side, (port, name) in enumerate(env["players"]):
             if name == "LEARN":
-                slots.append(dict(env=e, side=side, slot=env["slots"][side], tracker=LCancelTracker()))
+                slots.append(dict(env=e, side=side, slot=env["slots"][side], tracker=LCancelTracker(),
+                                  pending=[]))
+    dense = bool(vr_ids)
+    sample_rng = _random_mod.Random(a.seed + 1)
     keys = None
     import random as _random
     anchor_rng = _random.Random(a.seed)
@@ -119,6 +145,16 @@ def main():
                         anchor[j] = w
                     else:
                         anchor.append(w)
+        if dense:   # sample decisions; their returns accumulate from the next frame on
+            for s in slots:
+                if sample_rng.random() * a.sample_every < 1.0:
+                    m, c, sh, b = (int(x) for x in idx[s["slot"]])
+                    fr = FrameRecord(obs={k: pol.buf[k][s["slot"]].detach().to("cpu", copy=True) for k in keys},
+                                     sampled_indices=torch.tensor([m, sh, c, b], dtype=torch.long),
+                                     logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
+                                     game_frame_id=int(v.info.a[s["env"], s["side"], 0]))
+                    s["pending"].append([fr, 0.0, 1.0, 0])   # record, return, discount, age
+            return
         for s in slots:
             t = s["tracker"]
             if t.recording():
@@ -137,11 +173,58 @@ def main():
     pcfg = OnlinePPOConfig(kl_beta=a.kl_beta)
     log = open(out / "metrics.jsonl", "a")
     t_start = time.time()
+    from rlvr.sim.trajectory import Episode
+    res_seen = [0]
+
+    def close_pending(s, bonus, out):
+        for fr, G, disc, _ in s["pending"]:
+            out.append(Episode(task_id="vr_sim", frames=[fr], terminal_reward=float(G + disc * bonus)))
+        s["pending"] = []
+
+    def collect_dense():
+        """Step until frames_per_update sampled decisions have finished returns."""
+        out = []
+        st = dict(win=0, loss=0, draw=0, vr_learn=np.zeros(len(vr_ids)), vr_opp=np.zeros(len(vr_ids)),
+                  learner_frames=0)
+        while len(out) < a.frames_per_update:
+            new = v.results[res_seen[0]:]
+            res_seen[0] = len(v.results)
+            fin = {r["env"]: r for r in new}
+            for r in new:   # rollout games are games against frozen BC
+                ls, os_ = r["final"]["LEARN"][0], r["final"]["OPP"][0]
+                st["win" if ls > os_ else "loss" if ls < os_ else "draw"] += 1
+            for s in slots:
+                e, side = s["env"], s["side"]
+                if e in v.last_resets:   # this frame starts a new match: close the old one's returns
+                    r = fin.get(e)
+                    bonus = float(vr_w @ np.asarray(r["vr_final"][side])) if r and "vr_final" in r else 0.0
+                    close_pending(s, bonus, out)
+                    continue
+                st["learner_frames"] += 1
+                st["vr_learn"] += v.vr.a[e, side]
+                st["vr_opp"] += v.vr.a[e, 1 - side]
+                rew = float(vr_w @ v.vr.a[e, side])
+                keep = []
+                for rec in s["pending"]:   # decisions before this frame earn its reward
+                    rec[1] += rec[2] * rew
+                    rec[2] *= a.gamma
+                    rec[3] += 1
+                    if rec[3] >= a.horizon:
+                        out.append(Episode(task_id="vr_sim", frames=[rec[0]], terminal_reward=float(rec[1])))
+                    else:
+                        keep.append(rec)
+                s["pending"] = keep
+            v.step()
+        return out, st
+
     for upd in range(start, a.updates + 1):
         t0, f0 = time.time(), v.frames
         episodes = []
         n_miss = 0
-        while (len(episodes) < a.episodes_per_update or n_miss < a.misses_per_update) \
+        dstats = None
+        if dense:
+            episodes, dstats = collect_dense()
+        while not dense and (len(episodes) < a.episodes_per_update or n_miss < a.misses_per_update) \
                 and len(episodes) < a.max_episodes_per_update:
             for s in slots:   # the policy's current frame, before it decides on it
                 if s["env"] in v.last_resets:
@@ -197,13 +280,20 @@ def main():
                    env_fps=round((v.frames - f0) / max(t_roll, 1e-9)),
                    update_s=round(time.time() - t0 - t_roll, 1), kl=m.get("kl"), clip_frac=m.get("clip_frac"),
                    grad_norm=m.get("grad_norm"), elapsed_min=round((time.time() - t_start) / 60, 1))
+        if dstats is not None:   # dense mode: per-frame VR means (learner / opponent) and the record
+            n = max(1, dstats["learner_frames"])
+            rec.update(lcancel_rate=None, misses=None,
+                       vr={i: dict(learn=round(float(x) / n * 3600, 4), opp=round(float(y) / n * 3600, 4))
+                           for i, x, y in zip(vr_ids, dstats["vr_learn"], dstats["vr_opp"])},
+                       games=dict(win=dstats["win"], loss=dstats["loss"], draw=dstats["draw"]),
+                       return_mean=float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None)
         print(json.dumps(rec), flush=True)
         log.write(json.dumps(rec) + "\n")
         log.flush()
         if upd % a.checkpoint_every == 0 or upd == a.updates:
             ck = dict(base_ckpt)
             ck["model_state_dict"] = {k: t.detach().cpu() for k, t in learner.state_dict().items()}
-            ck["rl"] = dict(task="l_cancel_sim", update=upd, args=vars(a))
+            ck["rl"] = dict(task="vr_sim" if dense else "l_cancel_sim", update=upd, args=vars(a))
             torch.save(ck, out / f"rl_u{upd:04d}.pt")
             torch.save(opt.state_dict(), out / f"opt_u{upd:04d}.pt")
     v.close()
