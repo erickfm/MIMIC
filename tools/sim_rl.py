@@ -69,6 +69,14 @@ def main():
     ap.add_argument("--critic", action="store_true",
                     help="dense mode: learned value baseline V(s) on the frozen BC's features; advantage "
                          "= return - V, z-scored. V is fit after use (lagged), on the last 3 updates")
+    ap.add_argument("--guards", default=None,
+                    help="dense mode: 'id[:margin],...' VRs kept at least at BC's level (+margin, relative) "
+                         "in the same rollout games, by adaptive (Lagrangian) weights")
+    ap.add_argument("--guard-lr", type=float, default=0.2, help="guard weight step per unit relative gap")
+    ap.add_argument("--guard-init", type=float, default=0.1)
+    ap.add_argument("--guard-max", type=float, default=2.0)
+    ap.add_argument("--normalize", action="store_true",
+                    help="dense mode: scale each VR's returns by its running std, so weights compare across VRs")
     ap.add_argument("--critic-lr", type=float, default=1e-3)
     ap.add_argument("--critic-epochs", type=int, default=20)
     a = ap.parse_args()
@@ -114,8 +122,19 @@ def main():
             i, _, w = part.partition(":")
             vr_ids.append(i.strip())
             vr_w.append(float(w) if w else 1.0)
+    n_obj = len(vr_ids)
+    guard_margin = []   # guards follow the objectives in vr_ids; their weights adapt each update
+    if a.guards:
+        for part in a.guards.split(","):
+            i, _, m = part.partition(":")
+            vr_ids.append(i.strip())
+            vr_w.append(a.guard_init)
+            guard_margin.append(float(m) if m else 0.0)
     import numpy as np
-    vr_w = np.asarray(vr_w, np.float32)
+    vr_w = np.asarray(vr_w, np.float64)
+    vr_scale = np.ones(len(vr_ids))          # running std of each VR's returns (--normalize)
+    rate_ema = None                           # EMA of (learner, BC) per-frame rates, for the guards
+    scale_seen = np.zeros(len(vr_ids), bool)
     v = VecSim(templates, {"LEARN": dict(dir=a.policy_dir, model=learner, cfg=cfg, amp=True, compile=False),
                            "OPP": dict(dir=a.policy_dir, amp=True, compile=True)},
                a.envs, a.workers, rng=a.rng, seed=a.seed, assign=assign, vr_ids=vr_ids)
@@ -158,7 +177,7 @@ def main():
                                      sampled_indices=torch.tensor([m, sh, c, b], dtype=torch.long),
                                      logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
                                      game_frame_id=int(v.info.a[s["env"], s["side"], 0]))
-                    s["pending"].append([fr, 0.0, 1.0, 0])   # record, return, discount, age
+                    s["pending"].append([fr, np.zeros(len(vr_ids)), 1.0, 0])   # record, returns, disc, age
             return
         for s in slots:
             t = s["tracker"]
@@ -178,8 +197,8 @@ def main():
     pcfg = OnlinePPOConfig(kl_beta=a.kl_beta)
     critic = None
     if a.critic:   # value baseline on the frozen BC's final-norm features at the decision frame
-        critic = torch.nn.Sequential(torch.nn.Linear(cfg.d_model, 256), torch.nn.GELU(),
-                                     torch.nn.Linear(256, 1)).cuda()
+        critic = torch.nn.Sequential(torch.nn.Linear(cfg.d_model, 256), torch.nn.GELU(),   # one output per VR
+                                     torch.nn.Linear(256, max(1, len(vr_ids)))).cuda()
         critic_opt = torch.optim.Adam(critic.parameters(), lr=a.critic_lr)
         critic_replay = []
     log = open(out / "metrics.jsonl", "a")
@@ -187,9 +206,9 @@ def main():
     from rlvr.sim.trajectory import Episode
     res_seen = [0]
 
-    def close_pending(s, bonus, out):
+    def close_pending(s, bonus, out):   # bonus: per-VR end-of-match terms
         for fr, G, disc, _ in s["pending"]:
-            out.append(Episode(task_id="vr_sim", frames=[fr], terminal_reward=float(G + disc * bonus)))
+            out.append(Episode(task_id="vr_sim", frames=[fr], metadata={"G": G + disc * bonus}))
         s["pending"] = []
 
     def collect_dense():
@@ -208,20 +227,20 @@ def main():
                 e, side = s["env"], s["side"]
                 if e in v.last_resets:   # this frame starts a new match: close the old one's returns
                     r = fin.get(e)
-                    bonus = float(vr_w @ np.asarray(r["vr_final"][side])) if r and "vr_final" in r else 0.0
+                    bonus = np.asarray(r["vr_final"][side]) if r and "vr_final" in r else np.zeros(len(vr_ids))
                     close_pending(s, bonus, out)
                     continue
                 st["learner_frames"] += 1
                 st["vr_learn"] += v.vr.a[e, side]
                 st["vr_opp"] += v.vr.a[e, 1 - side]
-                rew = float(vr_w @ v.vr.a[e, side])
+                rew = v.vr.a[e, side][:len(vr_ids)].astype(np.float64)
                 keep = []
                 for rec in s["pending"]:   # decisions before this frame earn its reward
                     rec[1] += rec[2] * rew
                     rec[2] *= a.gamma
                     rec[3] += 1
                     if rec[3] >= a.horizon:
-                        out.append(Episode(task_id="vr_sim", frames=[rec[0]], terminal_reward=float(rec[1])))
+                        out.append(Episode(task_id="vr_sim", frames=[rec[0]], metadata={"G": rec[1]}))
                     else:
                         keep.append(rec)
                 s["pending"] = keep
@@ -233,8 +252,29 @@ def main():
         episodes = []
         n_miss = 0
         dstats = None
+        guard_stats = {}
         if dense:
             episodes, dstats = collect_dense()
+            Gm = np.stack([ep.metadata["G"] for ep in episodes])            # (N, n_vr) raw returns
+            if a.normalize:   # running std per VR (EMA over updates); a VR keeps scale 1 until it varies
+                sd = Gm.std(0)
+                for i, x in enumerate(sd):
+                    if x > 1e-9:
+                        vr_scale[i] = x if not scale_seen[i] else np.sqrt(0.9 * vr_scale[i] ** 2 + 0.1 * x ** 2)
+                        scale_seen[i] = True
+                vr_scale = np.maximum(vr_scale, 1e-3)
+            if guard_margin:   # Lagrangian guards: raise a guard's weight while the learner is below BC
+                n = max(1, dstats["learner_frames"])
+                rates = np.stack([dstats["vr_learn"], dstats["vr_opp"]])[:, :len(vr_ids)] / n
+                rate_ema = rates if rate_ema is None else 0.9 * rate_ema + 0.1 * rates   # rare events: slow
+                for j, m in enumerate(guard_margin):
+                    i = n_obj + j
+                    lrn, bc = rate_ema[0, i], rate_ema[1, i]
+                    gap = float(np.clip((bc + m * abs(bc) - lrn) / (abs(bc) + 1e-6), -1, 1))   # > 0: below target
+                    vr_w[i] = float(np.clip(vr_w[i] + a.guard_lr * gap, 0.0, a.guard_max))
+                    guard_stats[vr_ids[i]] = dict(w=round(vr_w[i], 4), gap=round(float(gap), 4))
+            for ep, g in zip(episodes, Gm):   # scalar return under the current weights
+                ep.terminal_reward = float((vr_w * g / vr_scale).sum())
         while not dense and (len(episodes) < a.episodes_per_update or n_miss < a.misses_per_update) \
                 and len(episodes) < a.max_episodes_per_update:
             for s in slots:   # the policy's current frame, before it decides on it
@@ -271,9 +311,11 @@ def main():
                     with torch.autocast("cuda", dtype=torch.bfloat16):
                         feats.append(ref.features(batch)[:, -1].float())
                 feats = torch.cat(feats)
-                G = torch.tensor([ep.terminal_reward for ep in episodes], device="cuda")
-                resid = G - critic(feats).squeeze(-1)     # the critic has not seen this batch
-                critic_stats["explained_var"] = float(1 - resid.var() / G.var().clamp_min(1e-12))
+                G = torch.tensor(Gm / vr_scale, dtype=torch.float32, device="cuda")   # (N, n_vr) scaled
+                W = torch.tensor(vr_w, dtype=torch.float32, device="cuda")
+                resid = ((G - critic(feats)) * W).sum(-1)   # the critic has not seen this batch
+                R = (G * W).sum(-1)
+                critic_stats["explained_var"] = float(1 - resid.var() / R.var().clamp_min(1e-12))
                 adv = (resid - resid.mean()) / (resid.std() + 1e-8)
             for ep, x in zip(episodes, adv.tolist()):
                 ep.metadata["advantage"] = x
@@ -284,7 +326,7 @@ def main():
                 perm = torch.randperm(len(X), device="cuda")
                 for j in range(0, len(X), 512):
                     sel = perm[j:j + 512]
-                    loss = torch.nn.functional.mse_loss(critic(X[sel]).squeeze(-1), Y[sel])
+                    loss = torch.nn.functional.mse_loss(critic(X[sel]), Y[sel])
                     critic_opt.zero_grad(); loss.backward(); critic_opt.step()
             critic_stats["critic_mse"] = float(loss)
         extra = None
@@ -324,6 +366,7 @@ def main():
                            for i, x, y in zip(vr_ids, dstats["vr_learn"], dstats["vr_opp"])},
                        games=dict(win=dstats["win"], loss=dstats["loss"], draw=dstats["draw"]),
                        return_mean=float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None,
+                       guards=guard_stats or None, vr_scale=[round(float(x), 4) for x in vr_scale],
                        **critic_stats)
         print(json.dumps(rec), flush=True)
         log.write(json.dumps(rec) + "\n")
