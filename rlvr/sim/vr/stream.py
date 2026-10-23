@@ -52,6 +52,7 @@ CONTROLLED_JUMP_START, CONTROLLED_JUMP_END = 24, 34
 KNEE_BEND = 24
 ESCAPE_AIR = 236
 LAND_FALL_SPECIAL = 43
+TUMBLING = 38
 
 COMBO_LENIENCY = 45          # slippistats combo_computer.py:32
 
@@ -363,9 +364,14 @@ class TechResult:
     was_punished: bool
 
 
+TECH_PUNISH_WINDOW = 30   # frames after a tech situation ends in which a hit or grab is its punish
+
+
 class TechTracker:
-    """Streaming tech_compute: a tech situation is open while is_teching; when it ends, it was
-    punished iff the exit state is_damaged."""
+    """Streaming tech_compute: a tech situation is open while is_teching. It was punished if the
+    player is damaged or grabbed (regular or command grab) on the exit frame or within
+    TECH_PUNISH_WINDOW frames after it. The exit-frame-only test (slippistats) missed regrabs and
+    tech-chase hits: 45-55% recall on punishes (audit, 2026-10-23)."""
 
     def __init__(self, port: int):
         self.port = int(port)
@@ -374,6 +380,7 @@ class TechTracker:
     def reset(self) -> None:
         self._active = False
         self._prev_teching = None
+        self._watch = None                       # frames left in the punish window after an exit
 
     def update(self, state_history) -> Optional[TechResult]:
         ps = get_player(state_history[-1], self.port)
@@ -385,10 +392,22 @@ class TechTracker:
         self._prev_teching = curr
         if prev is None:                         # tech_compute skips frame 0
             return None
+        if self._watch is not None:              # the window after the last exit
+            if is_damaged(a) or in_any_grab(a):
+                self._watch = None
+                return TechResult(was_punished=True)
+            self._watch -= 1
+            if self._watch <= 0 or curr:
+                self._watch = None
+                if curr and not prev:
+                    self._active = True
+                return TechResult(was_punished=False)
         if not curr:
             if prev and self._active:
                 self._active = False
-                return TechResult(was_punished=is_damaged(a))
+                if is_damaged(a) or in_any_grab(a):
+                    return TechResult(was_punished=True)
+                self._watch = TECH_PUNISH_WINDOW
             return None
         if not prev:
             self._active = True
@@ -417,21 +436,23 @@ class RecoveryTracker:
         self._control = False
         self._prev_offstage = None
 
-    def update(self, state_history) -> Optional[RecoveryResult]:
+    def update(self, state_history) -> Optional[RecoveryResult]:  # noqa: C901
         gs = state_history[-1]
         ps = get_player(gs, self.port)
         if ps is None:
             return None
         st = stage_name(gs)
         off = is_offstage(ps, st)
-        just_off = off and self._prev_offstage is False
         self._prev_offstage = off
+        a = act(ps)
         if not self._active:
-            if just_off and in_hitstun(ps):
+            # Any off-stage frame in hitstun, a damage state or tumble opens one, not only the frame
+            # the player crosses off-stage: the transition-only test missed players hit again while
+            # already off-stage and tumbling off after hitstun (20-35% of failed recoveries).
+            if off and (in_hitstun(ps) or is_damaged(a) or a == TUMBLING):
                 self._active = True
                 self._control = False
             return None
-        a = act(ps)
         if not self._control and not in_hitstun(ps) and not is_dying(a):
             self._control = True   # actionable off-stage: from here on it's a recovery attempt
         if is_dying(a):
