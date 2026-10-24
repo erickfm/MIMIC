@@ -173,3 +173,16 @@ screen gets two 480-game confirmations on new seeds. All runs: `checkpoints/smal
 - Normalizing (S5) put each reward at equal scale, which diluted damage; damage per minute fell.
 - The looser leash (S6) drifted (KL 0.036 vs 0.006–0.010) with no gain, as on the 20M model.
 - Single training seed per recipe; S2 not watched, not tested in Dolphin, not promoted.
+
+### Damage-weight sweep (stock 1 + damage w, otherwise S2's recipe)
+
+| w | Run | Screen (192) | p | Net damage /min, start → end |
+|---|---|---|---|---|
+| 0.25 | S1 | 107–85 (55.7%) | 0.13 | +0.05 → +0.70 |
+| 1 | S2 | 122–70 (63.5%); 61.2% over 1,152 confirmed | < 0.001 | +0.05 → +2.08 |
+| 2 | S8 | 106–86 (55.2%) | 0.17 | +0.09 → −0.89 |
+| 4 | S9 | 98–94 (51.0%) | 0.83 | +0.09 → −0.10 |
+
+Only w = 1 is significant against the base. It is also the only weight where the learner's net damage
+rose a lot. The ordering between weights is weak evidence: S2's screen vs S8's is 8 points apart
+on 192 games each (z ≈ 1.6), one training seed per weight.
