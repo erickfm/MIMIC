@@ -4,7 +4,7 @@
 #
 #   tools/proxy_run.sh NAME MODEL DATA_DIR STEPS SEED [extra train.py flags...]
 #
-# Single GPU, eff batch 768 (768 x 1, or 384 x 2 for the 512-wide model), lr 3e-4 cosine to 1e-6,
+# Single GPU, eff batch 768 (768 x 1, or 384 x 2 for M), lr 3e-4 cosine to 1e-6,
 # no warmup, as the production runs. Pinned to the pre-2026-10-22 proxy settings (val every 1%,
 # no cond-heads, AdamW) so results stay comparable with older proxies; extra flags override them.
 # Results: checkpoints/proxy/results.tsv
@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 name=$1 model=$2 data=$3 steps=$4 seed=$5; shift 5
 bs=768 ga=1
-[ "$model" = mimic ] && bs=384 && ga=2
+[ "$model" = M ] && bs=384 && ga=2
 bs=${PROXY_BS:-$bs} ga=${PROXY_GA:-$ga}   # e.g. long-chunk runs keep tokens/step with fewer, longer windows
 out=checkpoints/proxy; mkdir -p $out/logs
 WANDB_MODE=${WANDB_MODE:-disabled} python3 train.py --model $model --encoder mimic_flat --mimic-mode \

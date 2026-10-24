@@ -52,7 +52,7 @@ echo "[RS] done: shards=$(ls "$DATA"/*.pt 2>/dev/null | wc -l) size=$(du -sh "$D
 python3 -c "import json;m=json.load(open('$DATA/tensor_manifest.json'));print('[RS] train_games=%d val_games=%d frames=%d'%(m['n_train_games'],m['n_val_games'],m['n_train_frames']))"
 
 echo "[TR $(date +%H:%M)] launch 20M training on master-Fox (3 GPUs, wandb offline)"
-ARGS=(--model mimic --encoder mimic_flat --mimic-mode --mimic-controller-encoding
+ARGS=(--model M --encoder mimic_flat --mimic-mode --mimic-controller-encoding
       --stick-clusters hal37 --plain-ce
       --lr 3e-4 --batch-size 256 --grad-accum-steps 1
       --max-samples 215040000

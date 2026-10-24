@@ -181,7 +181,7 @@ Two GPUs:
 
 ```bash
 torchrun --nproc_per_node=2 train.py \
-  --model mimic --encoder mimic_flat \
+  --model M --encoder mimic_flat \
   --mimic-mode --mimic-controller-encoding \
   --stick-clusters hal37 --plain-ce \
   --lr 3e-4 --batch-size 256 --grad-accum-steps 1 \
@@ -197,9 +197,7 @@ Single GPU: swap `torchrun --nproc_per_node=2` for `python3` and use
 A typical character trains in ~1.5–2.5 hr on 2×RTX 5090. Training logs to
 [Weights & Biases](https://wandb.ai/) (set `WANDB_API_KEY` in `.env`).
 
-Use `--model mimic` (Shaw relative-position attention) — the RoPE presets
-underperform it and are deprecated. Full features are the default; only
-pass `--mimic-minimal-features` to reproduce legacy baselines.
+`--model M` is the ~20M production model (the default); `--model S` is the ~5.4M research proxy.
 
 To build fresh v2 shards from `.slp` replays:
 

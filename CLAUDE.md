@@ -32,7 +32,7 @@ where the transformer backbone came from.
 
 ## Architecture
 
-MIMIC's canonical config (preset name `mimic`, bootstrapped from HAL's
+MIMIC's canonical config (preset `M`, bootstrapped from HAL's
 GPTv5Controller and later diverged):
 
 - **Params:** ~19.99M.
@@ -50,8 +50,7 @@ GPTv5Controller and later diverged):
 - **Head hidden dim:** `input_dim // 2` (NOT a fixed 256 — each head has
   different hidden size).
 - **Sequence length:** 180 frames (~3 seconds).
-- **Dropout:** 0.2 (mimic and the w256/w384/w768/w1024 widths), 0.1
-  (mimic-xl, mimic-xxl).
+- **Dropout:** 0.2.
 
 ### Gamestate columns per player
 
@@ -105,16 +104,26 @@ samples a diagonal c-stick (~0.7% of frames). Fixed by rebuilding
 shards; the 5-class path survives only as the fallback for old shards
 without raw c coords.
 
-### Preset variants (`mimic/model.py:MODEL_PRESETS`)
+### Model names (`mimic/model.py:MODEL_PRESETS`)
 
-- **`mimic`** — production. d_model=512, 6 layers, 8 heads, relpos
-  attention, LN, GELU. ~20M params.
-- **`mimic-w256` / `mimic-w384`** — narrower research proxies (5.35M /
-  11.5M; `tools/fast_proxy.sh` uses w256).
-- **`mimic-w768` / `mimic-w1024`** — width-only scale-ups.
-- **`mimic-xl`** — width+FFN scale-up, SwiGLU, ~44M params.
-  `--num-layers 10` makes it ~73M. **`mimic-xxl`** — 1024 wide, 12 layers.
-  Not currently in production.
+Two choices name a model: a size preset and an attention mode.
+
+- **Size:** **`M`** (`--model M`, default) — production, d_model=512, 6 layers, 8
+  heads, ~20.0M params. **`S`** (`--model S`) — half width (256, 4 heads), ~5.4M
+  params, the fast research proxy. Older checkpoints record `model_preset: "mimic"`
+  (= M) or `"mimic-w256"` (= S); it's only a label, loading reads the config fields.
+  The 11.5M–154M presets (`mimic-w384/w768/w1024/xl/xxl`) were removed 2026-10-23
+  (git history).
+- **Attention: full vs stream.** **Full** (default): every frame the model re-reads
+  the last 180 frames (~3 s) from scratch. **Stream** (`--attn-window 180`, plus a
+  longer `--seq-len`): each layer reads 180 frames of the layer below, so 6 layers
+  reach 1,075 frames (~18 s), and inference caches earlier work (`mimic/kv_cache.py`):
+  one step per frame, ~22× faster batched. Today's production Fox is M-full; no
+  production stream model exists. Every inference path runs stream models through
+  the cache automatically.
+- **Training budget** (separate from the model): **proxy** = S, 1,900 steps (~5 min);
+  **cell** = M, 6,500 steps on 5% of master Fox (~45 min); **prod** = M, full data,
+  ~280k steps.
 - The relpos block also takes `use_rmsnorm` / `use_swiglu`. Everything
   else (RoPE/xPos/ALiBi/flexbias/learned position encodings, the generic
   block and GQA, the `modern*` and generic `tiny`…`giant` presets, the
@@ -207,7 +216,7 @@ corollaries:
 
 ```bash
 torchrun --nproc_per_node=2 train.py \
-  --model mimic --encoder mimic_flat \
+  --model M --encoder mimic_flat \
   --mimic-mode --mimic-controller-encoding \
   --stick-clusters hal37 --plain-ce \
   --lr 3e-4 --batch-size 256 --grad-accum-steps 1 \
@@ -220,7 +229,7 @@ torchrun --nproc_per_node=2 train.py \
   --nccl-timeout 3600
 ```
 
-Since 2026-10-22 most of these flags are defaults (`--model mimic`,
+Since 2026-10-22 most of these flags are defaults (`--model M`,
 `--encoder mimic_flat`, `--mimic-controller-encoding`, `--stick-clusters
 hal37`, `--self-inputs`, `--reaction-delay 0`, `--lr 3e-4`, no warmup,
 `--cosine-min-lr 1e-6`) and `--mimic-mode` / `--plain-ce` are accepted
@@ -285,7 +294,7 @@ uses the tail-SWA average (`tools/average_checkpoints.py`).
 controller-history input at all and val loss climbs ~3.5× (main-stick
 F1 drops from ~57% to ~15%).
 
-`--model mimic` is the default.
+`--model M` is the default.
 
 Single-GPU variant: swap `torchrun --nproc_per_node=2` for `python3`
 and use `--batch-size 64 --grad-accum-steps 8` to keep effective batch
@@ -333,12 +342,12 @@ aliased presets.
 
 ### Local research proxies
 
-- **Fast (~5 min, the research loop):** `tools/fast_proxy.sh NAME mimic-w256 1900 SEED [flags]`
+- **Fast (~5 min, the research loop):** `tools/fast_proxy.sh NAME S 1900 SEED [flags]`
   — 5M model, Muon, val at the end, tail-SWA, fixed-subset val in
   `checkpoints/fastproxy/results.tsv`. Seed gap ~0.0007; reproduces cond-heads (−3.9% vs −4.2%);
   exaggerates optimizer/LR effects ~5× (right sign). Calibration in
   `docs/research-notes-2026-10-22.md`.
-- **C cell (~45 min, confirmation):** `tools/proxy_run.sh NAME mimic data/mastfox_c9_half 6500 SEED`
+- **C cell (~45 min, confirmation):** `tools/proxy_run.sh NAME M data/mastfox_c9_half 6500 SEED`
   — 20M production architecture, pinned to the pre-2026-10-22 settings (AdamW, no cond-heads,
   val every 1%) for comparability with older proxies.
 - **Warm start (~15 min, shape-compatible changes only):** `--resume hf_eval/fox-master/model.pt

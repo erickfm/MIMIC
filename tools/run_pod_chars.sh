@@ -221,7 +221,7 @@ train_char() {
   (( NGPU < 1 )) && NGPU=1
   : > "${LOG_FILE}"
   local COMMON=(
-    --model mimic --encoder mimic_flat
+    --model M --encoder mimic_flat
     --mimic-mode --mimic-controller-encoding
     --stick-clusters hal37 --plain-ce
     --lr 3e-4 --max-samples 16777216

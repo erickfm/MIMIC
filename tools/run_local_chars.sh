@@ -147,7 +147,7 @@ train_char() {
   log "[train/${C}] starting (bs 256, ga 2, eff 512, 32,768 steps, fullfeat)"
   : > "${LOG_FILE}"
   python3 train.py \
-    --model mimic --encoder mimic_flat \
+    --model M --encoder mimic_flat \
     --mimic-mode --mimic-controller-encoding \
     --stick-clusters hal37 --plain-ce \
     --lr 3e-4 --batch-size 256 --grad-accum-steps 2 \

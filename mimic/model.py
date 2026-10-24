@@ -113,39 +113,14 @@ class ModelConfig:
 
 
 MODEL_PRESETS = {
-    # MIMIC's canonical config (bootstrapped from HAL's GPTv5Controller, then diverged).
-    "mimic":        dict(d_model=512,  nhead=8,  num_layers=6, dim_feedforward=2048,
-                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    # Narrower `mimic` for research-scale proxies (same head_dim=64, 4x FFN, depth 6).
-    "mimic-w256":   dict(d_model=256,  nhead=4,  num_layers=6, dim_feedforward=1024,
-                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-w384":   dict(d_model=384,  nhead=6,  num_layers=6, dim_feedforward=1536,
-                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    # Wider `mimic`: only d_model scaled (head_dim 64, 4x FFN, depth 6); for scale-up.
-    "mimic-w768":   dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
-                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-w1024":  dict(d_model=1024, nhead=16, num_layers=6, dim_feedforward=4096,
-                         dropout=0.2, max_seq_len=180, pos_enc="relpos",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    # Larger scale-up presets (SwiGLU / deeper), e.g. for a big distillation teacher.
-    "mimic-xl":     dict(d_model=768,  nhead=12, num_layers=6, dim_feedforward=3072,
-                         dropout=0.1, max_seq_len=180, pos_enc="relpos",
-                         use_swiglu=True,
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
-    "mimic-xxl":    dict(d_model=1024, nhead=16, num_layers=12, dim_feedforward=4096,
-                         dropout=0.1, max_seq_len=180, pos_enc="relpos",
-                         num_stages=6, num_characters=27, num_actions=396,
-                         num_c_dirs=9),
+    # M: the production model (~20M params; bootstrapped from HAL's GPTv5Controller, then diverged).
+    "M": dict(d_model=512, nhead=8, num_layers=6, dim_feedforward=2048,
+              dropout=0.2, max_seq_len=180, pos_enc="relpos",
+              num_stages=6, num_characters=27, num_actions=396, num_c_dirs=9),
+    # S: half-width M (~5.4M params; same head_dim 64, 4x FFN, depth 6), the fast research proxy.
+    "S": dict(d_model=256, nhead=4, num_layers=6, dim_feedforward=1024,
+              dropout=0.2, max_seq_len=180, pos_enc="relpos",
+              num_stages=6, num_characters=27, num_actions=396, num_c_dirs=9),
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

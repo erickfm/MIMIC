@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 name=$1 model=$2 steps=$3 seed=$4; shift 4
 data=${FAST_PROXY_DATA:-data/mastfox_c9_half}
 bs=768 ga=1
-[ "$model" = mimic ] && bs=384 && ga=2
+[ "$model" = M ] && bs=384 && ga=2
 out=checkpoints/fastproxy; mkdir -p $out/logs
 t0=$(date +%s)
 WANDB_MODE=${WANDB_MODE:-disabled} python3 train.py --model $model --encoder mimic_flat --mimic-mode \

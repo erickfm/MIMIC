@@ -1263,9 +1263,9 @@ if __name__ == "__main__":
                         help="Disable torch.compile (debug)")
     parser.add_argument("--resume",     type=str, default=None,
                         help="Path to checkpoint (.pt) to resume from")
-    parser.add_argument("--model",      type=str, default="mimic",
+    parser.add_argument("--model",      type=str, default="M",
                         choices=list(MODEL_PRESETS.keys()),
-                        help="Model preset (default: mimic, the ~20M production model)")
+                        help="Model size preset: M (default, ~20M, production) or S (~5.4M, research proxy)")
     parser.add_argument("--lr",         type=float, default=None,
                         help="Learning rate (default: 3e-4; the aux-AdamW groups under Muon)")
     parser.add_argument("--run-name",   type=str, default=None,
