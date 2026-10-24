@@ -241,8 +241,9 @@ class BatchedPolicy:
         (mock frames included). Sliding-window models: the frames since the episode start, up to
         the receptive field; a forward over them gives the streamed output at the last position."""
         s = torch.as_tensor(slots, dtype=torch.long, device=self.device)
-        if self.kv is None:
-            got = {k: v[s].cpu() for k, v in self.buf.items()}
+        if self.kv is None:   # one batched, non-blocking device-to-host copy per key, one sync
+            got = {k: v[s].to("cpu", non_blocking=True) for k, v in self.buf.items()}
+            torch.cuda.current_stream().synchronize()
             return [{k: got[k][i] for k in got} for i in range(len(slots))]
         lens = self.hist_len[s].tolist()
         g = int(self.hist_g)

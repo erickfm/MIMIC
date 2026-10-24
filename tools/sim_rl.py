@@ -63,6 +63,9 @@ def main():
     ap.add_argument("--lr", type=float, default=None, help="default: 1e-5 dense, 3e-5 L-cancel")
     ap.add_argument("--kl-beta", type=float, default=None, help="default: 0.03 dense, 0.003 L-cancel")
     ap.add_argument("--ppo-epochs", type=int, default=4)
+    ap.add_argument("--ppo-minibatch", type=int, default=0,
+                    help="decisions per update forward (memory only; default: 64 at 180 frames, fewer for "
+                         "longer contexts)")
     ap.add_argument("--checkpoint-every", type=int, default=5)
     ap.add_argument("--rng", default="online", choices=["online", "offline"])
     ap.add_argument("--seed", type=int, default=0)
@@ -163,7 +166,8 @@ def main():
         for side, (port, name) in enumerate(env["players"]):
             if name == "LEARN":
                 slots.append(dict(env=e, side=side, slot=env["slots"][side], tracker=LCancelTracker(),
-                                  pending=[]))
+                                  pending=[], pend=dict(G=np.zeros((0, len(vr_ids))), disc=np.zeros(0),
+                                                        age=np.zeros(0, np.int64))))
     dense = bool(vr_ids)
     sample_rng = _random_mod.Random(a.seed + 1)
     import random as _random
@@ -199,7 +203,11 @@ def main():
                 fr = FrameRecord(obs=obs, sampled_indices=ppo_idx(idx[s["slot"]]),
                                  logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
                                  game_frame_id=int(v.info.a[s["env"], s["side"], 0]))
-                s["pending"].append([fr, np.zeros(len(vr_ids)), 1.0, 0])   # record, returns, disc, age
+                s["pending"].append(fr)   # its returns, discount and age live in s["pend"]
+                P = s["pend"]
+                P["G"] = np.vstack([P["G"], np.zeros((1, len(vr_ids)))])
+                P["disc"] = np.append(P["disc"], 1.0)
+                P["age"] = np.append(P["age"], 0)
             return
         chosen = [s for s in slots if s["tracker"].recording()]
         for s, obs in zip(chosen, pol.context([s["slot"] for s in chosen]) if chosen else []):
@@ -213,8 +221,11 @@ def main():
     opt_path = a.resume and Path(a.resume).with_name(Path(a.resume).name.replace("rl_u", "opt_u"))
     if opt_path and opt_path.exists():
         opt.load_state_dict(torch.load(opt_path, map_location="cuda", weights_only=False))
-    # update minibatches hold ~64 x 180 frames whatever the context length
-    pcfg = OnlinePPOConfig(kl_beta=a.kl_beta, minibatch_frames=max(4, 64 * 180 // ctx_len))
+    # Update minibatches only bound memory (gradients accumulate over them, one optimizer step per
+    # epoch): ~64 x 180 frames whatever the context length. Bigger is not faster: 256 for S was
+    # ~8% slower per update than 64 (2026-10-23).
+    mb = a.ppo_minibatch or max(4, 64 * 180 // ctx_len)
+    pcfg = OnlinePPOConfig(kl_beta=a.kl_beta, minibatch_frames=mb)
     critic = None
     if a.critic:   # value baseline on the frozen BC's final-norm features at the decision frame
         critic = torch.nn.Sequential(torch.nn.Linear(cfg.d_model, 256), torch.nn.GELU(),   # one output per VR
@@ -226,10 +237,15 @@ def main():
     from rlvr.sim.trajectory import Episode
     res_seen = [0]
 
+    def new_pend():
+        return dict(G=np.zeros((0, len(vr_ids))), disc=np.zeros(0), age=np.zeros(0, np.int64))
+
     def close_pending(s, bonus, out):   # bonus: per-VR end-of-match terms
-        for fr, G, disc, _ in s["pending"]:
+        P = s["pend"]
+        for fr, G, disc in zip(s["pending"], P["G"], P["disc"]):
             out.append(Episode(task_id="vr_sim", frames=[fr], metadata={"G": G + disc * bonus}))
         s["pending"] = []
+        s["pend"] = new_pend()
 
     def collect_dense():
         """Step until frames_per_update sampled decisions have finished returns."""
@@ -253,17 +269,21 @@ def main():
                 st["learner_frames"] += 1
                 st["vr_learn"] += v.vr.a[e, side]
                 st["vr_opp"] += v.vr.a[e, 1 - side]
-                rew = v.vr.a[e, side][:len(vr_ids)].astype(np.float64)
-                keep = []
-                for rec in s["pending"]:   # decisions before this frame earn its reward
-                    rec[1] += rec[2] * rew
-                    rec[2] *= a.gamma
-                    rec[3] += 1
-                    if rec[3] >= a.horizon:
-                        out.append(Episode(task_id="vr_sim", frames=[rec[0]], metadata={"G": rec[1]}))
-                    else:
-                        keep.append(rec)
-                s["pending"] = keep
+                if s["pending"]:   # decisions before this frame earn its reward (vectorized per slot)
+                    P = s["pend"]
+                    rew = v.vr.a[e, side][:len(vr_ids)].astype(np.float64)
+                    P["G"] += P["disc"][:, None] * rew
+                    P["disc"] *= a.gamma
+                    P["age"] += 1
+                    done = P["age"] >= a.horizon
+                    if done.any():
+                        for j in np.flatnonzero(done):
+                            out.append(Episode(task_id="vr_sim", frames=[s["pending"][j]],
+                                               metadata={"G": P["G"][j].copy()}))
+                        keep = ~done
+                        s["pending"] = [fr for fr, k in zip(s["pending"], keep) if k]
+                        for key in P:
+                            P[key] = P[key][keep]
             v.step()
         return out, st
 
@@ -319,8 +339,9 @@ def main():
                 batch, last = collate([fr.obs for fr in chunk])
                 idx = torch.stack([fr.sampled_indices for fr in chunk]).cuda()
                 lp = _logprob_at_indices(head_logits(learner, batch, last, idx), idx).cpu()
-                for fr, x in zip(chunk, lp):
-                    fr.logprob_old = x
+                lr_ = _logprob_at_indices(head_logits(ref, batch, last, idx), idx).cpu()
+                for fr, x, y in zip(chunk, lp, lr_):   # the reference never changes: score it once
+                    fr.logprob_old, fr.logprob_ref = x, y
         critic_stats = {}
         if critic is not None and episodes:
             with torch.no_grad():
@@ -376,7 +397,7 @@ def main():
                     total += float(kl)
                 return torch.tensor(a.global_kl_beta * total / n)
         for _ in range(a.ppo_epochs):
-            m = ppo_update(learner, episodes, opt, pcfg, device="cuda", ref_model=ref, extra_loss=extra)
+            m = ppo_update(learner, episodes, opt, pcfg, device="cuda", ref_model=None, extra_loss=extra)
         v.policies["LEARN"].refresh()   # sliding-window learner: re-key its cache with the new weights
         anchor_kl = (m.get("extra_loss") / a.global_kl_beta) if (a.global_kl_beta > 0 and m.get("extra_loss") is not None) else None
         anchor.clear()
