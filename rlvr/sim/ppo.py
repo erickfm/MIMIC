@@ -5,8 +5,10 @@ per frame + old logprobs + ref logprobs), this:
 
   1. Computes discounted MC returns per episode.
   2. Group-normalizes across all frames in the batch -> advantages.
-  3. For each frame, re-forwards the policy on the stored context +
-     computes current logprob of the sampled action under the 4 heads.
+  3. For each frame, re-forwards the policy on the stored context (any
+     length: full-causal windows or sliding-window histories) and computes
+     the current log-prob of the sampled action under the 4 heads, with the
+     sampled classes teacher-forced through --cond-heads chains.
   4. PPO-clipped surrogate + Schulman KL estimator to the frozen ref.
 
 Memory: episode frames are stored CPU-side. For the update we build
@@ -39,6 +41,42 @@ class OnlinePPOConfig:
     # group means, reward - group mean, rather than batch-wide z-scores;
     # the removed savestate drill loop used it).
     use_metadata_advantage: bool = False
+
+
+def collate(obs_list, device="cuda"):
+    """Stack per-decision contexts {key: (L_i, ...)} into a (B, T, ...) batch, right-padded to
+    the longest; returns (batch, last) with last[i] = L_i - 1, the decision's position. Right
+    padding is exact under causal attention: no real position attends to a later one."""
+    lens = [next(iter(o.values())).shape[0] for o in obs_list]
+    T = max(lens)
+    batch = {}
+    for k in obs_list[0]:
+        rows = []
+        for o, L in zip(obs_list, lens):
+            x = o[k]
+            if L < T:
+                x = torch.cat([x, x[-1:].expand(T - L, *x.shape[1:])], 0)
+            rows.append(x)
+        batch[k] = torch.stack(rows).to(device)
+    return batch, torch.tensor(lens, device=device) - 1
+
+
+def head_logits(model, batch, last, sampled_indices=None):
+    """Head logits at each decision's position: {head: (B, V)}. For --cond-heads models the
+    sampled (shoulder, c, main) classes are teacher-forced through the chain, so the logits are
+    the ones the action was sampled from and the summed log-prob is its exact joint log-prob.
+    sampled_indices: (B, 4) in PPO order (main, shoulder, c, button)."""
+    raw = getattr(model, "_orig_mod", model)
+    h = raw.features(batch)
+    h = h[torch.arange(h.shape[0], device=h.device), last].unsqueeze(1)   # (B, 1, d)
+    if getattr(raw.heads, "cond", False):
+        if sampled_indices is None:
+            raise ValueError("cond-heads logits need the sampled classes to condition on")
+        si = sampled_indices.unsqueeze(1)
+        out = raw.heads(h, cond_classes=(si[..., 1], si[..., 2], si[..., 0]))
+    else:
+        out = raw.heads(h)
+    return {k: v[:, 0] for k, v in out.items() if k in ("main_xy", "shoulder_val", "c_dir_logits", "btn_logits")}
 
 
 def _last_logits(t: torch.Tensor) -> torch.Tensor:
@@ -161,14 +199,9 @@ def ppo_update(
     for start in range(0, N, minibatch):
         end = min(start + minibatch, N)
         chunk = all_frames[start:end]
-        # Build (B, T, ...) batch from chunk.obs dicts.
-        batch = {}
-        for k in chunk[0].obs:
-            tensors = [fr.obs[k].unsqueeze(0) for fr in chunk]   # each (1, T, ...)
-            batch[k] = torch.cat(tensors, dim=0).to(device)
-
-        logits = model(batch)
-        lp_theta = _logprob_at_indices(logits, sampled_indices[start:end])
+        batch, last = collate([fr.obs for fr in chunk], device)
+        idx = sampled_indices[start:end]
+        lp_theta = _logprob_at_indices(head_logits(model, batch, last, idx), idx)
         all_logprobs_theta.append(lp_theta.detach())
 
         # Per-chunk PPO objective (bptt cheap since per-chunk).
@@ -176,10 +209,8 @@ def ppo_update(
         lp_old_chunk = logprobs_old[start:end]
         if ref_model is not None:
             with torch.no_grad():
-                ref_logits = ref_model(batch)
-            lp_ref_chunk = _logprob_at_indices(
-                ref_logits, sampled_indices[start:end]
-            ).detach()
+                ref_logits = head_logits(ref_model, batch, last, idx)
+            lp_ref_chunk = _logprob_at_indices(ref_logits, idx).detach()
         else:
             lp_ref_chunk = logprobs_ref_cached[start:end]
 

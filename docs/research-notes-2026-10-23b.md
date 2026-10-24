@@ -114,3 +114,26 @@ Reading:
   DI at low percent.
 - Falco, Sheik, Falcon and Puff not run. `no_offstage_airdodge` and `no_shield` not run.
 - Neutral rework waits for labels.
+
+## RL for every model kind (end of day)
+
+`tools/sim_rl.py` used to refuse cond-heads models (the default since 10-22) and sliding-window
+models. Now any model trains:
+- Each sampled decision stores the exact model input behind it (`BatchedPolicy.context`): the
+  180-frame window for full-causal models; for stream models the frames since the episode start,
+  up to the receptive field (6 × 179 + 1 = 1,075), kept in a GPU ring buffer during rollouts.
+- The update scores decisions with `ppo.head_logits`: features at each decision's position
+  (contexts right-padded, exact under causal attention), with the sampled shoulder / c / main
+  classes teacher-forced through cond-heads chains, so the summed head log-prob is the exact
+  joint log-prob of the played action. The global KL anchor conditions each head on the sampled
+  prefix (a one-sample estimate of the joint KL for cond-heads; exact for independent heads).
+- Stream learners: the KV cache keeps keys/values from the weights that computed them, and one
+  update's rollout (~1,000 frames per learner slot) is shorter than the receptive field, so
+  without a fix nearly every rollout decision would mix old and new weights. `BatchedPolicy.refresh`
+  recomputes the learner's cache from its stored history after every update.
+- `rlvr/tests/test_rl_context.py` (random-init S models, fp32, 1,300 streamed frames, one reset):
+  re-scoring matches the sampling logits to 3e-8 to 7e-8 for full/stream × cond/independent; after
+  a weight change the stale cache is off by 0.12 in the logits and 2e-7 after `refresh`.
+- Smoke runs (2 updates, 16 envs): fox-master, the 10-20 cond-heads Fox, and a stream Fox
+  (`p1-C-warmswa720-s1`) all train normally. Stream updates take 14–19 s vs 5–7 s.
+

@@ -11,6 +11,14 @@ Rollouts run the learner in bf16 inside a CUDA graph that reads its live paramet
 steps reach it in place. The PPO "old" log-probs are recomputed in fp32 at update time (the
 update's own numerics), so the rollout precision cannot bias the ratio.
 
+Any model trains: full-causal or sliding-window (stream), with or without --cond-heads. Each
+sampled decision keeps the exact input behind it (BatchedPolicy.context: the 180-frame window,
+or a stream model's last receptive-field frames since the episode start), and the update scores
+it with ppo.head_logits, which teacher-forces the sampled classes through a cond-heads chain. A
+stream learner's KV cache is recomputed from its history after every update
+(BatchedPolicy.refresh), so rollouts never mix old and new weights. Check:
+rlvr/tests/test_rl_context.py (re-scoring matches the sampling logits to ~1e-7, fp32).
+
   python3 tools/sim_rl.py --policy-dir hf_eval/fox-master --templates replays_doc_rt \
       --out-dir checkpoints/simrl_lcancel --updates 60
 
@@ -93,7 +101,7 @@ def main():
 
     import torch
     from inference_utils import load_mimic_model
-    from rlvr.sim.ppo import OnlinePPOConfig, _logprob_at_indices, ppo_update
+    from rlvr.sim.ppo import OnlinePPOConfig, _logprob_at_indices, collate, head_logits, ppo_update
     from rlvr.sim.trajectory import FrameRecord
     from rlvr.sim.lcancel import LCancelTracker
     from rlvr.sim.vec_env import VecSim
@@ -104,11 +112,11 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     ckpt_path = str(Path(a.policy_dir) / "model.pt")
     learner, cfg = load_mimic_model(ckpt_path, "cuda")
-    if getattr(learner.heads, "cond", False):
-        raise SystemExit("ppo_update scores heads independently; --cond-heads policies are not supported yet")
-    if getattr(getattr(learner, "cfg", None), "attn_window", 0) > 0:
-        raise SystemExit("sim_rl records observations from the 180-frame window buffer, which the KV "
-                         "path doesn't fill; sliding-window policies are not supported yet")
+    # Any model: --cond-heads chains are scored with the sampled classes teacher-forced
+    # (ppo.head_logits); sliding-window models record their receptive-field history
+    # (BatchedPolicy.context) and are re-scored by a window-attention forward over it.
+    window = getattr(cfg, "attn_window", 0) or 0
+    ctx_len = cfg.num_layers * (window - 1) + 1 if window else cfg.max_seq_len
     ref = copy.deepcopy(learner).eval()
     for p in ref.parameters():
         p.requires_grad_(False)
@@ -158,53 +166,55 @@ def main():
                                   pending=[]))
     dense = bool(vr_ids)
     sample_rng = _random_mod.Random(a.seed + 1)
-    keys = None
     import random as _random
     anchor_rng = _random.Random(a.seed)
     anchor = []           # reservoir sample of the learner's frame windows, refilled per update
     anchor_seen = 0
 
+    def ppo_idx(row):   # BatchedPolicy order (main, c, shoulder, button) -> PPO order
+        m, c, sh, b = (int(x) for x in row)
+        return torch.tensor([m, sh, c, b], dtype=torch.long)
+
     def on_decide(name, idx, pol):
-        nonlocal keys, anchor_seen
+        nonlocal anchor_seen
         if name != "LEARN":
             return
-        keys = keys or list(pol.buf)
         if a.global_kl_beta > 0:
+            picks = []
             for s in slots:   # reservoir sampling over every learner frame of this update's rollouts
                 anchor_seen += 1
                 j = anchor_rng.randrange(anchor_seen) if len(anchor) >= a.anchor_frames else len(anchor)
                 if j < a.anchor_frames:
-                    w = {k: pol.buf[k][s["slot"]].detach().to("cpu", copy=True) for k in keys}
+                    picks.append((j, s))
+            if picks:
+                for (j, s), obs in zip(picks, pol.context([s["slot"] for _, s in picks])):
+                    w = (obs, ppo_idx(idx[s["slot"]]))
                     if j < len(anchor):
                         anchor[j] = w
                     else:
                         anchor.append(w)
         if dense:   # sample decisions; their returns accumulate from the next frame on
-            for s in slots:
-                if sample_rng.random() * a.sample_every < 1.0:
-                    m, c, sh, b = (int(x) for x in idx[s["slot"]])
-                    fr = FrameRecord(obs={k: pol.buf[k][s["slot"]].detach().to("cpu", copy=True) for k in keys},
-                                     sampled_indices=torch.tensor([m, sh, c, b], dtype=torch.long),
-                                     logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
-                                     game_frame_id=int(v.info.a[s["env"], s["side"], 0]))
-                    s["pending"].append([fr, np.zeros(len(vr_ids)), 1.0, 0])   # record, returns, disc, age
+            chosen = [s for s in slots if sample_rng.random() * a.sample_every < 1.0]
+            for s, obs in zip(chosen, pol.context([s["slot"] for s in chosen]) if chosen else []):
+                fr = FrameRecord(obs=obs, sampled_indices=ppo_idx(idx[s["slot"]]),
+                                 logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
+                                 game_frame_id=int(v.info.a[s["env"], s["side"], 0]))
+                s["pending"].append([fr, np.zeros(len(vr_ids)), 1.0, 0])   # record, returns, disc, age
             return
-        for s in slots:
-            t = s["tracker"]
-            if t.recording():
-                obs = {k: pol.buf[k][s["slot"]].detach().to("cpu", copy=True) for k in keys}
-                m, c, sh, b = (int(x) for x in idx[s["slot"]])
-                t.active.frames.append(FrameRecord(
-                    obs=obs, sampled_indices=torch.tensor([m, sh, c, b], dtype=torch.long),   # PPO order
-                    logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
-                    game_frame_id=int(v.info.a[s["env"], s["side"], 0])))
+        chosen = [s for s in slots if s["tracker"].recording()]
+        for s, obs in zip(chosen, pol.context([s["slot"] for s in chosen]) if chosen else []):
+            s["tracker"].active.frames.append(FrameRecord(
+                obs=obs, sampled_indices=ppo_idx(idx[s["slot"]]),
+                logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
+                game_frame_id=int(v.info.a[s["env"], s["side"], 0])))
 
     v.on_decide = on_decide
     opt = torch.optim.AdamW([p for p in learner.parameters() if p.requires_grad], lr=a.lr, weight_decay=0.0)
     opt_path = a.resume and Path(a.resume).with_name(Path(a.resume).name.replace("rl_u", "opt_u"))
     if opt_path and opt_path.exists():
         opt.load_state_dict(torch.load(opt_path, map_location="cuda", weights_only=False))
-    pcfg = OnlinePPOConfig(kl_beta=a.kl_beta)
+    # update minibatches hold ~64 x 180 frames whatever the context length
+    pcfg = OnlinePPOConfig(kl_beta=a.kl_beta, minibatch_frames=max(4, 64 * 180 // ctx_len))
     critic = None
     if a.critic:   # value baseline on the frozen BC's final-norm features at the decision frame
         critic = torch.nn.Sequential(torch.nn.Linear(cfg.d_model, 256), torch.nn.GELU(),   # one output per VR
@@ -306,9 +316,9 @@ def main():
         with torch.no_grad():
             for i in range(0, len(frames), pcfg.minibatch_frames):
                 chunk = frames[i:i + pcfg.minibatch_frames]
-                batch = {k: torch.stack([fr.obs[k] for fr in chunk]).cuda() for k in chunk[0].obs}
+                batch, last = collate([fr.obs for fr in chunk])
                 idx = torch.stack([fr.sampled_indices for fr in chunk]).cuda()
-                lp = _logprob_at_indices(learner(batch), idx).cpu()
+                lp = _logprob_at_indices(head_logits(learner, batch, last, idx), idx).cpu()
                 for fr, x in zip(chunk, lp):
                     fr.logprob_old = x
         critic_stats = {}
@@ -317,9 +327,10 @@ def main():
                 feats = []
                 for i in range(0, len(frames), pcfg.minibatch_frames):
                     chunk = frames[i:i + pcfg.minibatch_frames]
-                    batch = {k: torch.stack([fr.obs[k] for fr in chunk]).cuda() for k in chunk[0].obs}
+                    batch, last = collate([fr.obs for fr in chunk])
                     with torch.autocast("cuda", dtype=torch.bfloat16):
-                        feats.append(ref.features(batch)[:, -1].float())
+                        f = ref.features(batch)
+                    feats.append(f[torch.arange(len(chunk), device="cuda"), last].float())
                 feats = torch.cat(feats)
                 G = torch.tensor(Gm / vr_scale, dtype=torch.float32, device="cuda")   # (N, n_vr) scaled
                 W = torch.tensor(vr_w, dtype=torch.float32, device="cuda")
@@ -341,25 +352,32 @@ def main():
             critic_stats["critic_mse"] = float(loss)
         extra = None
         if a.global_kl_beta > 0 and anchor:
-            abatch = {k: torch.stack([w[k] for w in anchor]).cuda() for k in anchor[0]}
+            # KL(policy || BC) summed over the 4 heads at each anchor frame: exact for independent
+            # heads; for --cond-heads each head's KL is conditioned on the rollout's sampled
+            # classes for the earlier heads (a one-sample estimate of the joint KL's chain rule).
+            achunks = []
             with torch.no_grad():
-                ref_logp = {h: torch.log_softmax(v[:, -1].float(), -1) for h, v in ref(abatch).items()
-                            if h in ("main_xy", "shoulder_val", "c_dir_logits", "btn_logits")}
+                for i in range(0, len(anchor), pcfg.minibatch_frames):
+                    part = anchor[i:i + pcfg.minibatch_frames]
+                    ab, al = collate([o for o, _ in part])
+                    ai = torch.stack([x for _, x in part]).cuda()
+                    ref_logp = {h: torch.log_softmax(x.float(), -1) for h, x in head_logits(ref, ab, al, ai).items()}
+                    achunks.append((ab, al, ai, ref_logp))
 
-            def extra():   # exact KL(policy || BC) over the 4 heads, mean over anchor frames
+            def extra():
                 n, total = len(anchor), 0.0
-                for i in range(0, n, pcfg.minibatch_frames):   # chunked like PPO's own forward
-                    sl = slice(i, i + pcfg.minibatch_frames)
-                    out = learner({k: v[sl] for k, v in abatch.items()})
+                for ab, al, ai, ref_logp in achunks:   # chunked like PPO's own forward
+                    out = head_logits(learner, ab, al, ai)
                     kl = 0.0
                     for h, lr_ in ref_logp.items():
-                        lp = torch.log_softmax(out[h][:, -1].float(), -1)
-                        kl = kl + (lp.exp() * (lp - lr_[sl])).sum(-1).sum()
+                        lp = torch.log_softmax(out[h].float(), -1)
+                        kl = kl + (lp.exp() * (lp - lr_)).sum(-1).sum()
                     (a.global_kl_beta * kl / n).backward()
                     total += float(kl)
                 return torch.tensor(a.global_kl_beta * total / n)
         for _ in range(a.ppo_epochs):
             m = ppo_update(learner, episodes, opt, pcfg, device="cuda", ref_model=ref, extra_loss=extra)
+        v.policies["LEARN"].refresh()   # sliding-window learner: re-key its cache with the new weights
         anchor_kl = (m.get("extra_loss") / a.global_kl_beta) if (a.global_kl_beta > 0 and m.get("extra_loss") is not None) else None
         anchor.clear()
         anchor_seen = 0

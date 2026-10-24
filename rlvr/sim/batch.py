@@ -18,7 +18,10 @@ graph and replayed (graph=True), so a step costs a few launches instead of hundr
 Sliding-window models (cfg.attn_window > 0) stream instead: one frame per step through
 mimic/kv_cache.RelPosKVCache, which is exactly the computation they were trained with. Their
 episodes start from an empty cache (a training chunk that starts at a game's first frame), not
-from mock-filled windows.
+from mock-filled windows. They also keep the episode's last receptive-field frames
+(num_layers x (W - 1) + 1) in a ring buffer, so context() can hand RL the exact input behind a
+decision: a window-attention forward over those frames gives the streamed output at its last
+position.
 """
 import numpy as np
 import torch
@@ -75,6 +78,12 @@ class BatchedPolicy:
         raw = getattr(model, "_orig_mod", model)
         self.kv = (RelPosKVCache(raw, n_envs, dtype=torch.bfloat16 if amp else None)
                    if getattr(raw.cfg, "attn_window", 0) > 0 else None)
+        if self.kv is not None:   # each env's frames since its episode start, up to the receptive field
+            self.R = raw.cfg.num_layers * (raw.cfg.attn_window - 1) + 1
+            self.hist = {k: torch.zeros((n_envs, self.R) + tuple(v.shape), dtype=v.dtype, device=device)
+                         for k, v in self.mock.items()}
+            self.hist_len = torch.zeros(n_envs, dtype=torch.long, device=device)
+            self.hist_g = torch.zeros(1, dtype=torch.long, device=device)   # frames written (all envs)
         fwd = lambda b: forward_last(self.model, b)
         self.forward = (torch.compile(fwd, mode="max-autotune-no-cudagraphs", dynamic=False)
                         if compile and self.kv is None else fwd)
@@ -94,6 +103,7 @@ class BatchedPolicy:
         e = torch.as_tensor(env_ids, device=self.device)
         if self.kv is not None:
             self.kv.reset(e)
+            self.hist_len[e] = 0
         else:
             for k, v in self.mock.items():
                 self.buf[k][e] = v
@@ -109,7 +119,8 @@ class BatchedPolicy:
         st = {f"buf.{k}": v for k, v in self.buf.items()}
         st["last_idx"] = self.last_idx
         if self.kv is not None:
-            st.update(kv_K=self.kv.K, kv_V=self.kv.V, kv_t=self.kv.t)
+            st.update(kv_K=self.kv.K, kv_V=self.kv.V, kv_t=self.kv.t, hist_len=self.hist_len,
+                      hist_g=self.hist_g, **{f"hist.{k}": v for k, v in self.hist.items()})
         return st
 
     def _device_step(self):
@@ -117,6 +128,11 @@ class BatchedPolicy:
         if self.kv is not None:   # stream this frame through the KV cache
             frame = {k: v.unsqueeze(1).to(self.buf[k].dtype) for k, v in self.new.items()}
             frame["self_controller"] = self._controller().unsqueeze(1)
+            slot = self.hist_g % self.R
+            for k, v in frame.items():
+                self.hist[k].index_copy_(1, slot, v.to(self.hist[k].dtype))
+            self.hist_len.add_(1).clamp_(max=self.R)
+            self.hist_g.add_(1)
             with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp, cache_enabled=False):
                 preds = self.kv.step(frame)
             self._sample(preds)
@@ -178,6 +194,63 @@ class BatchedPolicy:
         else:
             self.graph.replay()
         return self.last_idx.cpu().numpy()
+
+
+    @torch.no_grad()
+    def refresh(self):
+        """Sliding-window models: recompute every env's cached keys/values from its stored history
+        with the model's current weights. Call after an optimizer step on the model: the cache
+        otherwise keeps keys/values from the old weights for up to a receptive field of frames,
+        and the rollout would sample from a mix of old and new policies. In place, so a captured
+        CUDA graph stays valid. Exact: the R stored frames cover every cached position's own
+        receptive field."""
+        if self.kv is None:
+            return
+        from rlvr.sim.ppo import collate
+        live = [e for e in range(self.n) if int(self.hist_len[e]) > 0]
+        if not live:
+            return
+        raw = getattr(self.model, "_orig_mod", self.model)
+        D, w = raw.cfg.d_model, self.kv.w
+        for i in range(0, len(live), 16):
+            rows = live[i:i + 16]
+            batch, last = collate(self.context(rows), self.device)
+            qkv = []
+            hooks = [blk.self_attn.c_attn.register_forward_hook(lambda m, inp, out: qkv.append(out))
+                     for blk in raw.blocks]
+            try:
+                with torch.autocast("cuda", dtype=torch.bfloat16, enabled=self.amp, cache_enabled=False):
+                    raw.features(batch)
+            finally:
+                for h in hooks:
+                    h.remove()
+            for j, e in enumerate(rows):
+                L = int(last[j]) + 1
+                n = min(L, w)
+                t = int(self.kv.t[e])                      # frames seen; the last one is t - 1
+                slots = torch.arange(t - n, t, device=self.device) % w
+                for li, out in enumerate(qkv):
+                    k = out[j, L - n:L, D:2 * D].view(n, -1, raw.blocks[li].self_attn.hs).transpose(0, 1)
+                    v = out[j, L - n:L, 2 * D:].view(n, -1, raw.blocks[li].self_attn.hs).transpose(0, 1)
+                    self.kv.K[li, e][:, slots] = k.to(self.kv.K.dtype)
+                    self.kv.V[li, e][:, slots] = v.to(self.kv.V.dtype)
+
+    def context(self, slots):
+        """The exact model input behind each listed slot's latest decision, on the CPU: one dict
+        per slot of {key: (L, ...)} frames, oldest first. Full-causal models: the 180-frame window
+        (mock frames included). Sliding-window models: the frames since the episode start, up to
+        the receptive field; a forward over them gives the streamed output at the last position."""
+        s = torch.as_tensor(slots, dtype=torch.long, device=self.device)
+        if self.kv is None:
+            got = {k: v[s].cpu() for k, v in self.buf.items()}
+            return [{k: got[k][i] for k in got} for i in range(len(slots))]
+        lens = self.hist_len[s].tolist()
+        g = int(self.hist_g)
+        out = []
+        for i, L in enumerate(lens):
+            idx = (torch.arange(g - L, g, device=self.device) % self.R)
+            out.append({k: v[s[i], idx].cpu() for k, v in self.hist.items()})
+        return out
 
 
 def _gumbel_sample(logits, inv_temp, greedy):
