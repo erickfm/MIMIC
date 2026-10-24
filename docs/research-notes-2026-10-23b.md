@@ -137,3 +137,13 @@ models. Now any model trains:
 - Smoke runs (2 updates, 16 envs): fox-master, the 10-20 cond-heads Fox, and a stream Fox
   (`p1-C-warmswa720-s1`) all train normally. Stream updates take 14–19 s vs 5–7 s.
 
+
+## Reward spec review (owner, via the spec review page)
+
+All current definitions approved as written: stock_delta, damage_delta, l_cancel_miss,
+low_percent_kill, recovery, tech, combo_length, combo_extend, shield_escape. **neutral_win_loss is
+dropped**: damage_delta already carries its signal (the audit found no outcome signal beyond
+damage, sign negative after controlling for it), so no rework and no labels needed. damage_delta
+is kept alongside stock_delta: no double counting (a kill pays only through stock_delta; respawn
+drops are ignored), and it's the dense shaping term that made the sparse stock reward learnable
+(stock alone: parity; stock + damage: the one replicated win).
