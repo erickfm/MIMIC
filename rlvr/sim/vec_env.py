@@ -68,9 +68,12 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
     pads = _Shm(*spec["pads"][:2], name=spec["pads"][2])
     info = _Shm(*spec["info"][:2], name=spec["info"][2])
     vr_ids = opts.get("vr_ids") or []
-    if vr_ids:   # verifiable rewards: computed here, where each frame's libmelee GameState lives
+    ivs = opts.get("interventions") or {}   # policy name -> rlvr/sim/interventions rule id
+    if vr_ids or ivs:   # rewards / interventions run here, where each frame's GameState lives
         from collections import deque
         from rlvr.sim.vr import HISTORY, VRS
+        from rlvr.sim.interventions import RULES
+    if vr_ids:
         vr = _Shm(*spec["vr"][:2], name=spec["vr"][2])
     ctxs = {ch: _make_ctx(load_inference_context(d), _Cfg(n)) for ch, (d, n) in spec["ctx"].items()}
     rng = random.Random(opts["seed"] * 1000 + wid)
@@ -82,6 +85,9 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
                     gs=None, t=t)
         if vr_ids:   # one module per VR for each side, rewarding that side's player
             S[e]["vr"] = [[VRS[i](self_port=port + 1) for i in vr_ids] for port, _ in envs[e]["players"]]
+        if ivs:      # (port, rule) for each side whose policy is intervened on
+            S[e]["iv"] = [(port, RULES[ivs[nm]](port + 1)) for port, nm in envs[e]["players"] if nm in ivs]
+        if vr_ids or ivs:
             S[e]["hist"] = deque(maxlen=HISTORY)
 
     def start(e):
@@ -89,11 +95,15 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
         s["sim"].seed = rng.getrandbits(32)
         s["parser"] = SlippiParser(s["t"])
         s["writer"] = SlpWriter(s["t"]) if opts["record_dir"] else None
-        if vr_ids:
+        if vr_ids or ivs:
             s["hist"].clear()
+        if vr_ids:
             for mods in s["vr"]:
                 for m in mods:
                     m.reset()
+        for _, rule in s.get("iv", []):
+            rule.reset()
+            rule.frames = 0
         return s["sim"].reset()
 
     def emit(e, frame):
@@ -102,8 +112,9 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
             s["writer"].add(frame)
         gs = s["parser"].parse(frame)
         s["gs"] = gs
-        if vr_ids:   # this frame's unweighted reward per (side, VR)
+        if vr_ids or ivs:
             s["hist"].append(gs)
+        if vr_ids:   # this frame's unweighted reward per (side, VR)
             for side, mods in enumerate(s["vr"]):
                 for i, m in enumerate(mods):
                     vr.a[e, side, i] = m.observe(s["hist"])
@@ -125,6 +136,8 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
         res = dict(env=e, episode=s["episodes"], seed=s["sim"].seed, frames=int(gs.frame) if gs else 0,
                    final={ch: (int(gs.players[p + 1].stock), float(gs.players[p + 1].percent))
                           for p, ch in envs[e]["players"]} if gs else {})
+        if s.get("iv"):   # frames each intervention changed, per port
+            res["intervened"] = {port: rule.frames for port, rule in s["iv"]}
         if vr_ids:   # end-of-match terms and per-match diagnostics, per side
             res["vr_final"] = [[float(m.finalize(s["hist"])) for m in mods] for mods in s["vr"]]
             res["vr_meta"] = [{m.id: m.metadata() for m in mods} for mods in s["vr"]]
@@ -145,7 +158,15 @@ def _worker(wid, env_ids, envs, spec, conn, opts):
         if cmd == "stop":
             break
         for e in env_ids:
-            S[e]["sim"].send(pads.a[e].tobytes())
+            if S[e].get("iv") and S[e]["hist"]:   # rewrite intervened ports' pads for this frame
+                buf = bytearray(pads.a[e].tobytes())
+                for port, rule in S[e]["iv"]:
+                    p = buf[8 * port:8 * port + 8]
+                    rule.apply(S[e]["hist"], p)
+                    buf[8 * port:8 * port + 8] = p
+                S[e]["sim"].send(bytes(buf))
+            else:
+                S[e]["sim"].send(pads.a[e].tobytes())
         resets, done = [], []
         for e in env_ids:
             f = S[e]["sim"].recv()
@@ -233,7 +254,8 @@ class VecSim:
         self.on_decide = None   # hook(policy_name, (S, 4) head indices, BatchedPolicy) per step
         spec = dict(feats={k: v.spec() for k, v in self.feats.items()}, pads=self.pads.spec(),
                     info=self.info.spec(), vr=self.vr.spec(), ctx=ctx_spec)
-        opts = dict(rng=rng, seed=seed, record_dir=record_dir, max_frames=max_frames, vr_ids=self.vr_ids)
+        opts = dict(rng=rng, seed=seed, record_dir=record_dir, max_frames=max_frames, vr_ids=self.vr_ids,
+                    interventions={k: v["intervention"] for k, v in policies.items() if v.get("intervention")})
         if record_dir:
             os.makedirs(record_dir, exist_ok=True)
         ctxm = mp.get_context("spawn")

@@ -109,15 +109,39 @@ def damage_by_variant(games, names):
     return dict(games=n, dealt={k: sum(v) / n for k, v in dealt.items()}, diff=mean, diff_se=sd / math.sqrt(n))
 
 
+def lcancel_flag_by_variant(games, envs, names):
+    """Each variant's L-cancel rate by the engine's post-frame L-cancel status byte (1 = success,
+    2 = miss), any character. Counts ledge-cancels and interrupted landings as misses, so it reads
+    low against lcancel_by_variant; it is here to check interventions, not to grade skill."""
+    from tools.sim_replay_check import slp_events
+    tally = {n: [0, 0] for n in names}
+    for g in games:
+        if "slp" not in g:
+            continue
+        name_of = dict(envs[g["env"]]["players"])
+        for c, p in slp_events(g["slp"]):
+            if c == 0x38 and p[5] == 0 and len(p) > 0x32 and p[0x32] in (1, 2) and p[4] in name_of:
+                tally[name_of[p[4]]][p[0x32] - 1] += 1
+    return {n: dict(success=s, miss=m, rate=s / max(1, s + m)) for n, (s, m) in tally.items()}
+
+
 def variant(spec):
-    """name=CKPT_DIR[:fp32|bf16] -> (name, policy dict)."""
+    """name=CKPT_DIR[:fp32|bf16[:intervention]] -> (name, policy dict). The optional third field is
+    an rlvr/sim/interventions rule applied to that policy's controller (causal experiments)."""
     name, rest = spec.split("=", 1)
-    d, _, prec = rest.partition(":")
+    d, _, tail = rest.partition(":")
+    prec, _, iv = tail.partition(":")
     prec = prec or "bf16"
     if prec not in ("fp32", "bf16"):
         raise ValueError(f"precision must be fp32 or bf16, not {prec!r}")
     # fp32 = the Dolphin inference path's numerics (no autocast, no compile); bf16 = the fast path.
-    return name, dict(dir=d, amp=prec == "bf16", compile=prec == "bf16")
+    pol = dict(dir=d, amp=prec == "bf16", compile=prec == "bf16")
+    if iv:
+        from rlvr.sim.interventions import RULES
+        if iv not in RULES:
+            raise ValueError(f"unknown intervention {iv!r}; known: {sorted(RULES)}")
+        pol["intervention"] = iv
+    return name, pol
 
 
 def wilson(k, n, z=1.96):
@@ -142,8 +166,8 @@ def binom_p_two_sided(k, n):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--char", required=True, help="libmelee CHARACTER name both variants play, e.g. FOX")
-    ap.add_argument("--a", required=True, metavar="NAME=CKPT_DIR[:fp32|bf16]")
-    ap.add_argument("--b", required=True, metavar="NAME=CKPT_DIR[:fp32|bf16]")
+    ap.add_argument("--a", required=True, metavar="NAME=CKPT_DIR[:fp32|bf16[:INTERVENTION]]")
+    ap.add_argument("--b", required=True, metavar="NAME=CKPT_DIR[:fp32|bf16[:INTERVENTION]]")
     ap.add_argument("--templates", required=True, help="dir of 1v1 .slp templates (made into dittos)")
     ap.add_argument("--games", type=int, default=200)
     ap.add_argument("--envs", type=int, default=48)
@@ -212,7 +236,15 @@ def main():
     lo, hi = wilson(wa, n)
     lc = lcancel_by_variant(games, envs, (na, nb)) if a.record_dir and a.char == "FOX" else None
     dmg = damage_by_variant(games, (na, nb)) if a.record_dir else None
+    lcf = lcancel_flag_by_variant(games, envs, (na, nb)) if a.record_dir else None
+    iv = {}   # mean frames per game each variant's intervention changed its pad
+    for r in games:
+        for port, nm in r["players"]:
+            if str(port) in r.get("intervened", {}) or port in r.get("intervened", {}):
+                iv.setdefault(nm, []).append(r["intervened"].get(port, r["intervened"].get(str(port))))
+    iv = {nm: sum(x) / len(x) for nm, x in iv.items()}
     rep = dict(char=a.char, a=a.a, b=a.b, games=len(games), a_wins=wa, b_wins=wb, draws=draws, lcancel=lc, damage=dmg,
+               lcancel_flag=lcf, intervened_frames_per_game=iv,
                by_template_side={f"t{t}_aside{sd}": v_ for (t, sd), v_ in sorted(by.items())},
                by_order={o: [sum(1 for r in games if r["order"] == o and r["final"][na][0] > r["final"][nb][0]),
                              sum(1 for r in games if r["order"] == o and r["final"][nb][0] > r["final"][na][0])]
@@ -232,6 +264,11 @@ def main():
     if lc:
         print("  L-cancel: " + "  ".join(f"{n} {d['success']}/{d['success'] + d['miss']} = {100 * d['rate']:.1f}%"
                                         for n, d in lc.items()))
+    if lcf:
+        print("  L-cancel (engine flag): " + "  ".join(f"{n} {d['success']}/{d['success'] + d['miss']} = {100 * d['rate']:.1f}%"
+                                                     for n, d in lcf.items()))
+    if iv:
+        print("  intervened frames per game: " + "  ".join(f"{n} {x:.0f}" for n, x in iv.items()))
     if a.out:
         Path(a.out).write_text(json.dumps(dict(report=rep, games=games), indent=1))
 
