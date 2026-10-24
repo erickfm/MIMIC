@@ -1,6 +1,6 @@
 """Batched multi-env FFW head-to-head — the throughput fix for the h2h campaign.
 
-The single-instance / N-independent-process approach is GPU-bound (pitfall #18):
+The single-instance / N-independent-process approach is GPU-bound (CLAUDE.md pitfall #17):
 each Dolphin runs a batch-1 forward per frame, the GPU saturates at ~1-2 lanes,
 and adding lanes just makes every match slower (measured: 10 lanes -> ~490s/match
 vs ~60s single, ~same aggregate fps). This harness removes that wall the way the

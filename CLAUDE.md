@@ -6,34 +6,14 @@ MIMIC is a behavior-cloning bot for Super Smash Bros. Melee. It watches human
 replays and learns to predict controller inputs from game state. At inference
 it drives a controller through Dolphin (the GameCube emulator) via libmelee.
 
-MIMIC started as an independent BC-for-Melee project, cycled through a lot
-of ideas, and at one point re-bootstrapped its architecture and data
-pipeline from [HAL](https://github.com/ericyuegu/hal) (by Eric Gu) to get a
-known-good baseline. From there it diverged again: 7-class button head
-(adding TRIG / A_TRIG for airdodge-wavedash-tech), v2 shard target
-alignment, RoPE as an alternative to Shaw relpos, netplay + Discord bot
-frontend. The active code path is MIMIC's own; HAL is just historically
-where the transformer backbone came from.
-
-## Lineage hazards (things that look like HAL)
-
-- `tools/run_hal_model.py` — **still loads actual HAL checkpoints** (Eric
-  Gu's original weights). Kept as a reference implementation. Not used by
-  any production code path. Don't rename it; don't delete it.
-- `tools/validate_checkpoint.py` has an inner `HALModel` class — also a
-  legacy HAL-compat reimplementation used only for validating old HAL
-  checkpoints. Leave alone.
-- Research notes in `docs/` reference `--hal-mode`, `hal_norm.json`, the
-  "HAL preset", etc. They're frozen snapshots of when those names existed.
-  Don't sweep them.
-- Legacy on-disk data directories (`data/fox_hal_full`, `data/fox_hal_local`,
-  `data/fox_hal_800m`) keep their names. Nothing in the active code path
-  references them anymore, they're frozen.
+The transformer backbone and early data pipeline started from
+[HAL](https://github.com/ericyuegu/hal) (Eric Gu); everything on the active
+code path is MIMIC's own. Leftover `hal` names and the HAL reference
+implementation are covered in one place: "HAL leftovers" near the end.
 
 ## Architecture
 
-MIMIC's canonical config (preset `M`, bootstrapped from HAL's
-GPTv5Controller and later diverged):
+MIMIC's canonical config (preset `M`):
 
 - **Params:** ~19.99M.
 - **Transformer:** d_model=512, 6 layers, 8 heads, block_size=1024.
@@ -138,16 +118,6 @@ writes `checkpoints/{run_name}_gate_report.json` ranking all input
 scalars by learned gate value. λ=0.01 costs ~0 val-loss. Off by
 default; not a production regularizer.
 
-## Stats files (HAL legacy)
-
-Only relevant when running `tools/run_hal_model.py`. HAL has two
-`stats.json` files (`hal/data/` and `hal/checkpoints/`); the
-Preprocessor always loads `hal/checkpoints/stats.json` (Fox training
-subset, p1_percent max 236) regardless of `override_stats_path` —
-the override mechanism changes the config field but not the
-resolved path. Using the wrong file shifts every normalized
-percent and the model plays terribly.
-
 ## Shard alignment
 
 melee-py's `console.step()` returns **post-frame** game state (action,
@@ -168,7 +138,7 @@ double-shifts the data.
 
 **Old shards** (`data/fox_hal_full`, `data/fox_hal_match_shards`) have
 the leak. With those shards, use `--reaction-delay 1` to achieve the
-same effect at dataloader time (this is what HAL does).
+same effect at dataloader time.
 
 Val loss is not comparable across shard versions: v2 shards produce
 higher val loss because the model can no longer cheat via
@@ -371,24 +341,8 @@ import from `tools/inference_utils.py`, which holds the shared decode
 pipeline (`load_mimic_model`, `load_inference_context`, `build_frame`,
 `build_frame_p2`, `PlayerState`, `decode_and_press`). Any new
 inference entry point should import from there rather than
-reimplement — the L-button / TRIG decode (see Pitfalls #9) lives in
+reimplement — the L-button / TRIG decode (see Pitfalls #8) lives in
 one place on purpose.
-
-### Running HAL's original checkpoint (rare)
-
-`tools/run_hal_model.py` is a from-scratch reimplementation of HAL's
-5-class inference, used only for Eric Gu's original HAL weights at
-`/home/erick/projects/hal/checkpoints/000005242880.pt`. It does NOT
-share `inference_utils` with the MIMIC play tools. If our
-reimplementation breaks, HAL's own code always works:
-
-```bash
-cd /home/erick/projects/hal
-python3 -m hal.eval.play --artifact_dir checkpoints --character FOX
-```
-
-This requires `hal/local_paths.py` to have correct paths for the
-emulator and ISO. The `MAC_*` path aliases are for this purpose.
 
 ## Data
 
@@ -594,11 +548,6 @@ name `JIGGLYPUFF`:
 
 ## Checkpoints
 
-**HAL's only actual checkpoint**:
-`/home/erick/projects/hal/checkpoints/000005242880.pt` (101 MB, DDP-prefixed
-state dict). Eric Gu's best at 5.2M samples. Loaded only by
-`tools/run_hal_model.py`. Not on any MIMIC code path.
-
 **MIMIC checkpoints** live in `checkpoints/`. Naming:
 `{char}-{YYYYMMDD}-{descriptor}-{steps}k.pt`. Descriptor is a
 free-form tag (`relpos`, `rope`, `fullfeat`, `gate01`, `xxl`, etc).
@@ -684,7 +633,6 @@ X but didn't upload it." The `.pt` itself must come from the GPU box
 
 **Inference (local):**
 - `tools/play.py` — Run a MIMIC checkpoint vs a CPU (`--opponent cpu:9`) or a second checkpoint (`--opponent <ckpt>`) in one Dolphin instance: N back-to-back matches, `--n-matches 1` for a watchable game, optional win-rate JSON via `--out`. Uses shared `inference_utils.decode_and_press`.
-- `tools/run_hal_model.py` — Reimplementation of HAL's 5-class inference. Loads HAL checkpoints. Structurally can't wavedash (no TRIG class).
 
 **Inference (online, Slippi netplay):**
 - `tools/play_netplay.py` — Joins a Slippi Direct Connect lobby and plays N
@@ -762,42 +710,36 @@ after the kill (gate hit-recency statefully, not with a backward scan).
 
 ## Pitfalls for agents
 
-1. **`tools/run_hal_model.py` loads actual HAL weights.** MIMIC
-   checkpoints go through `tools/play.py` / `play_netplay.py`.
-   `run_hal_model.py` is the
-   reference-implementation path for Eric Gu's original HAL
-   checkpoints and is not used by any MIMIC production code.
-
-2. **Don't trust research notes as current truth.** Always verify
+1. **Don't trust research notes as current truth.** Always verify
    against code. See the Research Notes section below.
 
-3. **Don't run inference while training on the same GPU.** Frame
+2. **Don't run inference while training on the same GPU.** Frame
    drops make gameplay look broken when the model is fine.
 
-4. **`max_samples` is total, not per-GPU.** `train.py` divides by
+3. **`max_samples` is total, not per-GPU.** `train.py` divides by
    effective batch size (`local_batch * n_gpus * grad_accum`) to
    compute `max_steps`. Don't reintroduce a divide-by-local-batch
    shortcut — on 8 GPUs that 8×-overtrains.
 
-5. **Don't mix normalization schemes.** `mimic_mode` training needs
+4. **Don't mix normalization schemes.** `mimic_mode` training needs
    `mimic_norm.json` + MIMIC controller combos (7-combo current,
    5-combo legacy). Old data like `ranked_fox` uses old normalization
    with 32 combos — incompatible.
 
-6. **Don't hardcode head hidden dims as 256.** The autoregressive
+5. **Don't hardcode head hidden dims as 256.** The autoregressive
    heads use `input_dim // 2`, which varies per head (256, 257, 262,
    280).
 
-7. **`sorted()` player dicts.** melee-py's `gamestate.players` dict
+6. **`sorted()` player dicts.** melee-py's `gamestate.players` dict
    order is not guaranteed to match port order. Always `sorted()`.
 
-8. **Use `blocking_input=True` for inference.** Dolphin waits for
+7. **Use `blocking_input=True` for inference.** Dolphin waits for
    controller input before advancing each frame. Without it, slow
    model inference causes frame drops (the game advances without
    receiving input). In head-to-head, non-blocking mode systematically
    disadvantages whichever model's inputs are flushed second.
 
-9. **TRIG (L/R) must call `press_button`, not just `press_shoulder`.**
+8. **TRIG (L/R) must call `press_button`, not just `press_shoulder`.**
    Melee's shoulder events split on analog vs digital:
    - **Shield**: analog threshold (any shoulder value above ~0.3).
    - **L-cancel**: analog threshold, rising edge during the L-cancel window.
@@ -811,11 +753,10 @@ after the kill (gate hit-recency statefully, not with a backward scan).
    and A_TRIG (class 5) classes call `ctrl.press_button(BUTTON_L)` to
    cover all four cases at once. `tools/inference_utils.py:decode_and_press`
    is the single place this lives — new inference entry points must
-   import from it rather than reimplement. HAL's 5-class button head
-   has no TRIG class, so HAL-lineage bots are structurally incapable
-   of teching, airdodging, or wavedashing.
+   import from it rather than reimplement. A 5-class button head has
+   no TRIG class, so a bot using one can't tech, airdodge, or wavedash.
 
-10. **Button encoding is single-label.** The 5-class button head (A,
+9. **Button encoding is single-label.** The 5-class button head (A,
     B, Jump, Z, None) cannot represent two simultaneous action
     buttons; the 7-class head adds TRIG + A_TRIG for the one emergent
     combo that matters (airdodge/wavedash + an A-attack shield-grab
@@ -826,23 +767,23 @@ after the kill (gate hit-recency statefully, not with a backward scan).
     Early-release encoding is legacy 5-class only. Shoulder+button
     combos ARE representable since shoulder is a separate head.
 
-11. **Only Shaw relpos attention exists.** RoPE variants underperformed
+10. **Only Shaw relpos attention exists.** RoPE variants underperformed
     relpos (−1–2% val at matched settings, 2026-10-21) and were removed
     with the other position encodings on 2026-10-22; recover them from
     git history if a future experiment needs them.
 
-12. **Full features are the only input.** The full path (13 numeric +
+11. **Full features are the only input.** The full path (13 numeric +
     5 flags per player) was worth ~1.5–3.5% val over the old 9-col
     minimal path, which was removed 2026-10-22.
 
-13. **Discord bot portability: keep paths relative in `.env`.** The
+12. **Discord bot portability: keep paths relative in `.env`.** The
     bot's `.env` uses relative paths (`./emulator/...`, `./melee.iso`,
     `./slippi_home`) that `_resolve_path` in `tools/discord_bot.py`
     converts to absolute against the repo root at runtime. This makes
     the repo `scp`-able to any machine that has run `setup.sh`. Don't
     hardcode absolute paths.
 
-14. **Slippi credentials live at `./slippi_home/Slippi/user.json`**
+13. **Slippi credentials live at `./slippi_home/Slippi/user.json`**
     (gitignored). Not at `~/.config/SlippiOnline/Slippi/user.json` —
     libmelee is pointed at the bundled dir explicitly via
     `dolphin_home_path=SLIPPI_HOME` in `tools/play_netplay.py`. Place
@@ -850,7 +791,7 @@ after the kill (gate hit-recency statefully, not with a backward scan).
     carries the bot's Slippi login. Never commit `slippi_home/` — it
     contains the bot's `playKey`.
 
-15. **Dolphin needs runtime shared libraries.** The AppImage-extracted
+14. **Dolphin needs runtime shared libraries.** The AppImage-extracted
     `dolphin-emu` binary links against `libasound2`, `libusb-1.0-0`,
     `libgtk-3-0`, `libbluetooth3`, `libhidapi-hidraw0`, and friends.
     Missing any of them makes the binary exit 127, which libmelee
@@ -861,14 +802,14 @@ after the kill (gate hit-recency statefully, not with a backward scan).
     existing machines run `ldd emulator/squashfs-root/usr/bin/dolphin-emu
     | grep 'not found'` to see what's missing.
 
-16. **Setup Xvfb for headless machines.** Dolphin crashes at startup
+15. **Setup Xvfb for headless machines.** Dolphin crashes at startup
     with "Unable to initialize GTK+, is DISPLAY set properly?" if no
     display server is available. `setup.sh` installs and starts Xvfb
     on `:99` and adds `export DISPLAY=:99` to `~/.bashrc`. On
     existing machines, check `DISPLAY` is set in the environment the
     Discord bot / `play_netplay.py` inherits.
 
-17. **Use `gfx_backend="Vulkan"` on headless/containerized hosts.**
+16. **Use `gfx_backend="Vulkan"` on headless/containerized hosts.**
     Xvfb has no GPU passthrough, so Dolphin's default OpenGL backend
     falls back to llvmpipe software rasterization and burns ~6 CPU
     cores (~590% CPU) rendering a framebuffer nobody is watching.
@@ -884,10 +825,10 @@ after the kill (gate hit-recency statefully, not with a backward scan).
     and the `ENABLE_HEADLESS` cmake flag is broken on this fork
     anyway (project-slippi/Ishiiruka#209).
 
-18. **FFW (`emulator_ffw/` + `--use-exi-inputs --enable-ffw`) IS
+17. **FFW (`emulator_ffw/` + `--use-exi-inputs --enable-ffw`) IS
     gameplay-faithful — the old "unfaithful" claim was a misdiagnosis
     (corrected 2026-06-30).** With `blocking_input=True` (our default,
-    pitfall #8) the canary suite passes: L-cancel rate **91.5%** (n=588)
+    pitfall #7) the canary suite passes: L-cancel rate **91.5%** (n=588)
     vs realtime 88% / corpus 90.4%, match length **normal** (~6,400
     frames), at **~2.9× realtime**. Faithful by construction: Fizzi's
     `AI/LoopMainEngine/*` gecko codes run the *real* engine loop N× per
@@ -917,13 +858,13 @@ after the kill (gate hit-recency statefully, not with a backward scan).
     in step all match (measured with the native sim). Timing/physics
     canaries are unaffected; don't treat FFW replays as bit-exact.
 
-19. **Netplay runs on the CURRENT Slippi Ishiiruka in `emulator/`** —
+18. **Netplay runs on the CURRENT Slippi Ishiiruka in `emulator/`** —
     `setup.sh` downloads the latest release at install time (the old vendored
     `emulator.tar.gz` was removed 2026-07-17) and `DOLPHIN_PATH` defaults to
     `emulator/squashfs-root/usr/bin/dolphin-emu`. Historical note: an earlier
     version of this pitfall recommended *mainline* Dolphin because the stale
     Ishiiruka 3.5.2 build stalled libmelee's `choose_direct_online` menu
-    navigation — that advice is dead (see #20: mainline crashes under our
+    navigation — that advice is dead (see #19: mainline crashes under our
     libmelee EXI protocol or is gate-rejected; current Ishiiruka navigates
     fine and is what the Phillip benchmark ran on). Still true:
     `play_netplay.py` forces the `fork` mp start-method (macOS/Windows
@@ -931,7 +872,7 @@ after the kill (gate hit-recency statefully, not with a backward scan).
     must pass **inbound P2P UDP** — RunPod-style container pods drop it
     (STUN falsely reports "cone"); use a real VM (e.g. GCP).
 
-20. **"required update available" on netplay = a stale Slippi build, NOT a
+19. **"required update available" on netplay = a stale Slippi build, NOT a
     Dolphin-fork problem.** Slippi gates Online on a server-side *minimum
     version*. When the bundled build falls behind (the 3.6.x Ishiiruka line
     shipped after our 3.5.2 and became required), Online is hard-gated. Fix =
@@ -968,26 +909,33 @@ linked from `README.md`.
 at each point in time. Several claims were later found wrong — for
 example:
 
-- "HAL's val loss is stable" — actually HAL overfits too (val rises
-  from 0.744 to 0.802 after 5.2M samples).
 - "Architecture: 26,274,803 params" — actually ~19,950,000 params.
-- "HAL uses `hal/data/stats.json` for inference" — the Preprocessor
-  actually loads `checkpoints/stats.json`.
-- Various "this matches HAL" claims that later turned out to have
-  subtle differences.
+- Various "this matches the reference" claims that later turned out to
+  have subtle differences.
 
 The notes are still valuable for understanding the project's
 evolution and the reasoning behind decisions. Just don't treat
 specific numbers or "verified" claims as current truth without
 checking the code.
 
-## The HAL repo (`/home/erick/projects/hal`)
+## HAL leftovers
 
-Eric Gu's original codebase. Only need to touch this for `hal/eval/play.py`
-(ground-truth inference fallback when MIMIC reimplementation breaks). The
-canonical checkpoint is `hal/checkpoints/000005242880.pt`; **use
-`hal/checkpoints/stats.json`** (27M-frame Fox stats), not
-`hal/data/stats.json` (222M multi-char), per "Stats files" section above.
+MIMIC's backbone came from [HAL](https://github.com/ericyuegu/hal) (Eric Gu). What's left:
+
+- **`tools/run_hal_model.py`** reimplements HAL's 5-class inference and loads only Eric Gu's
+  original checkpoint, `/home/erick/projects/hal/checkpoints/000005242880.pt` (101 MB,
+  DDP-prefixed, best at 5.2M samples). Not on any MIMIC path; it doesn't use `inference_utils`.
+  Keep it; don't rename or delete it. It needs `hal/checkpoints/stats.json` (Fox subset,
+  p1_percent max 236), not `hal/data/stats.json`: HAL's Preprocessor always loads the former
+  regardless of `override_stats_path`, and the wrong file shifts every normalized percent. If it
+  breaks, HAL's own code works: `cd /home/erick/projects/hal && python3 -m hal.eval.play
+  --artifact_dir checkpoints --character FOX` (needs correct paths in `hal/local_paths.py`).
+- **`tools/validate_checkpoint.py`** has an inner `HALModel` class for validating old HAL
+  checkpoints. Leave it.
+- **Names:** the `--stick-clusters hal37` value, the `--encoder hal_flat` alias, `hal_*` config
+  fields (migrated in `ModelConfig.__post_init__`), and legacy data dirs `data/fox_hal_*` (frozen,
+  leaked alignment) keep their names. Research notes mention `--hal-mode`, `hal_norm.json`, the
+  "HAL preset": frozen snapshots, don't sweep them.
 
 ## Environment
 

@@ -40,7 +40,7 @@ pip install $PYDEPS --quiet 2>/dev/null \
 # ── 2. Dolphin emulator (online netplay build) ─────────────────────────────
 # Always the CURRENT Slippi Ishiiruka release: Slippi gates Online behind a
 # server-side minimum version, so a pinned/vendored build goes stale and gets
-# hard-rejected with "required update available" (CLAUDE.md pitfall #20).
+# hard-rejected with "required update available" (CLAUDE.md pitfall #19).
 # Do NOT switch this to mainline — mainline crashes under libmelee's EXI
 # protocol (beta.19) or is itself gate-rejected (beta.17).
 EMULATOR_URL="https://github.com/project-slippi/Ishiiruka/releases/latest/download/Slippi_Online-x86_64.AppImage"
