@@ -147,3 +147,29 @@ damage, sign negative after controlling for it), so no rework and no labels need
 is kept alongside stock_delta: no double counting (a kill pays only through stock_delta; respawn
 drops are ignored), and it's the dense shaping term that made the sparse stock reward learnable
 (stock alone: parity; stock + damage: the one replicated win).
+
+## RL on the small Fox (S, 5.4M; evening)
+
+Learner = frozen reference = h2h opponent: the 5-minute proxy `fp-F5-base-s1-postclean`
+(`checkpoints/smallfox/base`). Default dense recipe (lr 1e-5, KL 0.03, global anchor 0.01,
+critic), 30 updates of 4,096 sampled decisions, 192-game screen vs the frozen base; a significant
+screen gets two 480-game confirmations on new seeds. All runs: `checkpoints/smallfox/`.
+
+| Run | Rewards / change | Screen (192) | p | Confirmation |
+|---|---|---|---|---|
+| S1 | stock 1 + damage 0.25 | 107–85 (55.7%) | 0.13 | |
+| **S2** | **stock 1 + damage 1** | **122–70 (63.5%)** | **< 0.001** | **289–190 (+1 draw), 293–187: 61.2% over 1,152** |
+| S3 | S1 + low_percent_kill 1 | 108–84 (56.2%) | 0.097 | |
+| S4 | S1 + recovery 1 | 101–90 (52.9%) | 0.47 | |
+| S5 | stock + damage + recovery + low_percent_kill, all 1, `--normalize` | 99–93 (51.6%) | 0.72 | |
+| S6 | S1, lr 2e-5, KL 0.01 | 98–94 (51.0%) | 0.83 | |
+| S7 | S1 + l_cancel_miss 0.05 | 91–101 (47.4%) | 0.52 | |
+
+- Damage weight is the lever: 0.25 → 1 turned a non-significant 55.7% into a replicated 61%.
+  On the 20M model the winner was damage 0.25 (56.3%); damage 1 wasn't tried there.
+- Adding a skill reward on top of stock + damage 0.25 didn't help, and the targeted skill didn't
+  improve: recovery penalties per minute went 0.05 → 0.19 (S4), L-cancel misses 1.68 → 1.93 (S7),
+  low-percent kills 0.105 → 0.053 (S3). With 30 updates the policy follows the dominant terms.
+- Normalizing (S5) put each reward at equal scale, which diluted damage; damage per minute fell.
+- The looser leash (S6) drifted (KL 0.036 vs 0.006–0.010) with no gain, as on the 20M model.
+- Single training seed per recipe; S2 not watched, not tested in Dolphin, not promoted.
