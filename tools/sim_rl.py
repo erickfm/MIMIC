@@ -104,7 +104,7 @@ def main():
 
     import torch
     from inference_utils import load_mimic_model
-    from rlvr.sim.ppo import OnlinePPOConfig, _logprob_at_indices, collate, head_logits, ppo_update
+    from rlvr.sim.ppo import OnlinePPOConfig, _logprob_at_indices, collate, head_logits, last_features, ppo_update
     from rlvr.sim.trajectory import FrameRecord
     from rlvr.sim.lcancel import LCancelTracker
     from rlvr.sim.vec_env import VecSim
@@ -350,8 +350,8 @@ def main():
                     chunk = frames[i:i + pcfg.minibatch_frames]
                     batch, last = collate([fr.obs for fr in chunk])
                     with torch.autocast("cuda", dtype=torch.bfloat16):
-                        f = ref.features(batch)
-                    feats.append(f[torch.arange(len(chunk), device="cuda"), last].float())
+                        f = last_features(ref, batch, last)
+                    feats.append(f.float())
                 feats = torch.cat(feats)
                 G = torch.tensor(Gm / vr_scale, dtype=torch.float32, device="cuda")   # (N, n_vr) scaled
                 W = torch.tensor(vr_w, dtype=torch.float32, device="cuda")

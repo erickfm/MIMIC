@@ -18,6 +18,7 @@ memory.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Dict, List
 
 import torch
@@ -61,14 +62,69 @@ def collate(obs_list, device="cuda"):
     return batch, torch.tensor(lens, device=device) - 1
 
 
+def last_features(model, batch, last):
+    """Final-norm features at each row's decision position: (B, d), for a collate() batch.
+    Full-causal models: the plain forward. Sliding-window models compute only what the decision
+    depends on: one query in the top layer, W - 1 more positions in each layer below (exact; over a
+    1,075-frame stream context the full forward computes ~2.4x the positions and ~3x the attention
+    scores). Each row is first right-aligned (its decision at the last position, the frames before
+    its episode start filled with copies of its first frame and masked as keys)."""
+    raw = getattr(model, "_orig_mod", model)
+    B = last.shape[0]
+    W = getattr(raw.cfg, "attn_window", 0) or 0
+    if not W:
+        h = raw.features(batch)
+        return h[torch.arange(B, device=h.device), last]
+    T = next(iter(batch.values())).shape[1]
+    pad = T - 1 - last                                     # row i's padding: positions < pad[i]
+    src = (torch.arange(T, device=last.device)[None] - pad[:, None]).clamp_(min=0)   # (B, T)
+
+    def align(x):
+        return x.gather(1, src.view(B, T, *[1] * (x.dim() - 2)).expand(B, T, *x.shape[2:]))
+    x = raw.encoder({k: align(v) for k, v in batch.items()})
+    keep = [1]   # trailing positions needed out of each layer, top down; keep[0]: the encoder's
+    for _ in raw.blocks:
+        keep.append(min(T, keep[-1] + W - 1))
+    keep = keep[::-1]
+    x = x[:, T - keep[0]:]
+    for blk, n_q in zip(raw.blocks, keep[1:]):
+        x = _block_tail(blk, x, n_q, T, pad, W)
+    return raw.final_norm(x[:, -1])
+
+
+def _block_tail(blk, x, n_q, T, pad, W):
+    """MimicTransformerBlock.forward (sliding-window, fp32 attention path) at only the last n_q of
+    x's positions; x holds absolute positions T - x.shape[1] .. T - 1, padding below pad[row]."""
+    a = blk.self_attn
+    B, Lk, D = x.shape
+    q, k, v = a.c_attn(blk.ln_1(x)).split(D, dim=2)
+    q = q[:, Lk - n_q:].reshape(B, n_q, a.n_head, a.hs).transpose(1, 2)
+    k = k.reshape(B, Lk, a.n_head, a.hs).transpose(1, 2)
+    v = v.reshape(B, Lk, a.n_head, a.hs).transpose(1, 2)
+    with torch.autocast("cuda", enabled=False):
+        q, k = q.float(), k.float()
+        QEr = q @ a.Er.flip(0)[:W].float().transpose(0, 1)               # (B, H, n_q, W)
+        kp = torch.arange(Lk, device=x.device)
+        d = (kp[Lk - n_q:, None] - kp[None, :])                           # query - key distance
+        Srel = QEr.gather(-1, d.clamp(0, W - 1).expand(B, a.n_head, n_q, Lk))
+        att = (q @ k.transpose(-2, -1) + Srel) * (1.0 / math.sqrt(k.size(-1)))
+        ok = ((d >= 0) & (d < W))[None] & ((kp + T - Lk)[None, None] >= pad[:, None, None])
+        ok = ok | (d == 0)[None]   # a padding query sees itself (finite); no real query sees it
+        att = F.softmax(att.masked_fill(~ok[:, None], float("-inf")), dim=-1)
+    y = (a.attn_dropout(att) @ v).transpose(1, 2).contiguous().view(B, n_q, D)
+    x = x[:, Lk - n_q:] + a.resid_dropout(a.c_proj(y))
+    if blk._use_swiglu:
+        return x + blk.mlp(blk.ln_2(x))
+    return x + blk.dropout(blk.mlp.c_proj(F.gelu(blk.mlp.c_fc(blk.ln_2(x)))))
+
+
 def head_logits(model, batch, last, sampled_indices=None):
     """Head logits at each decision's position: {head: (B, V)}. For --cond-heads models the
     sampled (shoulder, c, main) classes are teacher-forced through the chain, so the logits are
     the ones the action was sampled from and the summed log-prob is its exact joint log-prob.
     sampled_indices: (B, 4) in PPO order (main, shoulder, c, button)."""
     raw = getattr(model, "_orig_mod", model)
-    h = raw.features(batch)
-    h = h[torch.arange(h.shape[0], device=h.device), last].unsqueeze(1)   # (B, 1, d)
+    h = last_features(raw, batch, last).unsqueeze(1)                       # (B, 1, d)
     if getattr(raw.heads, "cond", False):
         if sampled_indices is None:
             raise ValueError("cond-heads logits need the sampled classes to condition on")

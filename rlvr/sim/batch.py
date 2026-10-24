@@ -246,12 +246,11 @@ class BatchedPolicy:
             torch.cuda.current_stream().synchronize()
             return [{k: got[k][i] for k in got} for i in range(len(slots))]
         lens = self.hist_len[s].tolist()
-        g = int(self.hist_g)
-        out = []
-        for i, L in enumerate(lens):
-            idx = (torch.arange(g - L, g, device=self.device) % self.R)
-            out.append({k: v[s[i], idx].cpu() for k, v in self.hist.items()})
-        return out
+        g, Lm = int(self.hist_g), max(lens)
+        idx = (torch.arange(g - Lm, g, device=self.device) % self.R)[None]   # one gather for all slots
+        got = {k: v[s[:, None], idx].to("cpu", non_blocking=True) for k, v in self.hist.items()}
+        torch.cuda.current_stream().synchronize()
+        return [{k: got[k][i, Lm - L:] for k in got} for i, L in enumerate(lens)]
 
 
 def _gumbel_sample(logits, inv_temp, greedy):
