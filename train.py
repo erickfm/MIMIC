@@ -960,8 +960,12 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 torch.cuda.empty_cache()
                 _oom_retries += 1
                 if _oom_retries <= 3:
+                    # Halve the per-step batch and double the accumulation, so the effective batch
+                    # (and max_steps, computed from it) stays what was asked for.
                     BATCH_SIZE = max(BATCH_SIZE // 2, 1)
-                    _log(f"  [OOM] Halving batch size to {BATCH_SIZE}, retry #{_oom_retries}")
+                    grad_accum_steps *= 2
+                    _log(f"  [OOM] Halving batch size to {BATCH_SIZE} and doubling grad accumulation to "
+                         f"{grad_accum_steps} (effective batch unchanged), retry #{_oom_retries}")
                     dl = get_dataloader(ds, shuffle=True)
                     loader = infinite_loader(dl)
                     skip_step = True
