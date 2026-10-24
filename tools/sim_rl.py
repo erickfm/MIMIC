@@ -40,19 +40,20 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--envs", type=int, default=64)
     ap.add_argument("--workers", type=int, default=16)
-    ap.add_argument("--updates", type=int, default=60)
+    ap.add_argument("--updates", type=int, default=None, help="default: 30 dense, 60 L-cancel")
     ap.add_argument("--episodes-per-update", type=int, default=192,
                     help="minimum scored episodes per update")
     ap.add_argument("--misses-per-update", type=int, default=0,
                     help="also keep collecting until the batch holds this many misses (batch grows "
                          "~1/miss-rate as success saturates: the tuned recipe's batch scaling)")
     ap.add_argument("--max-episodes-per-update", type=int, default=2000)
-    ap.add_argument("--global-kl-beta", type=float, default=0.0,
+    ap.add_argument("--global-kl-beta", type=float, default=None,
                     help="anchor the policy to BC on a random sample of ALL its frames (exact KL over "
-                         "the 4 heads), not just the L-cancel episode frames PPO's KL term sees")
+                         "the 4 heads), not just the L-cancel episode frames PPO's KL term sees "
+                         "(default: 0.01 dense, 0 L-cancel)")
     ap.add_argument("--anchor-frames", type=int, default=512, help="anchor sample size per update")
-    ap.add_argument("--lr", type=float, default=3e-5)
-    ap.add_argument("--kl-beta", type=float, default=0.003)
+    ap.add_argument("--lr", type=float, default=None, help="default: 1e-5 dense, 3e-5 L-cancel")
+    ap.add_argument("--kl-beta", type=float, default=None, help="default: 0.03 dense, 0.003 L-cancel")
     ap.add_argument("--ppo-epochs", type=int, default=4)
     ap.add_argument("--checkpoint-every", type=int, default=5)
     ap.add_argument("--rng", default="online", choices=["online", "offline"])
@@ -66,9 +67,10 @@ def main():
                     help="dense mode: store each learner decision with probability 1/N")
     ap.add_argument("--frames-per-update", type=int, default=4096,
                     help="dense mode: sampled decisions (with finished returns) per update")
-    ap.add_argument("--critic", action="store_true",
-                    help="dense mode: learned value baseline V(s) on the frozen BC's features; advantage "
-                         "= return - V, z-scored. V is fit after use (lagged), on the last 3 updates")
+    ap.add_argument("--critic", action=argparse.BooleanOptionalAction, default=None,
+                    help="dense mode (on by default there): learned value baseline V(s) on the frozen "
+                         "BC's features; advantage = return - V, z-scored. V is fit after use (lagged), "
+                         "on the last 3 updates")
     ap.add_argument("--guards", default=None,
                     help="dense mode: 'id[:margin],...' VRs kept at least at BC's level (+margin, relative) "
                          "in the same rollout games, by adaptive (Lagrangian) weights")
@@ -80,6 +82,14 @@ def main():
     ap.add_argument("--critic-lr", type=float, default=1e-3)
     ap.add_argument("--critic-epochs", type=int, default=20)
     a = ap.parse_args()
+    # Dense defaults = the recipe that beat frozen BC (stock 1 + damage 0.25: 56.3% over 1,152 games,
+    # docs/research-notes-2026-10-23.md); the old ones (lr 3e-5, KL 0.003, no anchor, no critic)
+    # drifted every outcome VR into a worse player within 30 updates. L-cancel keeps the July recipe.
+    dense_defaults = a.vr is not None
+    for k, dense_v, lc_v in (("updates", 30, 60), ("lr", 1e-5, 3e-5), ("kl_beta", 0.03, 0.003),
+                             ("global_kl_beta", 0.01, 0.0), ("critic", True, False)):
+        if getattr(a, k) is None:
+            setattr(a, k, dense_v if dense_defaults else lc_v)
 
     import torch
     from inference_utils import load_mimic_model
