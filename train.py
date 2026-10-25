@@ -372,7 +372,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None, c
               n_stick_clusters=None,
               n_heads_override=None,
               hal_controller_encoding=False, n_controller_combos=5,
-              use_input_gate=False, cond_heads=False, relpos_impl="fp32", attn_window=0):
+              use_input_gate=False, cond_heads=False, relpos_impl="fp32", attn_window=0,
+              arch=None):
     overrides = MODEL_PRESETS.get(model_preset, {}) if model_preset else {}
     if num_layers_override:
         overrides["num_layers"] = num_layers_override
@@ -398,6 +399,7 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None, c
         overrides["relpos_impl"] = relpos_impl
     if attn_window:
         overrides["attn_window"] = attn_window
+    overrides.update(arch or {})
     seq_len = overrides.pop("max_seq_len", SEQUENCE_LENGTH)
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
@@ -430,15 +432,37 @@ def _auto_run_name(preset: str, lr: float, seq_len: int, extra: dict = None) -> 
     return "-".join(parts)
 
 
-_ARCH_FLAGS = {"cond_heads": "--cond-heads / --no-cond-heads", "attn_window": "--attn-window N"}
+_ARCH_FLAGS = {"cond_heads": "--cond-heads / --no-cond-heads", "attn_window": "--attn-window N",
+               **{k: f"--arch {k}=..." for k in ("qk_norm", "attn_gate", "mlp_act", "zero_init_proj",
+                                                 "logit_softcap", "value_residual", "unet_skips",
+                                                 "canon", "use_rmsnorm", "use_swiglu")}}
+_ARCH_DEFAULTS = {"mlp_act": "gelu"}
+
+
+def parse_arch(spec):
+    """--arch "qk_norm=1,mlp_act=relu2,d_model=192" -> ModelConfig overrides (typed by the field)."""
+    out = {}
+    if not spec:
+        return out
+    fields = {f.name: f.type for f in dataclasses.fields(ModelConfig)}
+    for item in spec.split(","):
+        k, v = item.split("=")
+        k = k.strip()
+        if k not in fields:
+            raise ValueError(f"--arch: {k!r} is not a ModelConfig field")
+        t = str(fields[k])
+        out[k] = (v.lower() in ("1", "true", "yes")) if "bool" in t else int(v) if "int" in t \
+            else float(v) if "float" in t else v
+    return out
 
 
 def _arch_mismatch(ck_cfg, cfg):
     """Architecture fields that differ between a checkpoint's config and this run's (same parameter
     shapes, so load_state_dict alone wouldn't notice). None/False/0 all mean off."""
     ck_cfg = ck_cfg or {}
-    return [(k, ck_cfg.get(k) or 0, getattr(cfg, k, 0) or 0) for k in _ARCH_FLAGS
-            if (ck_cfg.get(k) or 0) != (getattr(cfg, k, 0) or 0)]
+    norm = lambda k, v: 0 if v in (None, False, 0, _ARCH_DEFAULTS.get(k)) else v
+    return [(k, norm(k, ck_cfg.get(k)), norm(k, getattr(cfg, k, 0))) for k in _ARCH_FLAGS
+            if norm(k, ck_cfg.get(k)) != norm(k, getattr(cfg, k, 0))]
 
 
 def _arch_error(path, diffs, what):
@@ -487,6 +511,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           optimizer: str = "muon",
           muon_lr: float = 0.02,
           whole_games_from: float = None,
+          arch: dict = None,
           save_steps: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
@@ -638,7 +663,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                            n_controller_combos=_n_combos,
                            use_input_gate=(input_gate_l1 > 0),
                            cond_heads=cond_heads, relpos_impl=relpos_impl,
-                           attn_window=attn_window)
+                           attn_window=attn_window, arch=arch)
     n_params = sum(p.numel() for p in model.parameters())
     _log(f"  Model: {n_params:,} params on {DEVICE}  (AMP={AMP_DTYPE}, LR={actual_lr})")
     _log(f"  Intervals: log={log_interval}  val={val_interval}  "
@@ -1322,6 +1347,10 @@ if __name__ == "__main__":
     parser.add_argument("--attn-window", type=int, default=0,
                         help="Sliding-window relpos attention: each layer sees only the last N frames "
                              "(0 = full causal). Pair with a longer --seq-len; stream with mimic/kv_cache.py.")
+    parser.add_argument("--arch", type=str, default=None,
+                        help="ModelConfig overrides, e.g. 'qk_norm=1,attn_gate=1,mlp_act=relu2' or "
+                             "'d_model=192,nhead=3,dim_feedforward=768,num_layers=11' (architecture "
+                             "variants; see ModelConfig)")
     parser.add_argument("--distill-from", type=str, default=None,
                         help="Checkpoint of a frozen teacher; adds alpha * KL(teacher || student) per head.")
     parser.add_argument("--distill-alpha", type=float, default=1.0)
@@ -1477,4 +1506,5 @@ if __name__ == "__main__":
         optimizer=args.optimizer,
         muon_lr=args.muon_lr,
         whole_games_from=args.whole_games_from,
+        arch=parse_arch(args.arch),
     )

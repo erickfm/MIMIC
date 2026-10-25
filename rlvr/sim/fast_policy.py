@@ -37,6 +37,8 @@ def forward_last(model, frames):
     if getattr(model.cfg, "attn_window", 0) > 0:
         raise NotImplementedError("forward_last supports full-causal models only; stream "
                                   "sliding-window models with mimic/kv_cache.RelPosKVCache")
+    if not getattr(model, "plain_blocks", True):   # architecture variants: the plain forward
+        return {k: v[:, -1:] for k, v in model(frames).items()}
     x = model.encoder(frames)
     for blk in model.blocks[:-1]:
         x = blk(x)

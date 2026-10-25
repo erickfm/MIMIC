@@ -76,6 +76,16 @@ class ModelConfig:
     # Sliding-window relpos attention (--attn-window): >0 limits every layer to the last N frames,
     # so training can use long chunks and inference can stream with a KV cache (mimic/kv_cache.py).
     attn_window: int                = 0
+    # LLM-architecture variants (2026-10-25 proxy sweep; all off = the original block). Set from
+    # train.py --arch key=value. Full-causal models only.
+    qk_norm: bool                   = False   # RMSNorm on q and k per head (OLMo 2 / Gemma 3)
+    attn_gate: bool                 = False   # sigmoid gate on the attention output (Qwen gated attention)
+    mlp_act: str                    = "gelu"  # "relu2": ReLU squared (modded-nanogpt)
+    zero_init_proj: bool            = False   # zero-init the attention / MLP output projections
+    logit_softcap: float            = 0.0     # >0: head logits -> c * tanh(logits / c) (Gemma 2)
+    value_residual: bool            = False   # mix every layer's values with layer 0's (ResFormer)
+    unet_skips: bool                = False   # first-half block outputs added to the mirrored second half
+    canon: bool                     = False   # causal depthwise conv (k=4) before attention and MLP
     n_controller_combos: int        = 5       # number of button combo classes (from controller_combos.json)
 
     # Legacy hal_* fields — kept for checkpoint backwards compatibility.
@@ -144,7 +154,8 @@ class CausalSelfAttentionRelPos(nn.Module):
 
     def __init__(self, n_embd: int = 512, n_head: int = 8,
                  block_size: int = 1024, dropout: float = 0.2, impl: str = "fp32",
-                 window: int = 0):
+                 window: int = 0, qk_norm: bool = False, gate: bool = False,
+                 value_residual: bool = False):
         super().__init__()
         assert impl in ("fp32", "sdpa", "flex"), impl
         assert 0 <= window <= block_size, f"attn_window {window} exceeds the relpos table ({block_size})"
@@ -156,6 +167,10 @@ class CausalSelfAttentionRelPos(nn.Module):
         self.c_attn = nn.Linear(n_embd, 3 * n_embd)
         self.c_proj = nn.Linear(n_embd, n_embd)
         self.Er = nn.Parameter(torch.randn(block_size, self.hs))
+        self.q_norm = RMSNorm(self.hs) if qk_norm else None
+        self.k_norm = RMSNorm(self.hs) if qk_norm else None
+        self.c_gate = nn.Linear(n_embd, n_embd) if gate else None
+        self.v_mix = nn.Parameter(torch.tensor([0.5, 0.5])) if value_residual else None
         self.attn_dropout = nn.Dropout(dropout)
         self.resid_dropout = nn.Dropout(dropout)
         self.register_buffer("bias",
@@ -173,22 +188,34 @@ class CausalSelfAttentionRelPos(nn.Module):
             return ((dd >= 0) & (dd < self.window)).float()[None, None]
         return (self.band if self.window > 0 else self.bias)[:, :, :L, :L]
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, v0: Optional[torch.Tensor] = None):
+        """x: (B, L, D). With value_residual, v0 is layer 0's values (None in layer 0) and the call
+        returns (out, values) so the caller can pass layer 0's on; otherwise it returns out."""
         B, L, D = x.size()
         q, k, v = self.c_attn(x).split(D, dim=2)
         k = k.view(B, L, self.n_head, self.hs).transpose(1, 2)
         q = q.view(B, L, self.n_head, self.hs).transpose(1, 2)
         v = v.view(B, L, self.n_head, self.hs).transpose(1, 2)
+        if self.q_norm is not None:
+            q, k = self.q_norm(q), self.k_norm(k)
+        if self.v_mix is not None and v0 is not None:
+            v = self.v_mix[0] * v + self.v_mix[1] * v0
+        v_out = v
         if self.training and self.impl != "fp32" and (
                 self.impl != "flex" or torch.compiler.is_compiling()):
             y = self._fast_attention(q, k, v, L)
-            y = y.transpose(1, 2).contiguous().view(B, L, D)
-            return self.resid_dropout(self.c_proj(y))
-
-        if self.window > 0 and L >= 2 * self.window:   # banded: O(L * W), not O(L^2)
+        elif self.window > 0 and L >= 2 * self.window:   # banded: O(L * W), not O(L^2)
             y = self._banded(q, k, v, L)
-            y = y.transpose(1, 2).contiguous().view(B, L, D)
-            return self.resid_dropout(self.c_proj(y))
+        else:
+            y = self._dense(q, k, v, L)
+        y = y.transpose(1, 2).contiguous().view(B, L, D)
+        if self.c_gate is not None:
+            y = y * torch.sigmoid(self.c_gate(x))
+        out = self.resid_dropout(self.c_proj(y))
+        return (out, v_out) if self.v_mix is not None else out
+
+    def _dense(self, q, k, v, L):
+        B = q.size(0)
 
         # Attention math in FP32 to avoid BF16 overflow on Q@K^T + Srel
         with torch.autocast("cuda", enabled=False):
@@ -212,9 +239,7 @@ class CausalSelfAttentionRelPos(nn.Module):
             att = Fn.softmax(att, dim=-1)
 
         att = self.attn_dropout(att)
-        y = att @ v
-        y = y.transpose(1, 2).contiguous().view(B, L, D)
-        return self.resid_dropout(self.c_proj(y))
+        return att @ v
 
     def _banded(self, q, k, v, L):
         """The fp32 window path above, computed per block of W queries against the W - 1 keys
@@ -302,8 +327,14 @@ class MimicTransformerBlock(nn.Module):
             n_embd=cfg.d_model, n_head=cfg.nhead,
             block_size=1024, dropout=cfg.dropout,
             impl=getattr(cfg, "relpos_impl", "fp32"),
-            window=getattr(cfg, "attn_window", 0))
+            window=getattr(cfg, "attn_window", 0),
+            qk_norm=getattr(cfg, "qk_norm", False), gate=getattr(cfg, "attn_gate", False),
+            value_residual=getattr(cfg, "value_residual", False))
         self.ln_2 = Norm(cfg.d_model)
+        self._relu2 = getattr(cfg, "mlp_act", "gelu") == "relu2"
+        canon = getattr(cfg, "canon", False)
+        self.canon_a = CausalConv(cfg.d_model) if canon else None
+        self.canon_c = CausalConv(cfg.d_model) if canon else None
         if use_swiglu:
             self.mlp = SwiGLU(cfg.d_model, cfg.dim_feedforward, cfg.dropout)
         else:
@@ -314,16 +345,27 @@ class MimicTransformerBlock(nn.Module):
         self._use_swiglu = use_swiglu
         self.dropout = nn.Dropout(cfg.dropout)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.self_attn(self.ln_1(x))
+    def forward(self, x: torch.Tensor, v0: Optional[torch.Tensor] = None):
+        """Returns x, or (x, values) for value_residual models (see CausalSelfAttentionRelPos)."""
+        h = self.ln_1(x)
+        if self.canon_a is not None:
+            h = self.canon_a(h)
+        a = self.self_attn(h, v0)
+        v = None
+        if isinstance(a, tuple):
+            a, v = a
+        x = x + a
+        h = self.ln_2(x)
+        if self.canon_c is not None:
+            h = self.canon_c(h)
         if self._use_swiglu:
-            x = x + self.mlp(self.ln_2(x))
+            x = x + self.mlp(h)
         else:
-            h = self.mlp.c_fc(self.ln_2(x))
-            h = Fn.gelu(h)
+            h = self.mlp.c_fc(h)
+            h = Fn.relu(h).square() if self._relu2 else Fn.gelu(h)
             h = self.dropout(self.mlp.c_proj(h))
             x = x + h
-        return x
+        return x if v is None else (x, v)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -358,6 +400,20 @@ class SwiGLU(nn.Module):
         return self.dropout(self.w_down(Fn.silu(self.w_gate(x)) * self.w_up(x)))
 
 
+class CausalConv(nn.Module):
+    """Canon layer (Physics of Language Models 4.1): x + depthwise causal conv over the last k
+    positions. Zero-init, so it starts as the identity."""
+    def __init__(self, d: int, k: int = 4):
+        super().__init__()
+        self.k = k
+        self.conv = nn.Conv1d(d, d, k, groups=d, bias=False)
+        nn.init.zeros_(self.conv.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:          # (B, T, d)
+        h = Fn.pad(x.transpose(1, 2), (self.k - 1, 0))
+        return x + self.conv(h).transpose(1, 2)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Output heads
 # ─────────────────────────────────────────────────────────────────────────────
@@ -369,6 +425,16 @@ def _cond_sample(logits: torch.Tensor, temperature: float) -> torch.Tensor:
         return lg.argmax(dim=-1)
     u = torch.rand_like(lg).clamp_(1e-20, 1.0)
     return (lg / temperature - torch.log(-torch.log(u))).argmax(dim=-1)
+
+
+class SoftCap(nn.Module):
+    """c * tanh(x / c): bounds logits to (-c, c) (Gemma 2 / modded-nanogpt)."""
+    def __init__(self, c: float):
+        super().__init__()
+        self.c = c
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.c * torch.tanh(x / self.c)
 
 
 class MimicPredictionHeads(nn.Module):
@@ -387,9 +453,10 @@ class MimicPredictionHeads(nn.Module):
 
     def __init__(self, d_model: int, n_stick_clusters: int = 63,
                  n_shoulder_bins: int = 3, n_cdir: int = 5,
-                 n_btn_classes: int = 5, cond: bool = False):
+                 n_btn_classes: int = 5, cond: bool = False, softcap: float = 0.0):
         super().__init__()
         self.cond = cond
+        self.softcap = softcap
         # Inference sampling temperature for cond heads (they sample inside forward).
         self.sample_temperature = 1.0
         self.n_stick_clusters = n_stick_clusters
@@ -398,9 +465,10 @@ class MimicPredictionHeads(nn.Module):
 
         def _head(in_dim: int, out_dim: int):
             h = in_dim // 2
-            return nn.Sequential(
-                nn.LayerNorm(in_dim), nn.Linear(in_dim, h), nn.GELU(), nn.Linear(h, out_dim),
-            )
+            layers = [nn.LayerNorm(in_dim), nn.Linear(in_dim, h), nn.GELU(), nn.Linear(h, out_dim)]
+            if softcap > 0:
+                layers.append(SoftCap(softcap))
+            return nn.Sequential(*layers)
 
         shldr_out = n_shoulder_bins
         cdir_out = n_cdir
@@ -438,8 +506,8 @@ class MimicPredictionHeads(nn.Module):
         <= 0) and its one-hot fed to the next; the samples are returned as "cond_sample"
         (B, T, 4) in (main, c, shoulder, button) order."""
         oh = lambda idx, n: Fn.one_hot(idx.long(), n).to(h.dtype)
-        n_s, n_c = self.shoulder_head[-1].out_features, self.cdir_head[-1].out_features
-        n_m = self.main_head[-1].out_features
+        n_s, n_c, n_m = (self.shoulder_head[3].out_features, self.cdir_head[3].out_features,
+                         self.main_head[3].out_features)
         sampling = cond_classes is None
         shoulder = self.shoulder_head(h)
         s_idx = _cond_sample(shoulder, self.sample_temperature) if sampling else cond_classes[0]
@@ -504,16 +572,34 @@ class FramePredictor(nn.Module):
             n_cdir=cfg.num_c_dirs,
             n_btn_classes=cfg.n_controller_combos if cfg.mimic_controller_encoding else 5,
             cond=getattr(cfg, "cond_heads", False),
+            softcap=getattr(cfg, "logit_softcap", 0.0),
         )
+        variants = [k for k in ("qk_norm", "attn_gate", "zero_init_proj", "value_residual",
+                                "unet_skips", "canon") if getattr(cfg, k, False)]
+        if getattr(cfg, "mlp_act", "gelu") != "gelu":
+            variants.append("mlp_act")
+        if getattr(cfg, "logit_softcap", 0.0):
+            variants.append("logit_softcap")
+        self.tokens_per_frame = getattr(self.encoder, "tokens_per_frame", 1)
+        if self.tokens_per_frame > 1:
+            variants.append(cfg.encoder_type)
+        if variants and getattr(cfg, "attn_window", 0):
+            raise ValueError(f"{variants} are implemented for full-causal models only (the streaming "
+                             "KV cache and the stream RL update re-implement the plain block)")
+        # fast_policy.forward_last / kv_cache re-implement the plain block; anything else uses forward
+        self.plain_blocks = not variants or variants == ["zero_init_proj"]
+        self.unet_w = (nn.Parameter(torch.ones(cfg.num_layers // 2))
+                       if getattr(cfg, "unet_skips", False) else None)
 
         self.apply(self._init_weights)
         residual_std = 0.02 / math.sqrt(2 * max(cfg.num_layers, 1))
+        std = 0.0 if getattr(cfg, "zero_init_proj", False) else residual_std
         for blk in self.blocks:
-            nn.init.normal_(blk.self_attn.c_proj.weight, std=residual_std)
+            nn.init.normal_(blk.self_attn.c_proj.weight, std=std)
             if isinstance(blk.mlp, SwiGLU):
-                nn.init.normal_(blk.mlp.w_down.weight, std=residual_std)
+                nn.init.normal_(blk.mlp.w_down.weight, std=std)
             else:
-                nn.init.normal_(blk.mlp.c_proj.weight, std=residual_std)
+                nn.init.normal_(blk.mlp.c_proj.weight, std=std)
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -527,9 +613,22 @@ class FramePredictor(nn.Module):
     def features(self, frames: Dict[str, torch.Tensor]) -> torch.Tensor:
         """Encoder + backbone + final norm: the (B, T, d_model) input to the heads."""
         x = self.encoder(frames)                         # (B, T, d_model)
-        for blk in self.blocks:
-            x = blk(x)
-        return self.final_norm(x)
+        n, v0, skips = len(self.blocks), None, []
+        for i, blk in enumerate(self.blocks):
+            if self.unet_w is not None and i >= n - len(self.unet_w):   # mirrored first-half output
+                x = x + self.unet_w[n - 1 - i] * skips[n - 1 - i]
+            out = blk(x, v0)
+            if isinstance(out, tuple):
+                x, v = out
+                v0 = v if v0 is None else v0
+            else:
+                x = out
+            if self.unet_w is not None and i < len(self.unet_w):
+                skips.append(x)
+        x = self.final_norm(x)
+        if self.tokens_per_frame > 1:   # the heads read each frame's last token (self)
+            x = x[:, self.tokens_per_frame - 1::self.tokens_per_frame]
+        return x
 
     def forward(self, frames: Dict[str, torch.Tensor],
                 btn_targets: Optional[torch.Tensor] = None,

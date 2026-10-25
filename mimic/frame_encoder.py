@@ -207,12 +207,49 @@ class MimicFlatEncoder(nn.Module):
         return names
 
 
+class MimicEntityEncoder(MimicFlatEncoder):
+    """Two tokens per frame, opponent then self (2026-10-25 architecture sweep): each player's
+    [stage, character, action, 18 gamestate cols] (+ the controller one-hot for self) through its
+    own Linear. Returns (B, 2T, d_model) interleaved opp_0, self_0, opp_1, self_1, ...; the
+    backbone attends across both players and frames, and the heads read the self tokens."""
+
+    tokens_per_frame = 2
+
+    def __init__(self, *, d_model: int = 512, **kw):
+        super().__init__(d_model=d_model, **kw)
+        if self._use_input_gate:
+            raise ValueError("the input gate is implemented for mimic_flat only")
+        player = self.STAGE_EMB_DIM + self.CHAR_EMB_DIM + self.ACTION_EMB_DIM + 18
+        ctrl = self._input_dim - (self.STAGE_EMB_DIM + 2 * self.CHAR_EMB_DIM
+                                  + 2 * self.ACTION_EMB_DIM + 36)
+        del self.proj
+        self.proj_opp = nn.Linear(player, d_model)
+        self.proj_self = nn.Linear(player + ctrl, d_model)
+
+    def forward(self, seq: Dict[str, torch.Tensor]) -> torch.Tensor:
+        stage_idx = seq["stage"]
+        if self.stage_emb.num_embeddings == 6:
+            stage_idx = (stage_idx - 1).clamp(min=0)
+        stage = self.stage_emb(stage_idx)
+        self_num = torch.cat([seq["self_numeric"], seq["self_flags"].float() * 2.0 - 1.0], dim=-1)
+        opp_num = torch.cat([seq["opp_numeric"], seq["opp_flags"].float() * 2.0 - 1.0], dim=-1)
+        me = [stage, self.char_emb(seq["self_character"]), self.action_emb(seq["self_action"]), self_num]
+        if self._ctrl_enc and not self._no_self_inputs and "self_controller" in seq:
+            me.append(seq["self_controller"])
+        opp = self.proj_opp(torch.cat([stage, self.char_emb(seq["opp_character"]),
+                                       self.action_emb(seq["opp_action"]), opp_num], dim=-1))
+        me = self.proj_self(torch.cat(me, dim=-1))
+        B, T, D = me.shape
+        return self.drop(torch.stack([opp, me], dim=2).reshape(B, 2 * T, D))
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
 
 ENCODER_REGISTRY = {
     "mimic_flat": MimicFlatEncoder,
+    "mimic_entity": MimicEntityEncoder,
     "hal_flat": MimicFlatEncoder,   # pre-rename name, still in older checkpoints' configs
 }
 
