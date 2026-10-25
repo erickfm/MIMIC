@@ -201,22 +201,30 @@ def compute_loss(preds, targets, shoulder_centers=None, n_cdir=5, lite=False):
 
     n_main = main_pred.size(-1)
     n_shldr = shldr_pred.size(-1)
+    # whole-game batches are padded: average only over real frames
+    mask = targets.get("loss_mask")
+    if mask is not None:
+        mask = mask.reshape(-1).float()
+        def _ce(logits, tgt):
+            return (F.cross_entropy(logits, tgt, reduction="none") * mask).sum() / mask.sum().clamp_min(1.0)
+    else:
+        _ce = F.cross_entropy
 
     # Main stick
-    loss_main = F.cross_entropy(main_pred.reshape(-1, n_main), main_tgt.reshape(-1))
+    loss_main = _ce(main_pred.reshape(-1, n_main), main_tgt.reshape(-1))
 
     # Combined shoulder: max(L,R) → 3-class
     if shoulder_centers is not None:
         shldr_tgt = _combine_shoulder_targets(l_bin_tgt.reshape(-1), r_bin_tgt.reshape(-1), shoulder_centers)
     else:
         shldr_tgt = l_bin_tgt.reshape(-1)  # fallback
-    loss_shldr = F.cross_entropy(shldr_pred.reshape(-1, n_shldr), shldr_tgt)
+    loss_shldr = _ce(shldr_pred.reshape(-1, n_shldr), shldr_tgt)
 
     # C-dir: if targets are already 9-class (from new shards), use directly; else remap 5→9
     cdir_classes = cdir_tgt.argmax(dim=-1)
     if n_cdir == 9 and cdir_tgt.size(-1) == 5:
         cdir_classes = _CDIR_5_TO_9.to(cdir_classes.device)[cdir_classes]
-    loss_cdir = F.cross_entropy(c_logits.reshape(-1, c_logits.size(-1)), cdir_classes.reshape(-1))
+    loss_cdir = _ce(c_logits.reshape(-1, c_logits.size(-1)), cdir_classes.reshape(-1))
 
     # Single-label buttons: use pre-computed early_release labels if available
     btn_single_pre = targets.get("btns_single")
@@ -226,7 +234,7 @@ def compute_loss(preds, targets, shoulder_centers=None, n_cdir=5, lite=False):
         btn_single = _multi_hot_to_combo_label(btn_tgt)
     else:
         raise ValueError("no btns_single targets and no controller_combos.json combo map")
-    loss_btn = F.cross_entropy(btn_pred.reshape(-1, btn_pred.size(-1)), btn_single.reshape(-1))
+    loss_btn = _ce(btn_pred.reshape(-1, btn_pred.size(-1)), btn_single.reshape(-1))
     task_losses = (loss_main, loss_shldr, torch.tensor(0.0, device=loss_main.device), loss_cdir, loss_btn)
     if lite:
         # --lean-metrics on a non-log step: only the loss terms, still on the GPU (no syncs).
@@ -358,7 +366,7 @@ def get_dataloader(ds, shuffle=True, persistent=True, sampler=None):
         prefetch_factor=4 if nw > 0 else None,
     )
 
-def get_model(compile_model=True, model_preset=None, num_layers_override=None,
+def get_model(compile_model=True, model_preset=None, num_layers_override=None, compile_dynamic=None,
               encoder_type=None, dropout_override=None,
               no_opp_inputs=True, no_self_inputs=True,
               n_stick_clusters=None,
@@ -393,8 +401,8 @@ def get_model(compile_model=True, model_preset=None, num_layers_override=None,
     seq_len = overrides.pop("max_seq_len", SEQUENCE_LENGTH)
     cfg = ModelConfig(max_seq_len=seq_len, **overrides)
     model = FramePredictor(cfg).to(DEVICE)
-    if compile_model:
-        model = torch.compile(model)
+    if compile_model:   # dynamic: whole-game batches vary in shape (one graph, not one per shape)
+        model = torch.compile(model, dynamic=compile_dynamic)
     return model, cfg
 
 def infinite_loader(dl, sampler=None):
@@ -478,6 +486,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           lean_metrics: bool = False,
           optimizer: str = "muon",
           muon_lr: float = 0.02,
+          whole_games_from: float = None,
           save_steps: str = None):
     if debug:
         torch.autograd.set_detect_anomaly(True)
@@ -617,6 +626,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
          f"{'  (re-clustering at runtime)' if _recluster_sticks else ''}")
 
     model, cfg = get_model(compile_model=compile_model, model_preset=model_preset,
+                           compile_dynamic=True if whole_games_from is not None else None,
                            num_layers_override=num_layers_override,
                            encoder_type=encoder_type,
                            dropout_override=dropout_override,
@@ -810,6 +820,21 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     wandb.run.summary["n_params"] = n_params
 
     loader = infinite_loader(dl, sampler=train_sampler)
+    # --whole-games-from F: from step F * max_steps on, train on entire games (padded batches of
+    # batch_size * seq_len frames, the same frames per step) instead of seq_len windows
+    whole_switch = None
+    if whole_games_from is not None:
+        wds = StreamingMeleeDataset(data_dir=data_dir, sequence_length=SEQUENCE_LENGTH,
+                                    reaction_delay=REACTION_DELAY, split="train", rank=rank,
+                                    world_size=world_size, character_filter=character_filter,
+                                    hal_controller_encoding=hal_controller_encoding,
+                                    controller_combo_map=_combo_map, n_controller_combos=_n_combos,
+                                    whole_games=True, frame_budget=BATCH_SIZE * SEQUENCE_LENGTH)
+        wds._state_keys = ds._state_keys
+        wdl = DataLoader(wds, batch_size=None, num_workers=NUM_WORKERS, pin_memory=NUM_WORKERS > 0,
+                         persistent_workers=NUM_WORKERS > 0, prefetch_factor=4 if NUM_WORKERS > 0 else None)
+        whole_switch = max(start_step + 1, int(round(whole_games_from * max_steps)) + 1)
+        _log(f"  Whole games from step {whole_switch} ({BATCH_SIZE * SEQUENCE_LENGTH:,} frames per micro-batch)")
     skip_ct = 0
     t0 = time.time()
 
@@ -915,6 +940,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         _save_snapshot(0)
 
     for step in range(start_step + 1, max_steps + 1):
+        if whole_switch is not None and step == whole_switch:
+            loader = infinite_loader(wdl)
         if max_wall_time and (time.time() - t0) > max_wall_time:
             _log(f"WALL TIME LIMIT ({max_wall_time}s) exceeded at step {step}")
             break
@@ -966,6 +993,9 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     grad_accum_steps *= 2
                     _log(f"  [OOM] Halving batch size to {BATCH_SIZE} and doubling grad accumulation to "
                          f"{grad_accum_steps} (effective batch unchanged), retry #{_oom_retries}")
+                    if whole_switch is not None and step >= whole_switch:
+                        raise RuntimeError("OOM on whole-game batches: lower --batch-size or --seq-len "
+                                           "(the frame budget per micro-batch is their product)")
                     dl = get_dataloader(ds, shuffle=True)
                     loader = infinite_loader(dl)
                     skip_step = True
@@ -1357,6 +1387,9 @@ if __name__ == "__main__":
                              "2D weight matrices + aux-AdamW on embeddings/heads/"
                              "norms/biases. 'adamw' is the pre-2026-10-22 default: use it to "
                              "reproduce or resume older runs.")
+    parser.add_argument("--whole-games-from", type=float, default=None, metavar="F",
+                        help="from step F*max_steps on (0 = from the start), train on entire games, padded to "
+                             "batch_size*seq_len frames per micro-batch, instead of seq_len windows")
     parser.add_argument("--muon-lr", type=float, default=0.02,
                         help="LR for the Muon group (2D hidden matrices) when "
                              "--optimizer muon; the aux-AdamW group keeps --lr.")
@@ -1443,4 +1476,5 @@ if __name__ == "__main__":
         lean_metrics=args.lean_metrics,
         optimizer=args.optimizer,
         muon_lr=args.muon_lr,
+        whole_games_from=args.whole_games_from,
     )

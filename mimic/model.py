@@ -185,6 +185,11 @@ class CausalSelfAttentionRelPos(nn.Module):
             y = y.transpose(1, 2).contiguous().view(B, L, D)
             return self.resid_dropout(self.c_proj(y))
 
+        if self.window > 0 and L >= 2 * self.window:   # banded: O(L * W), not O(L^2)
+            y = self._banded(q, k, v, L)
+            y = y.transpose(1, 2).contiguous().view(B, L, D)
+            return self.resid_dropout(self.c_proj(y))
+
         # Attention math in FP32 to avoid BF16 overflow on Q@K^T + Srel
         with torch.autocast("cuda", enabled=False):
             q, k = q.float(), k.float()
@@ -210,6 +215,39 @@ class CausalSelfAttentionRelPos(nn.Module):
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, L, D)
         return self.resid_dropout(self.c_proj(y))
+
+    def _banded(self, q, k, v, L):
+        """The fp32 window path above, computed per block of W queries against the W - 1 keys
+        before the block plus the block itself: the same scores, mask and softmax, with memory
+        O(L * W) instead of O(L^2), so whole games (~6,000+ frames) fit."""
+        w = self.window
+        Bq = w
+        nb = -(-L // Bq)
+        P = nb * Bq - L                                   # tail padding (queries discarded)
+        with torch.autocast("cuda", enabled=False):
+            q, k = q.float(), k.float()
+            B, H, _, hs = q.shape
+            QEr = q @ self.Er.flip(0)[:w].float().transpose(0, 1)                   # (B, H, L, w)
+            qb = Fn.pad(q, (0, 0, 0, P)).view(B, H, nb, Bq, hs)
+            QErb = Fn.pad(QEr, (0, 0, 0, P)).view(B, H, nb, Bq, w)
+            kp = Fn.pad(k, (0, 0, w - 1, P))                                        # front: masked
+            vp = Fn.pad(v, (0, 0, w - 1, P))
+            S = Bq + w - 1                                                          # keys per block
+            kb = kp.unfold(2, S, Bq).transpose(-1, -2)                              # (B, H, nb, S, hs)
+            vb = vp.unfold(2, S, Bq).transpose(-1, -2)
+            r = torch.arange(Bq, device=q.device)[:, None]
+            c = torch.arange(S, device=q.device)[None, :]
+            d = r - c + (w - 1)                                                     # i - j
+            blk = torch.arange(nb, device=q.device)[:, None, None]
+            j = blk * Bq - (w - 1) + c                                              # absolute key
+            ok = (d >= 0) & (d < w) & (j >= 0)                                      # (nb, Bq, S)
+            Srel = QErb.gather(-1, d.clamp(0, w - 1).expand(B, H, nb, Bq, S))
+            att = (qb @ kb.transpose(-1, -2) + Srel) * (1.0 / math.sqrt(hs))
+            att = att.masked_fill(~ok, float("-inf"))
+            att = Fn.softmax(att, dim=-1)
+        att = self.attn_dropout(att)
+        y = att @ vb.to(att.dtype)                                                  # (B, H, nb, Bq, hs)
+        return y.reshape(B, H, nb * Bq, hs)[:, :, :L]
 
     def _srel(self, q, L):
         """Shaw relative term Srel[i, j] = q_i . Er[block_size-1-(i-j)] for the dense paths. With a

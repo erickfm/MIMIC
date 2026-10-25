@@ -52,6 +52,10 @@ class StreamingMeleeDataset(IterableDataset):
         self._n_combos       = n_controller_combos
         # Only slice keys the model uses (if known) — avoids loading 58 unused keys
         self._state_keys     = None  # set by caller to filter state dict keys
+        # whole_games: yield padded batches of entire games (frame_budget frames each) instead of
+        # windows, so every position has exactly the history it has live (see _iter_whole_games)
+        self._whole_games    = kwargs.pop("whole_games", False)
+        self._frame_budget   = kwargs.pop("frame_budget", None)
 
         with open(self.data_dir / "norm_stats.json") as fh:
             self.norm_stats: Dict[str, Tuple[float, float]] = json.load(fh)
@@ -166,5 +170,56 @@ class StreamingMeleeDataset(IterableDataset):
                 yield state, target
 
     # ------------------------------------------------------------------
+    # Whole games
+    # ------------------------------------------------------------------
+    def _iter_whole_games(self):
+        """Batches of entire games, from frame 0 to the end, so every position sees exactly the
+        history a streaming model has at that frame of a live game. Per shard visit, games are
+        grouped by length (rounded up to 1,024 frames) and packed frame_budget // length per batch,
+        padded at the end; targets["loss_mask"] marks the real frames (causal attention: padding
+        after a game never reaches it). Use with DataLoader(batch_size=None)."""
+        files = list(self.files)
+        rng = random.Random(42)
+        rng.shuffle(files)
+        files = self._shard_files(files)
+        random.shuffle(files)
+        R, budget, BUCKET = self.reaction_delay, self._frame_budget, 1024
+        for path in files:
+            shard = torch.load(path, weights_only=True, mmap=True)
+            offsets, states, targets = shard["offsets"], shard["states"], shard["targets"]
+            if "self_controller" not in states:
+                raise RuntimeError(f"{path.name}: whole-game mode needs pre-encoded self_controller")
+            buckets: Dict[int, List[Tuple[int, int]]] = {}
+            for g in range(int(shard["n_games"])):
+                start, end = offsets[g].item(), offsets[g + 1].item()
+                n = end - start - R
+                if n <= 0:
+                    continue
+                if self._char_filter is not None and states["self_character"][start].item() != self._char_filter:
+                    continue
+                buckets.setdefault(-(-n // BUCKET) * BUCKET, []).append((start, n))
+            batches = []
+            for Lb, games in buckets.items():
+                random.shuffle(games)
+                per = max(1, budget // Lb)
+                batches += [(Lb, games[i:i + per]) for i in range(0, len(games), per)]
+            random.shuffle(batches)
+            keys = self._state_keys or list(states)
+            for Lb, games in batches:
+                st = {k: states[k].new_zeros((len(games), Lb) + tuple(states[k].shape[1:])) for k in keys}
+                tg = {k: v.new_zeros((len(games), Lb) + tuple(v.shape[1:])) for k, v in targets.items()}
+                mask = torch.zeros(len(games), Lb)
+                for b, (start, n) in enumerate(games):
+                    for k in keys:
+                        st[k][b, :n] = states[k][start:start + n]
+                    for k, v in targets.items():
+                        tg[k][b, :n] = v[start + R:start + R + n]
+                    mask[b, :n] = 1.0
+                tg["loss_mask"] = mask
+                yield st, tg
+
     def __iter__(self):
-        yield from self._iter_pergame()
+        if self._whole_games:
+            yield from self._iter_whole_games()
+        else:
+            yield from self._iter_pergame()
