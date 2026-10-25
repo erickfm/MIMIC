@@ -18,6 +18,7 @@ except ImportError:
 import math
 import time
 import argparse
+import dataclasses
 from collections import deque
 from contextlib import nullcontext
 import torch
