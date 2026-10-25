@@ -47,10 +47,11 @@ Stream has the lower loss and loses the games.
 | SF4 | 16,384, no critic | 119–73 (62.0%, p = 0.001) | 133–59 (69.3%) |
 
 - Every RL model beats both non-RL small Foxes. First RL gain on a strong small base.
-- Training curves: at 4,096 decisions per update SF1's per-minute stock delta went +0.07 → −0.21 over
-  the run even though the final screen won; at 16,384 all three climbed (stock −0.07 → +0.17..+0.41,
-  damage −0.55 → +0.56..+0.87). Read: at 4,096 decisions the PPO gradient on a strong base is mostly
-  noise; 4× the batch halves it. KL to the base 0.004–0.007 per decision.
+- Training reward, per-minute deltas averaged over the first vs last 10 updates (single updates are
+  too noisy to read): SF1 stock −0.06 → −0.01, damage +0.10 → +0.15 (nearly flat); SF2/SF3/SF4 stock
+  −0.12/−0.00/−0.14 → +0.15/+0.17/+0.08, damage +0.29/+0.30/+0.06 → +0.84/+0.82/+0.73. Read: at
+  4,096 decisions the PPO gradient on a strong base is mostly noise; 4× the batch halves it. KL to
+  the base 0.003–0.007 per decision.
 - lr 2e-5 and dropping the critic didn't change the win rate vs the base (within 1 point).
 - Checkpoints `checkpoints/smallfox/SF*/eval_final/`. Not checked in Dolphin, not played vs fox-master.
 
