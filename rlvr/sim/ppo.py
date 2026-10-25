@@ -62,6 +62,85 @@ def collate(obs_list, device="cuda"):
     return batch, torch.tensor(lens, device=device) - 1
 
 
+def pack_streams(frames, max_frames=32768):
+    """Exact packing for sliding-window models. One slot's consecutive decisions in the same match
+    have overlapping contexts (each is the last <= receptive-field frames before it), so they are
+    stitched into one sequence, and a single causal forward over it gives every decision's output
+    (the streamed output at a position depends only on its receptive field). Two decisions are
+    stitched only when the later context's overlapping frames equal the sequence's (checked on
+    the first and last overlapping frame, every key), else a new sequence starts.
+    frames: FrameRecords with .stream / .step set. Returns (order, packs): order lists the frame
+    indices pack by pack; each pack is dict(n, batch {key: (B, T, ...)} on the CPU, row, pos)."""
+    seqs = []                                  # [pieces, length, [(frame index, position)], last step]
+    open_seq = {}
+    for i, fr in enumerate(frames):
+        c = fr.obs
+        L = next(iter(c.values())).shape[0]
+        s = open_seq.get(fr.stream)
+        d = fr.step - s[3] if s is not None else 0
+        if s is not None and 0 < d < L and s[1] >= L - d:
+            n_ov = L - d                       # overlap: c[:n_ov] == sequence[-n_ov:]
+            first = _seq_frame(s[0], s[1] - n_ov, s[1])
+            last = _seq_frame(s[0], s[1] - 1, s[1])
+            ok = all(torch.equal(c[k][0], first[k]) and torch.equal(c[k][n_ov - 1], last[k]) for k in c)
+        else:
+            ok = False
+        if ok:
+            s[0].append({k: v[n_ov:] for k, v in c.items()})
+            s[1] += d
+            s[2].append((i, s[1] - 1))
+            s[3] = fr.step
+        else:
+            s = [[c], L, [(i, L - 1)], fr.step]
+            seqs.append(s)
+            open_seq[fr.stream] = s
+    seqs.sort(key=lambda s: -s[1])
+    order, packs, cur = [], [], []
+
+    def flush():
+        T = cur[0][1]
+        batch = {}
+        for k in cur[0][0][0]:
+            rows = []
+            for s in cur:
+                x = torch.cat([p[k] for p in s[0]], 0)
+                if s[1] < T:   # right padding is exact under causal attention
+                    x = torch.cat([x, x[-1:].expand(T - s[1], *x.shape[1:])], 0)
+                rows.append(x)
+            batch[k] = torch.stack(rows).pin_memory()
+        row = [r for r, s in enumerate(cur) for _ in s[2]]
+        pos = [p for s in cur for _, p in s[2]]
+        order.extend(i for s in cur for i, _ in s[2])
+        packs.append(dict(n=len(pos), batch=batch, row=torch.tensor(row), pos=torch.tensor(pos)))
+        cur.clear()
+    for s in seqs:   # longest first, so each pack's padded size is set by its first sequence
+        if cur and cur[0][1] * (len(cur) + 1) > max_frames:
+            flush()
+        cur.append(s)
+    if cur:
+        flush()
+    return order, packs
+
+
+def _seq_frame(pieces, j, total):
+    """Frame j of a sequence stored as pieces (total frames), searching from the end."""
+    j -= total
+    for p in reversed(pieces):
+        n = next(iter(p.values())).shape[0]
+        if -j <= n:
+            return {k: v[n + j] for k, v in p.items()}
+        j += n
+    raise IndexError(j)
+
+
+def packed_features(model, pack, device="cuda"):
+    """Final-norm features at each decision of a pack_streams() pack: (n, d)."""
+    raw = getattr(model, "_orig_mod", model)
+    batch = {k: v.to(device, non_blocking=True) for k, v in pack["batch"].items()}
+    h = raw.features(batch)
+    return h[pack["row"].to(device), pack["pos"].to(device)]
+
+
 def last_features(model, batch, last):
     """Final-norm features at each row's decision position: (B, d), for a collate() batch.
     Full-causal models: the plain forward. Sliding-window models compute only what the decision
@@ -118,13 +197,14 @@ def _block_tail(blk, x, n_q, T, pad, W):
     return x + blk.dropout(blk.mlp.c_proj(F.gelu(blk.mlp.c_fc(blk.ln_2(x)))))
 
 
-def head_logits(model, batch, last, sampled_indices=None):
+def head_logits(model, batch, last, sampled_indices=None, h=None):
     """Head logits at each decision's position: {head: (B, V)}. For --cond-heads models the
     sampled (shoulder, c, main) classes are teacher-forced through the chain, so the logits are
     the ones the action was sampled from and the summed log-prob is its exact joint log-prob.
-    sampled_indices: (B, 4) in PPO order (main, shoulder, c, button)."""
+    sampled_indices: (B, 4) in PPO order (main, shoulder, c, button). h: precomputed (B, d)
+    features (e.g. packed_features), in place of batch / last."""
     raw = getattr(model, "_orig_mod", model)
-    h = last_features(raw, batch, last).unsqueeze(1)                       # (B, 1, d)
+    h = (last_features(raw, batch, last) if h is None else h).unsqueeze(1)   # (B, 1, d)
     if getattr(raw.heads, "cond", False):
         if sampled_indices is None:
             raise ValueError("cond-heads logits need the sampled classes to condition on")
@@ -185,8 +265,12 @@ def ppo_update(
     device: str = "cuda",
     ref_model=None,
     extra_loss=None,
+    packs=None,
 ) -> Dict[str, float]:
     """Run one PPO epoch over the collected episodes.
+
+    packs: pack_streams() packs over the episodes' frames, in that order (sliding-window models);
+    each pack is one minibatch, forwarded once for all its decisions.
 
     Returns a metrics dict averaged over the batch (mean reward, KL,
     clip frac, loss, etc.).
@@ -252,12 +336,22 @@ def ppo_update(
     total_clip = 0.0
     total_n = 0
 
-    for start in range(0, N, minibatch):
-        end = min(start + minibatch, N)
-        chunk = all_frames[start:end]
-        batch, last = collate([fr.obs for fr in chunk], device)
+    if packs is not None:
+        bounds = [0]
+        for pk in packs:
+            bounds.append(bounds[-1] + pk["n"])
+        assert bounds[-1] == N, (bounds[-1], N)
+        spans = list(zip(bounds[:-1], bounds[1:], packs))
+    else:
+        spans = [(s, min(s + minibatch, N), None) for s in range(0, N, minibatch)]
+    for start, end, pk in spans:
         idx = sampled_indices[start:end]
-        lp_theta = _logprob_at_indices(head_logits(model, batch, last, idx), idx)
+        if pk is not None:
+            batch = last = None
+            lp_theta = _logprob_at_indices(head_logits(model, None, None, idx, h=packed_features(model, pk, device)), idx)
+        else:
+            batch, last = collate([fr.obs for fr in all_frames[start:end]], device)
+            lp_theta = _logprob_at_indices(head_logits(model, batch, last, idx), idx)
         all_logprobs_theta.append(lp_theta.detach())
 
         # Per-chunk PPO objective (bptt cheap since per-chunk).
@@ -265,7 +359,8 @@ def ppo_update(
         lp_old_chunk = logprobs_old[start:end]
         if ref_model is not None:
             with torch.no_grad():
-                ref_logits = head_logits(ref_model, batch, last, idx)
+                ref_logits = head_logits(ref_model, batch, last, idx,
+                                         h=packed_features(ref_model, pk, device) if pk is not None else None)
             lp_ref_chunk = _logprob_at_indices(ref_logits, idx).detach()
         else:
             lp_ref_chunk = logprobs_ref_cached[start:end]

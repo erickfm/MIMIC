@@ -78,6 +78,10 @@ def main():
                     help="dense mode: store each learner decision with probability 1/N")
     ap.add_argument("--frames-per-update", type=int, default=4096,
                     help="dense mode: sampled decisions (with finished returns) per update")
+    ap.add_argument("--packed-update", action=argparse.BooleanOptionalAction, default=True,
+                    help="sliding-window models, dense mode: stitch each slot's overlapping decision "
+                         "contexts into one sequence and score all its decisions in one forward "
+                         "(exact; ppo.pack_streams). --no-packed-update scores each decision alone")
     ap.add_argument("--critic", action=argparse.BooleanOptionalAction, default=None,
                     help="dense mode (on by default there): learned value baseline V(s) on the frozen "
                          "BC's features; advantage = return - V, z-scored. V is fit after use (lagged), "
@@ -104,7 +108,8 @@ def main():
 
     import torch
     from inference_utils import load_mimic_model
-    from rlvr.sim.ppo import OnlinePPOConfig, _logprob_at_indices, collate, head_logits, last_features, ppo_update
+    from rlvr.sim.ppo import (OnlinePPOConfig, _logprob_at_indices, collate, head_logits, last_features,
+                              pack_streams, packed_features, ppo_update)
     from rlvr.sim.trajectory import FrameRecord
     from rlvr.sim.lcancel import LCancelTracker
     from rlvr.sim.vec_env import VecSim
@@ -169,6 +174,7 @@ def main():
                                   pending=[], pend=dict(G=np.zeros((0, len(vr_ids))), disc=np.zeros(0),
                                                         age=np.zeros(0, np.int64))))
     dense = bool(vr_ids)
+    packed = bool(window and a.packed_update and dense)
     sample_rng = _random_mod.Random(a.seed + 1)
     import random as _random
     anchor_rng = _random.Random(a.seed)
@@ -199,10 +205,12 @@ def main():
                         anchor.append(w)
         if dense:   # sample decisions; their returns accumulate from the next frame on
             chosen = [s for s in slots if sample_rng.random() * a.sample_every < 1.0]
+            step = int(pol.hist_g) if packed else -1
             for s, obs in zip(chosen, pol.context([s["slot"] for s in chosen]) if chosen else []):
                 fr = FrameRecord(obs=obs, sampled_indices=ppo_idx(idx[s["slot"]]),
                                  logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
-                                 game_frame_id=int(v.info.a[s["env"], s["side"], 0]))
+                                 game_frame_id=int(v.info.a[s["env"], s["side"], 0]),
+                                 stream=s["slot"], step=step)
                 s["pending"].append(fr)   # its returns, discount and age live in s["pend"]
                 P = s["pend"]
                 P["G"] = np.vstack([P["G"], np.zeros((1, len(vr_ids)))])
@@ -295,6 +303,9 @@ def main():
         guard_stats = {}
         if dense:
             episodes, dstats = collect_dense()
+            if packed:   # pack order: each pack's decisions are contiguous (one PPO minibatch)
+                order, packs = pack_streams([ep.frames[0] for ep in episodes])
+                episodes = [episodes[i] for i in order]
             Gm = np.stack([ep.metadata["G"] for ep in episodes])            # (N, n_vr) raw returns
             if a.normalize:   # running std per VR (EMA over updates); a VR keeps scale 1 until it varies
                 sd = Gm.std(0)
@@ -332,25 +343,34 @@ def main():
         t_roll = time.time() - t0
         # PPO "old" log-probs, in the update's own (fp32) numerics, before any epoch.
         frames = [fr for ep in episodes for fr in ep.frames]
+        if not packed:
+            packs = None
+        # minibatches: (start, end, pack or None); a pack is scored by one forward over its sequences
+        spans = [(o, o + pk["n"], pk) for o, pk in zip(np.cumsum([0] + [pk["n"] for pk in packs[:-1]]), packs)] \
+            if packs else [(i, min(i + pcfg.minibatch_frames, len(frames)), None)
+                           for i in range(0, len(frames), pcfg.minibatch_frames)]
+
+        def feats_of(model, i, j, pk):
+            if pk is not None:
+                return packed_features(model, pk)
+            batch, last = collate([fr.obs for fr in frames[i:j]])
+            return last_features(model, batch, last)
         learner.eval()
         with torch.no_grad():
-            for i in range(0, len(frames), pcfg.minibatch_frames):
-                chunk = frames[i:i + pcfg.minibatch_frames]
-                batch, last = collate([fr.obs for fr in chunk])
+            for i, j, pk in spans:
+                chunk = frames[i:j]
                 idx = torch.stack([fr.sampled_indices for fr in chunk]).cuda()
-                lp = _logprob_at_indices(head_logits(learner, batch, last, idx), idx).cpu()
-                lr_ = _logprob_at_indices(head_logits(ref, batch, last, idx), idx).cpu()
+                lp = _logprob_at_indices(head_logits(learner, None, None, idx, h=feats_of(learner, i, j, pk)), idx).cpu()
+                lr_ = _logprob_at_indices(head_logits(ref, None, None, idx, h=feats_of(ref, i, j, pk)), idx).cpu()
                 for fr, x, y in zip(chunk, lp, lr_):   # the reference never changes: score it once
                     fr.logprob_old, fr.logprob_ref = x, y
         critic_stats = {}
         if critic is not None and episodes:
             with torch.no_grad():
                 feats = []
-                for i in range(0, len(frames), pcfg.minibatch_frames):
-                    chunk = frames[i:i + pcfg.minibatch_frames]
-                    batch, last = collate([fr.obs for fr in chunk])
+                for i, j, pk in spans:
                     with torch.autocast("cuda", dtype=torch.bfloat16):
-                        f = last_features(ref, batch, last)
+                        f = feats_of(ref, i, j, pk)
                     feats.append(f.float())
                 feats = torch.cat(feats)
                 G = torch.tensor(Gm / vr_scale, dtype=torch.float32, device="cuda")   # (N, n_vr) scaled
@@ -397,7 +417,8 @@ def main():
                     total += float(kl)
                 return torch.tensor(a.global_kl_beta * total / n)
         for _ in range(a.ppo_epochs):
-            m = ppo_update(learner, episodes, opt, pcfg, device="cuda", ref_model=None, extra_loss=extra)
+            m = ppo_update(learner, episodes, opt, pcfg, device="cuda", ref_model=None, extra_loss=extra,
+                           packs=packs)
         v.policies["LEARN"].refresh()   # sliding-window learner: re-key its cache with the new weights
         anchor_kl = (m.get("extra_loss") / a.global_kl_beta) if (a.global_kl_beta > 0 and m.get("extra_loss") is not None) else None
         anchor.clear()

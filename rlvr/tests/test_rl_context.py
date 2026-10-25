@@ -5,7 +5,9 @@ rlvr.sim.batch.BatchedPolicy (fp32, one env reset mid-stream), then re-score eac
 BatchedPolicy.context() with rlvr.sim.ppo.head_logits, as the PPO update does. The logits must
 equal the ones the action was sampled from. For sliding-window models, also: after a weight
 change, BatchedPolicy.refresh() makes the next streamed step equal a fresh forward with the new
-weights (and without it, it doesn't).
+weights (and without it, it doesn't). For sliding-window models, also the packed update
+(ppo.pack_streams): decisions sampled at random frames, stitched per env, scored by one forward
+per pack, must give the same logits.
 
   python3 rlvr/tests/test_rl_context.py
 """
@@ -19,7 +21,8 @@ sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "tools"))
 from inference_utils import build_mock_frame, load_inference_context  # noqa: E402
 from mimic.model import MODEL_PRESETS, FramePredictor, ModelConfig  # noqa: E402
 from rlvr.sim.batch import HEADS, BatchedPolicy  # noqa: E402
-from rlvr.sim.ppo import collate, head_logits  # noqa: E402
+from rlvr.sim.ppo import collate, head_logits, pack_streams, packed_features  # noqa: E402
+from rlvr.sim.trajectory import FrameRecord  # noqa: E402
 
 N_ENVS, STEPS, RESET_AT, CHECK_AT = 4, 1300, 700, (5, 400, 1100, 1299)
 
@@ -75,16 +78,37 @@ def run(window, cond, mock):
         orig(preds)
     pol._sample = sample
     g = torch.Generator().manual_seed(1)
+    pick = torch.Generator().manual_seed(2)
     pol.reset(range(N_ENVS))
-    errs = []
+    errs, recs, want = [], [], []
     for t in range(STEPS):
         if t == RESET_AT:
             pol.reset([2])
         pol.step(frame_feats(mock, g))
         if t in CHECK_AT:
             errs.append(rescore_err(model, pol, stash))
+        if window:   # sample ~1 in 8 decisions per env, as sim_rl does
+            envs = [e for e in range(N_ENVS) if torch.rand(1, generator=pick).item() < 1 / 8]
+            for e, obs in zip(envs, pol.context(envs) if envs else []):
+                recs.append(FrameRecord(obs=obs, sampled_indices=ppo_order(pol.last_idx)[e].cpu(),
+                                        logprob_old=torch.zeros(()), logprob_ref=torch.zeros(()),
+                                        stream=e, step=int(pol.hist_g)))
+                want.append({h: stash[h][e].clone() for h in HEADS})
     res = dict(rescore=max(errs))
     if window:
+        order, packs = pack_streams(recs, max_frames=8192)
+        assert sorted(order) == list(range(len(recs)))
+        err, o = 0.0, 0
+        with torch.no_grad():
+            for pk in packs:
+                ids = order[o:o + pk["n"]]; o += pk["n"]
+                idx = torch.stack([recs[i].sampled_indices for i in ids]).cuda()
+                out = head_logits(model, None, None, idx, h=packed_features(model, pk))
+                err = max(err, max(float((out[h] - torch.stack([want[i][h] for i in ids])).abs().max())
+                                   for h in HEADS))
+        res["packed"] = err
+        res["n_seq"] = sum(int(pk["batch"][next(iter(pk["batch"]))].shape[0]) for pk in packs)
+        res["n_dec"] = len(recs)
         with torch.no_grad():   # an "optimizer step"
             for p in model.parameters():
                 p.add_(0.02 * torch.randn_like(p))
@@ -102,10 +126,12 @@ def main():
     for window in (0, 180):
         for cond in (False, True):
             r = run(window, cond, mock)
-            good = r["rescore"] < 1e-3 and (not window or (r["after_refresh"] < 1e-3 and r["stale_after_update"] > 1e-2))
+            good = r["rescore"] < 1e-3 and (not window or (r["after_refresh"] < 1e-3 and r["stale_after_update"] > 1e-2
+                                                          and r["packed"] < 1e-3))
             ok &= good
             print(f"{'stream' if window else 'full':6s} cond={cond!s:5s} "
-                  + "  ".join(f"{k} {v:.2e}" for k, v in r.items()) + ("" if good else "  FAIL"))
+                  + "  ".join(f"{k} {v:.2e}" if isinstance(v, float) else f"{k} {v}" for k, v in r.items())
+                  + ("" if good else "  FAIL"))
     print("PASS" if ok else "FAIL")
     sys.exit(0 if ok else 1)
 

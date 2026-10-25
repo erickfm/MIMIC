@@ -27,6 +27,10 @@ class FrameRecord:
     reward: float = 0.0
     # carried for diagnostics / credit assignment debug
     game_frame_id: int = 0
+    # sliding-window models: the learner slot and BatchedPolicy.hist_g at the decision, so the
+    # update can stitch one slot's overlapping contexts into one sequence (ppo.pack_streams)
+    stream: int = -1
+    step: int = -1
 
 
 @dataclass
