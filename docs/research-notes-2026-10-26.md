@@ -71,3 +71,14 @@ one shift past the human rate), and gets launched less. No camping or degenerate
 Analysis gotcha: `play.py` costumes stay per port across `--alternate-ports` flips (port 1 = costume 1 in every
 replay), so costume can't identify the policy; `analyze.py` maps replays to models from play.py's log
 ("match i/N starting (A on port P)").
+
+### SF7u100 in Dolphin (queue_s, same setup, 200 matches)
+
+- **Dolphin: SF7u100 154–46 vs full56k (77.0% [70.7, 82.3], p < 0.001)**; by port order 76–24 / 78–22.
+  Sim: 140–52 (72.9% [66.2, 78.7]). 0 timeouts; 190 of 200 replays parsed.
+- Canaries: center-stick 32.6%, L-cancel 89.2%, aerial landings 4.12 / 1k frames (full56k 3.15, human 3.96).
+- State JS vs human 0.0123 (full56k 0.0079, SF5 0.0080); vs full56k 0.0138. Largest shifts [human]: up-smash
+  4.12% vs 1.55% [1.54%], DAMAGE_FLY_TOP 4.55 vs 6.82 [4.97], bair 3.63 vs 2.54 [3.31], nair 2.82 vs 2.12 [2.47],
+  forward aerial jumps 3.08 vs 3.82 [3.92], DEAD_FLY_STAR 0.61 vs 1.24 [1.00], tumbling 0.37 vs 0.77 [0.50].
+- Up-smash grows with training: 1.55% (base) → 2.85% (SF5, 30 updates) → 4.12% (SF7, 100 updates), 2.7x the
+  human rate. The rest of the shifts sit near human rates.
