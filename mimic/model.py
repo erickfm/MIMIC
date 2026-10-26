@@ -587,7 +587,7 @@ class FramePredictor(nn.Module):
             raise ValueError(f"{variants} are implemented for full-causal models only (the streaming "
                              "KV cache and the stream RL update re-implement the plain block)")
         # fast_policy.forward_last / kv_cache re-implement the plain block; anything else uses forward
-        self.plain_blocks = not variants or variants == ["zero_init_proj"]
+        self.plain_blocks = set(variants) <= {"zero_init_proj", "attn_gate"}   # forward_last has these
         self.unet_w = (nn.Parameter(torch.ones(cfg.num_layers // 2))
                        if getattr(cfg, "unet_skips", False) else None)
 

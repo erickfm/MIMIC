@@ -29,6 +29,8 @@ def _last_query_attention(attn, x):
         att = Fn.softmax(att, dim=-1)                 # the last query sees every key: no mask
     y = att.to(v.dtype) @ v if att.dtype != v.dtype else att @ v
     y = y.transpose(1, 2).contiguous().view(B, 1, D)
+    if attn.c_gate is not None:   # --arch attn_gate=1
+        y = y * torch.sigmoid(attn.c_gate(x[:, -1:]))
     return attn.c_proj(y)
 
 
