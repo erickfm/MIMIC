@@ -141,3 +141,28 @@ Follow-up moves (share of follow-up hits): human grab/throw 25%, uair 19%, bair 
   humans) and grabs less (matches the up-throw and grab drops in the state shifts).
 - The lower kill rate per hit has two parts: fewer of its up-smashes land at 80–120% (19–20% vs 28%), and those kill
   less often (68–69% vs 83%). Not measured why (DI, stage position, or up-smashing at the low end of the bin).
+
+## Past 100 updates: plateau (queue_u)
+
+SF7 resumed from update 100 to 200, same recipe (`--resume`; policy and AdamW state restored, the critic restarted
+because u100 saved none). Sim h2h, 192 games, seed 41:
+
+- SF7u200 vs full56k: 144–48 (75.0% [68.4, 80.6]); SF7u100 was 140–52.
+- **SF7u150 vs SF7u100: 94–98. SF7u200 vs SF7u100: 96–96.**
+
+Training rollouts vs the base, 20-update bins:
+
+| Updates | Stock / min | Damage / min | Rollout games | KL |
+|---|---|---|---|---|
+| 1–20 | −0.04 | +0.29 | 57% | 0.0018 |
+| 41–60 | +0.19 | +0.93 | 68% | 0.0046 |
+| 61–80 | +0.34 | +1.43 | 78% | 0.0074 |
+| 81–100 | +0.32 | +1.45 | 74% | 0.0134 |
+| 101–120 | +0.36 | +1.35 | 77% | 0.0092 |
+| 141–160 | +0.37 | +1.54 | 77% | 0.0124 |
+| 181–200 | +0.35 | +1.58 | 78% | 0.0096 |
+
+The rollout win rate stopped rising around update 70 and the h2h confirms no gain after 100. KL stays ~0.01 (the
+KL penalty holds it). The critic's explained variance on each fresh batch is negative the whole run (−0.18 to −0.27
+per 20-update bin, both segments): its value predictions are worse than the batch mean, so it is not reducing
+advantage variance. SF4 (no critic) matched SF2 (critic) at 30 updates, consistent with that.
