@@ -113,3 +113,31 @@ no random-window baseline). vs-fox-master row from the first 157 parsed replays.
 RL raises the up-smash rate ~2.6x without changing its hit / whiff split (same as the base; humans land a bit more).
 Its whiffs are punished slightly less often than the BC models' or humans', and each hit kills less often, so the extra
 up-smashes are mostly not finishers. Whether a human punishes the whiffs better is untested.
+
+### What follows a landed up-smash? (`checkpoints/smallfox/dolphin/usmash_followup.py`)
+
+From each landed up-smash a string runs until the opponent loses a stock (kill), the user takes damage (reversal), or
+the opponent has been free for more than 45 frames (slippi-js's combo reset; dying states 0-10 keep it alive).
+Follow-up = a later hit in the string; juggle = a follow-up (not a pummel or throw) on an airborne opponent; tech-chase
+hit = a follow-up on an opponent in, or within 10 frames of, a down / tech / getup state. Per up-smash, so a chained
+up-smash counts both as a follow-up and as its own record. Output: `checkpoints/smallfox/dolphin/usmash_followup.txt`.
+
+| Player | Landed per game | Hits at 0–40% | Follow-up at 0–40% | Juggle at 0–40% | Tech-chase hit | Hits at 80–120% | Kill at 80–120% | Kill, all |
+|---|---|---|---|---|---|---|---|---|
+| human | 2.1 | 60% | 57% | 43% | 19.4% | 28% | 83% | 27.2% |
+| fox-master | 2.0 | 62% | 60% | 49% | 17.4% | 26% | 82% | 23.9% |
+| full56k (vs SF7) | 1.8 | 57% | 52% | 37% | 16.4% | 19% | 80% | 21.3% |
+| SF5 | 3.5 | 62% | 56% | 41% | 23.8% | 19% | 70% | 17.4% |
+| SF7u100 (vs full56k) | 4.8 | 60% | 60% | 46% | 20.3% | 19% | 68% | 16.8% |
+| SF7u100 (vs fox-master) | 4.6 | 61% | 55% | 40% | 19.3% | 20% | 69% | 17.1% |
+
+Follow-up moves (share of follow-up hits): human grab/throw 25%, uair 19%, bair 14%, up-smash 7%; SF7u100 up-smash
+17–18%, uair 17%, grab/throw 15–17%, bair 13%.
+
+- The extra up-smashes land at the same percents as humans' (60% at 0–40%) and start juggles at the human rate
+  (follow-up 55–60%, juggle 40–46% at low percent). Tech-chase hits are at the human rate too. RL lands ~2.3x as many
+  per game, so it starts that many more strings.
+- RL's change inside strings: it re-up-smashes a falling opponent (up-smash is 17–18% of its follow-ups vs 7% for
+  humans) and grabs less (matches the up-throw and grab drops in the state shifts).
+- The lower kill rate per hit has two parts: fewer of its up-smashes land at 80–120% (19–20% vs 28%), and those kill
+  less often (68–69% vs 83%). Not measured why (DI, stage position, or up-smashing at the low end of the bin).
