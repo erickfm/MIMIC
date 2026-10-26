@@ -244,6 +244,10 @@ def main():
                                      torch.nn.Linear(256, max(1, len(vr_ids)))).cuda()
         critic_opt = torch.optim.Adam(critic.parameters(), lr=a.critic_lr)
         critic_replay = []
+        crit_path = a.resume and Path(a.resume).with_name(Path(a.resume).name.replace("rl_u", "critic_u"))
+        if crit_path and crit_path.exists():   # runs saved before 2026-10-26 have none: the critic restarts
+            cs = torch.load(crit_path, map_location="cuda", weights_only=False)
+            critic.load_state_dict(cs["critic"]); critic_opt.load_state_dict(cs["opt"])
     log = open(out / "metrics.jsonl", "a")
     t_start = time.time()
     from rlvr.sim.trajectory import Episode
@@ -451,6 +455,8 @@ def main():
             ck["rl"] = dict(task="vr_sim" if dense else "l_cancel_sim", update=upd, args=vars(a))
             torch.save(ck, out / f"rl_u{upd:04d}.pt")
             torch.save(opt.state_dict(), out / f"opt_u{upd:04d}.pt")
+            if critic is not None:
+                torch.save(dict(critic=critic.state_dict(), opt=critic_opt.state_dict()), out / f"critic_u{upd:04d}.pt")
     v.close()
 
 
