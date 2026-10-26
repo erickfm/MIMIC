@@ -153,3 +153,18 @@ S 56k. Owner: per-head gating not wanted.
 All variants are full-causal only (refused with `--attn-window`), causal (checked), and fall back to
 the plain forward in `fast_policy.forward_last` (correct, slower sim inference; the gate could get a
 fast path).
+
+# Evening: gated attention at S 56k (queue_l)
+
+`fox-20261025-S-gate56k` (`checkpoints/smallfox/base_gate56k`): full56k's recipe exactly (647-shard
+manifest, batch 768, 56k steps, cond-heads, Muon, seed 1) plus `--arch attn_gate=1`. 7,638 s (7.3 step/s).
+
+- Last-frame loss: gate56k 0.7056, full56k 0.6834 (gate +0.0222 ± 0.0021, paired).
+- h2h (96 games, seed 41): gate56k vs full56k **34–62** (35.4%, p = 0.006, stock margin −0.57). No RL run.
+- Curves: the gate's val loss leads by ~0.008 through 5.6k steps (the proxy's 1,900-step result), crosses
+  at ~12k, and ends 0.019 behind. Its training loss stays 0.011–0.022 *below* full56k's the whole run.
+  So it fits training windows better and generalizes worse: overfitting, not an optimization failure.
+  full56k's train and val end equal (0.719 / 0.719); the gate's end 0.696 / 0.738.
+
+The proxy win was an early-training effect. Gated attention is not made a default. Lesson: the 1,900-step
+proxy can't see a variant that overfits later; check a long run's val curve before trusting it.

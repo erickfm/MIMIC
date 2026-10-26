@@ -234,9 +234,11 @@ watch a long run before relying on it).
 `attn_gate`, `qk_norm`, `mlp_act=relu2`, `zero_init_proj`, `logit_softcap`, `value_residual`,
 `unet_skips`, `canon`, `use_rmsnorm`, `use_swiglu`, `encoder_type=mimic_entity` (two tokens per
 frame), and size fields (`d_model`, `num_layers`, ...). All off by default; full-causal only.
-The proxy sweep (`docs/research-notes-2026-10-25.md`) found only gated attention clearly better
-(−0.006 val, 62–34 in a proxy h2h, +7% params, ~9% slower); the rest were noise or worse, so
-don't re-run them. Variants without a hand-written fast path fall back to the plain forward in
+The proxy sweep (`docs/research-notes-2026-10-25.md`) found only gated attention better at proxy
+scale (−0.006 val, 62–34 in a proxy h2h, +7% params, ~9% slower); the rest were noise or worse, so
+don't re-run them. **The gate does not scale:** at S 56k (full56k's recipe + `attn_gate=1`) it led
+until ~10k steps, then overfit (train loss 0.022 below full56k, last-frame val 0.022 above) and lost
+34–62 to full56k. Not a default. Variants without a hand-written fast path fall back to the plain forward in
 `fast_policy.forward_last` (correct, slower sim inference); the gate has a fast path.
 
 **`--cond-heads` is the default (since 2026-10-22).** Each head is
