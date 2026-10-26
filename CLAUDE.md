@@ -690,10 +690,12 @@ misses) and NOT the old offset=−4 press proxy (which diverged from the truth).
 `rlvr/sim/melee_sim.py` (RL env: one game per process, `reset()`/`step(pads)`, ~2.2k fps,
 inputs land on f+1 like Dolphin), `tools/sim_replay_check.py` / `tools/sim_env_check.py`
 (byte-exact fidelity checks vs .slp). Status and limits: `docs/research-notes-2026-10-20b.md`.
-Sim RL: `tools/vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 30` (PPO + KL to frozen BC,
-critic, 16,384 decisions per update by default since 2026-10-25; the opponent is the frozen
-base). On S-full 56k this recipe won 121–71 vs its base and 130–62 vs S-stream 56k
-(`docs/research-notes-2026-10-25.md`). Sim h2h: `tools/sim_h2h.py`, bf16.
+Sim RL: `tools/vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 100` (PPO + KL to frozen BC,
+critic, 16,384 decisions per update by default since 2026-10-25, 100 updates since 2026-10-26; the
+opponent is the frozen base). On S-full 56k, 100 updates won 140–52 vs the base, beat every 30-update
+run (bigger batches included), and beat fox-master 109–83 in the sim; the sim gain held in Dolphin
+(SF5, 30 updates: 124–76 vs its base). See `docs/research-notes-2026-10-26.md`. Sim h2h:
+`tools/sim_h2h.py`, bf16.
 
 **Data**: `tools/slp_to_shards.py` (.slp → v2 .pt shards with
 `target[i] = buttons[i+1]` alignment); `tools/shard_and_upload_ranked.py`

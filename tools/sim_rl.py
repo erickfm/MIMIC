@@ -48,7 +48,7 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--envs", type=int, default=64)
     ap.add_argument("--workers", type=int, default=16)
-    ap.add_argument("--updates", type=int, default=None, help="default: 30 dense, 60 L-cancel")
+    ap.add_argument("--updates", type=int, default=None, help="default: 100 dense, 60 L-cancel")
     ap.add_argument("--episodes-per-update", type=int, default=192,
                     help="minimum scored episodes per update")
     ap.add_argument("--misses-per-update", type=int, default=0,
@@ -102,8 +102,10 @@ def main():
     # Dense defaults = the recipe that beat frozen BC (stock 1 + damage 0.25: 56.3% over 1,152 games,
     # docs/research-notes-2026-10-23.md); the old ones (lr 3e-5, KL 0.003, no anchor, no critic)
     # drifted every outcome VR into a worse player within 30 updates. L-cancel keeps the July recipe.
+    # 100 dense updates since 2026-10-26: 16,384 x 100 beat every 30-update run, bigger batches included
+    # (docs/research-notes-2026-10-26.md).
     dense_defaults = a.vr is not None
-    for k, dense_v, lc_v in (("updates", 30, 60), ("lr", 1e-5, 3e-5), ("kl_beta", 0.03, 0.003),
+    for k, dense_v, lc_v in (("updates", 100, 60), ("lr", 1e-5, 3e-5), ("kl_beta", 0.03, 0.003),
                              ("global_kl_beta", 0.01, 0.0), ("critic", True, False)):
         if getattr(a, k) is None:
             setattr(a, k, dense_v if dense_defaults else lc_v)
