@@ -82,3 +82,74 @@ vs c1440 (0.7430):
 Whole games from the start are clearly worse; short-to-long is within noise of chunks. Untested
 guess for the whole-games loss: each step holds far fewer distinct games than 96 chunks drawn from 96 games, so the
 gradient is more correlated, and length-bucket padding wastes some of the frame budget.
+
+# Afternoon: stream sunset, packed stream RL update, LLM-architecture sweep
+
+Owner-approved, one seed each, nothing promoted. Scripts: `checkpoints/smallfox/queue_k_{rl,w60}.sh`,
+`checkpoints/fastproxy/arch_sweep.sh`. Result lines: `checkpoints/smallfox/results.txt` (SS8 lines
+copied from the box) and `checkpoints/fastproxy/results.tsv`.
+
+## Can stream catch full? Two interventions, both no
+
+Hypothesis tested (exposure bias / copycat): stream conditions on 12 s of its own off-distribution
+history, full on 3 s, so stream loses in closed loop despite lower loss.
+
+**(1) RL on stream56k with SF2's recipe (SS8, 16,384 decisions per update, 30 updates):**
+
+| Matchup | Record | SS8 win rate | p |
+|---|---|---|---|
+| SS8 vs stream56k (base) | 103–89 | 53.6% | 0.35 |
+| SS8 vs full56k | 93–99 | 48.4% | 0.72 |
+| SS8 vs SF2 | 74–118 | 38.5% | 0.002 |
+
+**(2) Shorter receptive field: `fox-20261025-S-w60-56k`** (`checkpoints/smallfox/base_w60`), window 60
+(355 frames, ~6 s), otherwise stream56k's recipe. Last-frame loss 0.6897 (stream56k 0.6805, full56k
+0.6877). h2h: w60 vs full56k 74–118 (38.5%, p = 0.002); w60 vs stream56k 98–94. RL on it (SW1, SF2's
+recipe): vs w60 94–98, vs full56k 94–98, vs SF2 74–118, vs SS8 86–106.
+
+Neither closes the gap, so the exposure-bias hypothesis is not supported. Owner sunset stream
+(2026-10-25). Open, untested: stream trains on 96 chunks per step where full trains on 768 windows
+(same frames, 8x fewer independent sequences); the whole-game result above points the same way.
+
+## Packed RL update for sliding-window models (commit 718f619)
+
+The PPO update re-scored each sampled decision from its own 1,075-frame context, though decisions ~8
+frames apart share ~99% of it. `ppo.pack_streams` stitches one slot's overlapping contexts into one
+sequence (only when the overlapping frames are identical) and one causal forward scores all of its
+decisions. Exact: logits within ~1e-7 in `rlvr/tests/test_rl_context.py`; on an identical rollout
+update 1 matched the per-decision path to 4-5 digits (KL 5.4407e-5 vs 5.4408e-5, grad norm 0.290826
+vs 0.290818). PPO step 303 s -> 15 s at 16,384 decisions. On by default for window models
+(`--no-packed-update` to disable). Moot for now with stream sunset.
+
+Ran SS8 on a rented vast.ai box (2x RTX 5090) for ~1.5 h; sim rebuilt there was physics-exact 6/6.
+Without the packed update the 5090 was barely faster than the shared 4090 (update not GPU-bound).
+
+## LLM-architecture sweep on full S (commit d5917d0, `train.py --arch key=value`)
+
+`tools/fast_proxy.sh NAME S 1900 1 --cond-heads --arch ...`; seed gap ~0.0007. Control 0.7662, 271 s.
+
+| Variant (`--arch`) | Δ val | Run time |
+|---|---|---|
+| `attn_gate=1` (Qwen gated attention, elementwise; +7% params) | **−0.0062** | +9% |
+| `canon=1` (Canon convs, k=4, before attn and MLP) | −0.0013 | +33% |
+| `use_swiglu=1` | −0.0011 | +16% |
+| `encoder_type=mimic_entity` (opp + self token per frame) | −0.0009 | +158% |
+| `qk_norm=1` | −0.0003 | +10% |
+| `logit_softcap=30` | −0.0001 | +7% |
+| `zero_init_proj=1` | 0.0000 | −1% |
+| `use_rmsnorm=1` | +0.0004 | +6% |
+| `value_residual=1` (ResFormer) | +0.0006 | +8% |
+| `d_model=192,nhead=3,dim_feedforward=768,num_layers=10` (deep-thin, 0.98x params) | +0.0012 | +26% |
+| `unet_skips=1` | +0.0025 | +6% |
+| `mlp_act=relu2` | +0.0046 | +3% |
+| modded-nanogpt bundle (qk_norm, relu2, zero_init, softcap 30, value_residual, unet) | +0.0053 | +14% |
+
+Run times include the fixed eval/averaging overhead and are single runs.
+
+**Gated attention in play (proxy scale):** fp3-gate vs fp3-ctrl, 96-game sim h2h, seed 41:
+**62–34** (64.6% [54.6, 73.4], p = 0.006, stock margin +0.51; 31–17 in each port order). Untested at
+S 56k. Owner: per-head gating not wanted.
+
+All variants are full-causal only (refused with `--attn-window`), causal (checked), and fall back to
+the plain forward in `fast_policy.forward_last` (correct, slower sim inference; the gate could get a
+fast path).
