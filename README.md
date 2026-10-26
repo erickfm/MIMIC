@@ -45,6 +45,10 @@ reference **56.3% over 1,152 games** in the native sim, replicated on two evalua
 yet promoted. Single-skill rewards (L-cancel rate, combo length, ...) raise their own metric
 without raising win rate; see `docs/research-notes-2026-10-23*.md`.
 
+RL on a small model (5.4M params, a quarter of `fox-master`'s size, 56k BC steps) for 100 updates
+beats `fox-master` itself: **130–70 (65%) over 200 Dolphin matches** (109–83 in the sim), and
+154–46 against its own BC start. Not promoted; see `docs/research-notes-2026-10-26.md`.
+
 ---
 
 ## Install

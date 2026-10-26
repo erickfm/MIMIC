@@ -103,7 +103,7 @@ def main():
     # docs/research-notes-2026-10-23.md); the old ones (lr 3e-5, KL 0.003, no anchor, no critic)
     # drifted every outcome VR into a worse player within 30 updates. L-cancel keeps the July recipe.
     # 100 dense updates since 2026-10-26: 16,384 x 100 beat every 30-update run, bigger batches included
-    # (docs/research-notes-2026-10-26.md).
+    # (docs/research-notes-2026-10-26.md). Gains stop there: continued to 200, u150 and u200 tied u100.
     dense_defaults = a.vr is not None
     for k, dense_v, lc_v in (("updates", 100, 60), ("lr", 1e-5, 3e-5), ("kl_beta", 0.03, 0.003),
                              ("global_kl_beta", 0.01, 0.0), ("critic", True, False)):

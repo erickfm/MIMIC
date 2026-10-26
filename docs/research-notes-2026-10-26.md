@@ -1,8 +1,8 @@
-# 2026-10-26 — Sim RL recipe: more updates win; RL small Fox beats fox-master in the sim; gains hold in Dolphin
+# 2026-10-26 — Sim RL recipe: more updates win up to ~100; RL small Fox beats fox-master (sim and Dolphin)
 
-Night of 10-25 → 10-26, owner-approved, one seed per variant, nothing promoted. Base for every RL run:
+Night of 10-25 → 10-26 and the 10-26 afternoon, owner-approved, one seed per variant, nothing promoted. Base for every RL run:
 `checkpoints/smallfox/base_full56k` (S, full attention, cond-heads, 56k steps), reward stock 1 + damage 1,
-SF2's recipe otherwise (`docs/research-notes-2026-10-25.md`). Scripts `checkpoints/smallfox/queue_{m,n,o,q,r,s}.sh`;
+SF2's recipe otherwise (`docs/research-notes-2026-10-25.md`). Scripts `checkpoints/smallfox/queue_{m,n,o,q,r,s,t,u}.sh`;
 result lines in `checkpoints/smallfox/results.txt`. Sim h2h: native sim, bf16, `replays_doc_rt` templates, seed 41.
 
 ## Decisions per update vs number of updates (queue_m)
