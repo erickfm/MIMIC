@@ -98,9 +98,11 @@ Two choices name a model: a size preset and an attention mode.
   the last 180 frames (~3 s) from scratch. **Stream** (`--attn-window 180`, plus a
   longer `--seq-len`): each layer reads 180 frames of the layer below, so 6 layers
   reach 1,075 frames (~18 s), and inference caches earlier work (`mimic/kv_cache.py`):
-  one step per frame, ~22× faster batched. Today's production Fox is M-full; no
-  production stream model exists. Every inference path runs stream models through
-  the cache automatically.
+  one step per frame, ~22× faster batched. **Stream is sunset (owner, 2026-10-25):**
+  at matched data and steps S-stream lost to S-full 77–115 despite lower loss, and
+  neither RL nor a shorter window closed the gap (`docs/research-notes-2026-10-25.md`).
+  The code still works (every inference path streams window models through the cache)
+  but don't build on it.
 - **Training budget** (separate from the model): **proxy** = S, 1,900 steps (~5 min);
   **cell** = M, 6,500 steps on 5% of master Fox (~45 min); **prod** = M, full data,
   ~280k steps.
@@ -219,26 +221,23 @@ used AdamW:** pass `--optimizer adamw` to reproduce or `--resume`
 one (a mismatched resume now fails with a message saying so). See
 `docs/research-notes-2026-10-22.md`.
 
-**Opt-in speed variants (not defaults):** `--attn-window 180` with
-`--seq-len 720` (sliding-window relpos; ties quality on the proxy and
-enables the exact streaming KV cache in `mimic/kv_cache.py`, 22×
-cheaper batched inference). Window models stream through the cache
-automatically wherever they're supported: `tools/inference_utils.
-PlayerState` (so `play.py`, `play_netplay.py`, the Discord bot,
-`sim_play.py`) and the sim runner `rlvr/sim/batch.py` (6.8× faster
-policy step at 64 envs). Both start an episode from an empty cache —
-a training chunk that begins at a game's first frame — not from mock
-frames. Paths that keep their own fixed window (`h2h_batch_mp.py`,
-`ffw_batch_mp.py`, `rlvr/sim/fast_policy.forward_last`) refuse window models
-via `require_full_causal` rather than run them mismatched. Not the
-default because no production-quality window model exists yet
-(a warm-started champion conversion played clean in Dolphin, canaries
-green). Train window models on chunks
-longer than the receptive field (`num_layers × (W−1) + 1` = 1,075 for
-W=180), e.g. `--seq-len 1440`, so training matches streaming. `--relpos-impl sdpa` (~14% faster step, equal val
-on one run; its bf16 sibling diverged, so watch a long run before
-relying on it). Score sliding-window models with
-`tools/eval_last_frame.py`, not train.py's window-averaged val.
+**Sliding-window (stream) models: sunset 2026-10-25.** `--attn-window 180` with a longer
+`--seq-len` (≥ the 1,075-frame receptive field, e.g. 1440) trains them; they stream through
+`mimic/kv_cache.py` in every inference path, and the sim RL update scores them with an exact
+packed forward (`ppo.pack_streams`). They lose to full attention in play at matched compute
+(see Model names above), so don't build on them. Score any window model with
+`tools/eval_last_frame.py`, not train.py's window-averaged val. Opt-in speed flag:
+`--relpos-impl sdpa` (~14% faster step, equal val on one run; its bf16 sibling diverged, so
+watch a long run before relying on it).
+
+**Architecture variants (`--arch key=value,...`, 2026-10-25).** Sets `ModelConfig` fields:
+`attn_gate`, `qk_norm`, `mlp_act=relu2`, `zero_init_proj`, `logit_softcap`, `value_residual`,
+`unet_skips`, `canon`, `use_rmsnorm`, `use_swiglu`, `encoder_type=mimic_entity` (two tokens per
+frame), and size fields (`d_model`, `num_layers`, ...). All off by default; full-causal only.
+The proxy sweep (`docs/research-notes-2026-10-25.md`) found only gated attention clearly better
+(−0.006 val, 62–34 in a proxy h2h, +7% params, ~9% slower); the rest were noise or worse, so
+don't re-run them. Variants without a hand-written fast path fall back to the plain forward in
+`fast_policy.forward_last` (correct, slower sim inference); the gate has a fast path.
 
 **`--cond-heads` is the default (since 2026-10-22).** Each head is
 conditioned on the earlier heads' classes, so the four heads model the
@@ -313,7 +312,7 @@ aliased presets.
 ### Local research proxies
 
 - **Fast (~5 min, the research loop):** `tools/fast_proxy.sh NAME S 1900 SEED [flags]`
-  — 5M model, Muon, val at the end, tail-SWA, fixed-subset val in
+  — 5M model, Muon, cond-heads (since 2026-10-25), val at the end, tail-SWA, fixed-subset val in
   `checkpoints/fastproxy/results.tsv`. Seed gap ~0.0007; reproduces cond-heads (−3.9% vs −4.2%);
   exaggerates optimizer/LR effects ~5× (right sign). Calibration in
   `docs/research-notes-2026-10-22.md`.
@@ -689,6 +688,10 @@ misses) and NOT the old offset=−4 press proxy (which diverged from the truth).
 `rlvr/sim/melee_sim.py` (RL env: one game per process, `reset()`/`step(pads)`, ~2.2k fps,
 inputs land on f+1 like Dolphin), `tools/sim_replay_check.py` / `tools/sim_env_check.py`
 (byte-exact fidelity checks vs .slp). Status and limits: `docs/research-notes-2026-10-20b.md`.
+Sim RL: `tools/vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 30` (PPO + KL to frozen BC,
+critic, 16,384 decisions per update by default since 2026-10-25; the opponent is the frozen
+base). On S-full 56k this recipe won 121–71 vs its base and 130–62 vs S-stream 56k
+(`docs/research-notes-2026-10-25.md`). Sim h2h: `tools/sim_h2h.py`, bf16.
 
 **Data**: `tools/slp_to_shards.py` (.slp → v2 .pt shards with
 `target[i] = buttons[i+1]` alignment); `tools/shard_and_upload_ranked.py`

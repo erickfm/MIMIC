@@ -76,8 +76,10 @@ def main():
     ap.add_argument("--horizon", type=int, default=300, help="dense mode: return horizon in frames")
     ap.add_argument("--sample-every", type=int, default=8,
                     help="dense mode: store each learner decision with probability 1/N")
-    ap.add_argument("--frames-per-update", type=int, default=4096,
-                    help="dense mode: sampled decisions (with finished returns) per update")
+    ap.add_argument("--frames-per-update", type=int, default=16384,
+                    help="dense mode: sampled decisions (with finished returns) per update. 16,384 since "
+                         "2026-10-25: at 4,096 RL on a strong base (S-full 56k) barely moved the training "
+                         "reward; 16,384 climbed and won 63%% vs the base (docs/research-notes-2026-10-25.md)")
     ap.add_argument("--packed-update", action=argparse.BooleanOptionalAction, default=True,
                     help="sliding-window models, dense mode: stitch each slot's overlapping decision "
                          "contexts into one sequence and score all its decisions in one forward "

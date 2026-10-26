@@ -6,7 +6,7 @@ P=${VR_POLICY:-hf_eval/fox-master}   # learner start = frozen BC reference = h2h
 R=${VR_RL_DIR:-checkpoints/vrsim} name=$1 spec=$2 upd=$3; shift 3
 out=$R/$name; mkdir -p $out
 python3 tools/sim_rl.py --policy-dir $P --templates replays_doc_rt --out-dir $out \
-    --envs 64 --workers 16 --updates $upd --vr "$spec" --frames-per-update 4096 "$@" > $out/train.log 2>&1 \
+    --envs 64 --workers 16 --updates $upd --vr "$spec" "$@" > $out/train.log 2>&1 \
     || { echo "$(date -u +%FT%TZ) $name TRAIN FAILED (rc=$?)" >> $R/results.txt; exit 1; }
 ck=$(ls $out/rl_u*.pt | sort | tail -1); ev=$out/eval_final; mkdir -p $ev
 cp $P/*.json $ev/; ln -sf "$(realpath $ck)" $ev/model.pt
