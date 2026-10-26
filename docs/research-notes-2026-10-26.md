@@ -82,3 +82,34 @@ replay), so costume can't identify the policy; `analyze.py` maps replays to mode
   forward aerial jumps 3.08 vs 3.82 [3.92], DEAD_FLY_STAR 0.61 vs 1.24 [1.00], tumbling 0.37 vs 0.77 [0.50].
 - Up-smash grows with training: 1.55% (base) → 2.85% (SF5, 30 updates) → 4.12% (SF7, 100 updates), 2.7x the
   human rate. The rest of the shifts sit near human rates.
+
+### SF7u100 vs fox-master in Dolphin (queue_t, same setup, 200 matches)
+
+- **Dolphin: SF7u100 130–70 vs fox-master (65.0% [58.2, 71.3], p < 0.001, stock margin +0.58)**; by port order
+  61–39 (SF7u100 on port 1) / 69–31 (port 2). Sim: 109–83 (56.8% [49.7, 63.6]). The intervals overlap.
+  0 timeouts; 185 of 200 replays parsed. The run was paused once and resumed at chunk 6 (partial chunk deleted).
+- By stage: Yoshi's 31–9, Dreamland 27–13, Pokémon Stadium 16–4, FD 24–16, Battlefield 22–18, Fountain 10–10.
+- Canaries: center-stick 32.0%, L-cancel 89.9%, aerial landings 4.11 / 1k frames (fox-master 33.6 / 90.6 / 3.04,
+  human 34.0 / 92.0 / 3.96). State JS vs human 0.0108 (fox-master 0.0081); vs fox-master 0.0126.
+- Largest shifts SF7u100 vs fox-master [human]: up-smash 3.77% vs 1.52% [1.54%], up-throw 1.17 vs 1.99 [1.37],
+  nair 2.87 vs 2.10 [2.47], forward aerial jumps 3.14 vs 3.82 [3.92], bair 3.42 vs 2.74 [3.31], grab 1.20 vs 1.82
+  [1.29], shield 1.65 vs 2.18 [1.26], DEAD_FLY_STAR 0.86 vs 1.28 [1.00].
+
+### Are the extra up-smashes whiffs? (`checkpoints/smallfox/dolphin/upsmash.py`)
+
+Each up-smash (a run of action state 63) is a hit if the opponent's percent rises during it, shielded if instead the
+opponent's shield drops, else a whiff. Punished = the user takes damage within 30 frames after it ends (any damage;
+no random-window baseline). vs-fox-master row from the first 157 parsed replays.
+
+| Player | Up-smashes / 1k frames | Hit | Shielded | Whiff | Kills per hit | Whiffs punished |
+|---|---|---|---|---|---|---|
+| human (1,336 player-games) | 0.35 | 61.7% | 11.6% | 26.7% | 0.27 | 61.1% |
+| full56k | 0.37 | 54.5% | 12.4% | 33.1% | 0.22 | 60.6% |
+| fox-master | 0.36 | 59.3% | 9.5% | 31.2% | 0.25 | 58.1% |
+| SF5 | 0.68 | 56.2% | 13.4% | 30.3% | 0.19 | 55.8% |
+| SF7u100 vs full56k | 0.97 | 56.1% | 12.0% | 31.9% | 0.17 | 51.5% |
+| SF7u100 vs fox-master | 0.89 | 55.9% | 13.7% | 30.4% | 0.17 | 53.6% |
+
+RL raises the up-smash rate ~2.6x without changing its hit / whiff split (same as the base; humans land a bit more).
+Its whiffs are punished slightly less often than the BC models' or humans', and each hit kills less often, so the extra
+up-smashes are mostly not finishers. Whether a human punishes the whiffs better is untested.
