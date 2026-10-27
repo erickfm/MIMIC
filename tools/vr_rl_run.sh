@@ -2,7 +2,7 @@
 # One sim RL run with verifiable rewards + a 192-game h2h screen vs frozen BC (docs/research-notes-2026-10-23.md).
 #   vr_rl_run.sh NAME SPEC UPDATES [extra sim_rl flags]
 # The recipe is sim_rl's dense defaults (since 2026-10-27: 16,384 decisions per update, 4 PPO epochs, lr 1e-5,
-# global KL anchor 0.01, no critic, no per-decision KL; docs/research-notes-2026-10-27.md), so pass UPDATES=100:
+# critic baseline, per-decision KL 0.03, no global anchor; docs/research-notes-2026-10-27.md), so pass UPDATES=100:
 #   VR_POLICY=checkpoints/smallfox/base_full56k vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 100
 cd /home/erick/projects/MIMIC
 P=${VR_POLICY:-hf_eval/fox-master}   # learner start = frozen BC reference = h2h opponent
@@ -21,8 +21,7 @@ rows = [json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]
 w = sum(r["games"]["win"] for r in rows[-10:]); l = sum(r["games"]["loss"] for r in rows[-10:])
 first, last = rows[0]["vr"], rows[-1]["vr"]
 vr = " ".join(f"{k} {first[k]['learn']:+.3f}->{last[k]['learn']:+.3f}" for k in last)
-kl = " ".join(f"{k} {rows[-1][k]:.4f}" for k in ("kl", "anchor_kl") if rows[-1].get(k) is not None)
-print(f"rollout last10 {w}-{l} | /min {vr} | {kl}")
+print(f"rollout last10 {w}-{l} | /min {vr} | kl {rows[-1]['kl']:.4f}")
 PY
 )
 echo "$(date -u +%FT%TZ) $name [$spec] u$upd | h2h192: $(grep -E ' vs ' $out/h2h192.log | grep -oE '[0-9]+-[0-9]+ .*p=[0-9.]+') | $roll" >> $R/results.txt

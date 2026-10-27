@@ -253,10 +253,9 @@ wavedash need the digital press, so without `TRIG` a bot can't do any of the thr
 one frame later as in Dolphin, and current-Slippi 1v1 replays re-simulate physics-exact. Many sim
 processes run in parallel and the policy runs batched on the GPU.
 
-- **Trainer** (`tools/sim_rl.py`): PPO initialized from the BC checkpoint, with a KL anchor to the
-  frozen reference on a random sample of the policy's frames and the batch-mean return as the
-  baseline (no critic). The opponent is the frozen reference itself, never the in-game CPU, which
-  doesn't punish reward hacking.
+- **Trainer** (`tools/sim_rl.py`): PPO initialized from the BC checkpoint, a per-token KL penalty
+  to the frozen reference, and a value head on the reference's features. The opponent is the
+  frozen reference itself, never the in-game CPU, which doesn't punish reward hacking.
 - **Rewards** (`rlvr/sim/vr/`): verifiable, computed from exact engine state each frame, e.g.
   stock delta, damage delta, kills at low percent, recovery, tech, L-cancel. Outcome rewards
   (stocks, damage) are the objective. Conditional skills, whose right execution depends on the
