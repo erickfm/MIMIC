@@ -104,3 +104,24 @@ The greedy procedure's output (SF7 minus the anchor) failed its final check, and
 (`3becd33`). The owner then chose to drop the critic ("not very helpful"). The default is the tested no-critic
 recipe with the best pooled record: no critic, global anchor 0.01 only, per-decision KL 0 (the code of `1a91438`;
 the critic code is deleted). No critic with per-decision KL only was never trained.
+
+## BC length at S: base_full56k's mid-run checkpoints vs its final
+
+Does training S past a few thousand steps buy win rate? `base_full56k` (`fox-S-bc1-s1`) saved every
+2,800 steps. Each checkpoint played the step-56k final in the sim: 192 games, bf16, h2h seeds 41/42/43
+(step 2,800 seed 41 only). Script and logs: `checkpoints/smallfox/ckpt_curve/`.
+
+| Step | LR (fraction of peak) | Seeds 41 / 42 / 43 | Pooled | Win rate [95%] | p |
+|---|---|---|---|---|---|
+| 2,800 | 0.99 | 9–183 / – / – | 9–183 | 4.7% [2.5, 8.7] | < 0.001 |
+| 8,400 | 0.95 | 36–156 / 46–146 / 40–152 | 122–454 | 21.2% [18.0, 24.7] | < 0.001 |
+| 14,000 | 0.85 | 69–123 / 60–132 / 62–130 | 191–385 | 33.2% [29.4, 37.1] | < 0.001 |
+| 28,000 | 0.50 | 79–113 / 70–122 / 78–114 | 227–349 | 39.4% [35.5, 43.5] | < 0.001 |
+| 42,000 | 0.15 | 95–97 / 83–109 / 82–110 | 260–316 | 45.1% [41.1, 49.2] | 0.022 |
+
+- Win rate against the final rises at every checkpoint, up to 42k (p = 0.022 pooled).
+- The h2h seed moved a single match by up to 6 points (42k: 49.5% vs 43.2%), within the ±3.6-point
+  sd of a 192-game match.
+- Caveats: one training run; mid-run checkpoints are at a higher LR than the annealed final (cosine), so
+  they understate what a shorter run with a full decay reaches. Separating steps from annealing needs
+  short runs with their own full schedule.
