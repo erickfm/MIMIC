@@ -690,15 +690,16 @@ misses) and NOT the old offset=−4 press proxy (which diverged from the truth).
 `rlvr/sim/melee_sim.py` (RL env: one game per process, `reset()`/`step(pads)`, ~2.2k fps,
 inputs land on f+1 like Dolphin), `tools/sim_replay_check.py` / `tools/sim_env_check.py`
 (byte-exact fidelity checks vs .slp). Status and limits: `docs/research-notes-2026-10-20b.md`.
-Sim RL: `tools/vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 100` (PPO + KL to frozen BC,
-critic, 16,384 decisions per update by default since 2026-10-25, 100 updates since 2026-10-26; the
-opponent is the frozen base). On S-full 56k, 100 updates won 140–52 vs the base, beat every 30-update
-run (bigger batches included), and beat fox-master 109–83 in the sim. The gains held in Dolphin:
-154–46 vs the base and 130–70 vs fox-master (sim 56.8%, Dolphin 65.0%). Gains stop by ~100 updates:
-continued to 200, the u150 and u200 checkpoints tied u100 (94–98, 96–96). The critic's explained variance
-is negative all run (~−0.2), so it isn't reducing advantage variance. `--resume rl_uNNNN.pt` restores the
-policy, AdamW and (runs from 2026-10-26 on) the critic; the KL reference stays the BC model. See
-`docs/research-notes-2026-10-26.md`. Sim h2h: `tools/sim_h2h.py`, bf16.
+Sim RL: `tools/vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 100`. The opponent is the frozen
+base. The recipe is the sim_rl dense defaults, simplified 2026-10-27: PPO, 16,384 decisions per update ×
+100 updates, 4 epochs, lr 1e-5, batch-mean baseline (no critic), and one KL term, the global anchor
+(exact KL to BC on 512 random learner frames per update, β 0.01; no per-decision KL). It tied or beat the
+older recipe (critic + both KL terms) at less wall-clock: 100–92 (seed 41) and 106–86 (seed 42) vs SF7u100.
+Results are from one training seed; commit `c2df04b` reproduces SF7 (its dense defaults are SF7's recipe).
+Lost: 1 PPO epoch at 4× lr (82–110), 50 updates at 2× lr (83–109). SF7 on S-full 56k won 140–52 vs the base and beat
+fox-master 109–83 in the sim and 130–70 in Dolphin; gains stop by ~100 updates (u150/u200 tied u100).
+`--resume rl_uNNNN.pt` restores the policy and AdamW; the KL reference stays the BC model. See
+`docs/research-notes-2026-10-26.md`, `docs/research-notes-2026-10-27.md`. Sim h2h: `tools/sim_h2h.py`, bf16.
 
 **Data**: `tools/slp_to_shards.py` (.slp → v2 .pt shards with
 `target[i] = buttons[i+1]` alignment); `tools/shard_and_upload_ranked.py`

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # One sim RL run with verifiable rewards + a 192-game h2h screen vs frozen BC (docs/research-notes-2026-10-23.md).
-#   run_vr.sh NAME SPEC UPDATES [extra sim_rl flags]
+#   vr_rl_run.sh NAME SPEC UPDATES [extra sim_rl flags]
+# The recipe is sim_rl's dense defaults (since 2026-10-27: 16,384 decisions per update, 4 PPO epochs, lr 1e-5,
+# global KL anchor 0.01, no critic, no per-decision KL; docs/research-notes-2026-10-27.md), so pass UPDATES=100:
+#   VR_POLICY=checkpoints/smallfox/base_full56k vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 100
 cd /home/erick/projects/MIMIC
 P=${VR_POLICY:-hf_eval/fox-master}   # learner start = frozen BC reference = h2h opponent
 R=${VR_RL_DIR:-checkpoints/vrsim} name=$1 spec=$2 upd=$3; shift 3
