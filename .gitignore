@@ -229,3 +229,7 @@ states/
 # Native decomp Melee sim (tools/build_native_sim.sh): decompiled game code +
 # binaries built from it. Never commit or upload.
 /sim/
+
+# local eval working dirs (checkpoints pulled from HF, h2h/CPU results)
+hf_eval/
+eval_results/
