@@ -369,7 +369,8 @@ def main():
                 chunk = frames[i:j]
                 idx = torch.stack([fr.sampled_indices for fr in chunk]).cuda()
                 lp = _logprob_at_indices(head_logits(learner, None, None, idx, h=feats_of(learner, i, j, pk)), idx).cpu()
-                lr_ = _logprob_at_indices(head_logits(ref, None, None, idx, h=feats_of(ref, i, j, pk)), idx).cpu()
+                lr_ = lp if a.kl_beta == 0 else \
+                    _logprob_at_indices(head_logits(ref, None, None, idx, h=feats_of(ref, i, j, pk)), idx).cpu()
                 for fr, x, y in zip(chunk, lp, lr_):   # the reference never changes: score it once
                     fr.logprob_old, fr.logprob_ref = x, y
         critic_stats = {}
@@ -435,7 +436,7 @@ def main():
                    lcancel_rate=n_succ / max(1, len(episodes)),
                    frames_recorded=len(frames), rollout_s=round(t_roll, 1),
                    env_fps=round((v.frames - f0) / max(t_roll, 1e-9)),
-                   update_s=round(time.time() - t0 - t_roll, 1), kl=m.get("kl"), clip_frac=m.get("clip_frac"),
+                   update_s=round(time.time() - t0 - t_roll, 1), kl=m.get("kl") if a.kl_beta > 0 else None, clip_frac=m.get("clip_frac"),
                    grad_norm=m.get("grad_norm"), elapsed_min=round((time.time() - t_start) / 60, 1))
         if dstats is not None:   # dense mode: per-frame VR means (learner / opponent) and the record
             n = max(1, dstats["learner_frames"])

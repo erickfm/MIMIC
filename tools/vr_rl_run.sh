@@ -18,7 +18,8 @@ rows = [json.loads(l) for l in open(sys.argv[1]) if l.startswith("{")]
 w = sum(r["games"]["win"] for r in rows[-10:]); l = sum(r["games"]["loss"] for r in rows[-10:])
 first, last = rows[0]["vr"], rows[-1]["vr"]
 vr = " ".join(f"{k} {first[k]['learn']:+.3f}->{last[k]['learn']:+.3f}" for k in last)
-print(f"rollout last10 {w}-{l} | /min {vr} | kl {rows[-1]['kl']:.4f}")
+kl = " ".join(f"{k} {rows[-1][k]:.4f}" for k in ("kl", "anchor_kl") if rows[-1].get(k) is not None)
+print(f"rollout last10 {w}-{l} | /min {vr} | {kl}")
 PY
 )
 echo "$(date -u +%FT%TZ) $name [$spec] u$upd | h2h192: $(grep -E ' vs ' $out/h2h192.log | grep -oE '[0-9]+-[0-9]+ .*p=[0-9.]+') | $roll" >> $R/results.txt
