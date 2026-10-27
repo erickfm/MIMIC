@@ -1,0 +1,28 @@
+# bc-S-v1 at M scale (2026-10-27): the same data, steps, batch, optimizer and seed, model M; per-GPU
+# batch capped at 384 (what M fits on a 5090/4090). Measures what the S recipe gains from 3.7x params.
+tag: bc2
+stage: bc
+scale: M
+data: fox-hf-647
+steps: 56000
+eff_batch: 768
+max_local_batch: 384
+export: last                # policy = the final step checkpoint (no averaging)
+args:
+  model: M
+  encoder: mimic_flat
+  stick-clusters: hal37
+  mimic-controller-encoding: true
+  self-inputs: true
+  reaction-delay: 0
+  cond-heads: true
+  optimizer: muon
+  muon-lr: 0.02
+  lr: 3.0e-4
+  cosine-min-lr: 1.0e-6
+  no-warmup: true
+  weight-decay: 0.01
+  grad-clip-norm: 1.0
+  dropout: 0.2
+  val-frac: 0.025
+  lean-metrics: true
