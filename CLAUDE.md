@@ -694,7 +694,8 @@ Sim RL: `tools/vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 100`. The oppone
 base. The recipe is the sim_rl dense defaults, simplified 2026-10-27: PPO, 16,384 decisions per update ×
 100 updates, 4 epochs, lr 1e-5, batch-mean baseline (no critic), and one KL term, the global anchor
 (exact KL to BC on 512 random learner frames per update, β 0.01; no per-decision KL). It tied or beat the
-older recipe (critic + both KL terms) at less wall-clock: 100–92 (seed 41) and 106–86 (seed 42) vs SF7u100.
+older recipe (critic + both KL terms) at less wall-clock: 406–362 (52.9%) vs SF7u100 over two training runs ×
+h2h seeds 41/42 (103.5 min vs SF7's 111.6).
 Results are from one training seed; commit `c2df04b` reproduces SF7 (its dense defaults are SF7's recipe).
 Lost: 1 PPO epoch at 4× lr (82–110), 50 updates at 2× lr (83–109). SF7 on S-full 56k won 140–52 vs the base and beat
 fox-master 109–83 in the sim and 130–70 in Dolphin; gains stop by ~100 updates (u150/u200 tied u100).

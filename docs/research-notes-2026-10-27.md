@@ -1,8 +1,8 @@
 # 2026-10-27 — Simplifying sim RL: no critic, one KL term, same strength, less time
 
 Night of 10-26 → 10-27. Goal: the fewest moving parts in `tools/sim_rl.py` dense mode that are at least as strong
-as the SF7 recipe and faster. **All results are from one training seed** (sim_rl `--seed 0`) per run; no run was
-repeated. Nothing promoted.
+as the SF7 recipe and faster. **All results are from one training seed** (sim_rl `--seed 0`); only step 3 was trained
+twice (same seed, see below). Nothing promoted.
 
 **Reproducing SF7:** commit `c2df04b` is the last one whose sim_rl dense defaults are SF7's recipe (critic, both KL
 terms). The next commit removes the critic code and sets the per-decision KL to 0 in dense mode.
@@ -26,18 +26,22 @@ terms). The next commit removes the critic code and sets the per-decision KL to 
 | — | SF7 (reference) | — | — | 111.6 min | 140–52 (72.9%) | — |
 | 1 | no critic | 94–98 (49.0%) | 0.414 | 107.3 min | 143–49 (74.5%) | yes |
 | 2 | + 1 PPO epoch, lr 4e-5 | 82–110 (42.7%) | 0.026 | 69.8 min | 139–53 (72.4%) | no |
-| 3 | + no per-decision KL (anchor only) | 100–92 (52.1%) | 0.742 | 115.7 min* | 148–44 (77.1%) | yes |
+| 3 | + no per-decision KL (anchor only), run 1 | 100–92 (52.1%) | 0.742 | 115.7 min* | 148–44 (77.1%) | — |
+| 3 | same recipe, run 2 (A3r) | 106–86 (55.2%) | 0.935 | 103.5 min | 153–39 (79.7%) | yes |
 | 4a | + 50 updates, lr 2e-5 | 83–109 (43.2%) | 0.035 | 51.5 min | 137–55 (71.4%) | no |
 | 4b | 33 updates, lr 3e-5 | not run: 4a failed | | | | |
 
-Final check, fresh seed: **step 3 recipe vs SF7u100, 192 games, seed 42: 106–86 (55.2% [48.1, 62.1], two-sided
-p = 0.170, one-sided p = 0.935).**
+Final check, fresh seed, vs SF7u100, 192 games, seed 42: **run 2 (A3r, the run that kept step 3) 94–98 (49.0%
+[42.0, 56.0], one-sided p = 0.414)**; run 1 106–86 (55.2% [48.1, 62.1], one-sided p = 0.935). Both pass.
 
 \*Step 3's full run overlapped external CPU load (a browser and a headless Chromium on the same box) from about
 update 30: rollouts went from ~29.6 s to ~33 s and the update phase from ~32.5 s to ~40 s. Over updates 1–25,
 before the load, its update phase was 32.5 s vs step 1's 34.7 s with equal rollouts. Re-timed under the same load,
 8 updates each in A1, A3, A3, A1 order: step 1 8.6 / 8.6 min, step 3 8.3 / 8.3 min (update phase 275 s vs 256 s
-per 8 updates, rollouts equal). That ≈ 3.5% (~3.5 min per 100 updates) is what kept it on the time rule.
+per 8 updates, rollouts equal). The keep rule asks for wall-clock to the end of training, so step 3 was trained
+again in full on the quiet machine (run 2: 103.5 min, under step 1's 107.3) and run 2's checkpoint was scored the
+same way; run 2 is what keeps step 3. Same seed and code path, but the weights differ from run 1 (GPU / rollout
+nondeterminism), so the two runs are two samples of the recipe, not a replication with a second seed.
 
 Final recipe (sim_rl dense defaults since this commit): 16,384 decisions × 100 updates, 4 PPO epochs, lr 1e-5,
 advantage = (return − batch mean) / batch std, global KL anchor 0.01, no critic, no per-decision KL.
@@ -60,5 +64,5 @@ advantage = (return − batch mean) / batch std, global KL anchor 0.01, no criti
   ended (updates 91–100: +0.24 to +0.39 stock, +1.25 to +1.59 damage).
 - **Logging.** In dense mode the `kl` field (per-decision KL to BC) is now `null`; the anchor KL is in `anchor_kl`.
   `vr_rl_run.sh`'s summary line prints whichever are present.
-- One seed throughout, and the two strength checks of the final recipe (seed 41: 100–92, seed 42: 106–86) use the
-  same trained checkpoint; they vary the evaluation games, not the training run.
+- One training seed throughout. The final recipe's four checks vs SF7u100 (run 1: 100–92, 106–86; run 2: 106–86,
+  94–98) total 406–362 (52.9%).
