@@ -1,0 +1,29 @@
+# 5-minute research proxy (tools/fast_proxy.sh): S, 1,900 steps on 5% of c9, tail-SWA of the last 5
+# checkpoints, fixed-subset val at the end (EVAL_ONLY line). ~300 s on one 4090.
+tag: bcp1
+stage: bc
+scale: S
+data: mastfox-c9-half
+steps: 1900
+eff_batch: 768
+max_local_batch: 768
+export: {swa_last: 5}
+eval_only: {seed: 0, batch-size: 768}
+args:
+  model: S
+  encoder: mimic_flat
+  stick-clusters: hal37
+  mimic-controller-encoding: true
+  self-inputs: true
+  reaction-delay: 0
+  cond-heads: true
+  optimizer: muon
+  muon-lr: 0.02
+  lr: 3.0e-4
+  cosine-min-lr: 1.0e-6
+  no-warmup: true
+  weight-decay: 0.01
+  grad-clip-norm: 1.0
+  dropout: 0.2
+  val-frac: 1.0
+  lean-metrics: true

@@ -1,0 +1,19 @@
+# SF7: the sim RL recipe of 2026-10-26 (code at c2df04b). PPO with a critic, per-decision KL 0.03 and
+# the global anchor 0.01. On fox-S-bc1: 140-52 vs the base, 109-83 vs fox-master (sim), 130-70 (Dolphin).
+# 111 min on one 4090 for an S policy. The critic code was deleted in b9a5749, so this recipe only
+# runs at c2df04b; tools/run.py refuses it on a later commit (requires_commit).
+tag: rl1
+stage: rl
+requires_commit: c2df04b
+templates: replays_doc_rt
+args:
+  vr: "stock_delta:1,damage_delta:1"
+  updates: 100
+  frames-per-update: 16384
+  ppo-epochs: 4
+  lr: 1.0e-5
+  kl-beta: 0.03
+  critic: true
+  global-kl-beta: 0.01
+  envs: 64
+  workers: 16

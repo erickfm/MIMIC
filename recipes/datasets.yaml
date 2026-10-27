@@ -1,0 +1,18 @@
+# Datasets that recipes name by id. tools/run.py uses the first path whose tensor_manifest.json
+# has this SHA-1, so a recipe trains on exactly the same games on any machine.
+fox-hf-647:
+  note: >-
+    Random 647-shard prefix of erickfm/mimic-shards-v2 fox/ (46,277 train games) + 24 val shards
+    (1,629 games). base_full56k's data. Shards are a subset of fox-hf-full's.
+  manifest_sha1: bcadf005144241cb8f179fd188e366d5d0ff6ea2
+  paths: [data/fox_full_hf/fox, /workspace/data/fox_hf_647]
+fox-hf-full:
+  note: >-
+    All of erickfm/mimic-shards-v2 fox/: 97,490 train / 10,861 val master-Fox perspectives,
+    nearest-of-9 c-stick history, no mirror. fox-master's and cond-heads M's data.
+  manifest_sha1: 29d0d26e633b4f9807cadcda5fda25c92c22ec90
+  paths: [/workspace/hf_shards/fox, data/fox_full_hf/fox_full]
+mastfox-c9-half:
+  note: 5% of the c9 master-Fox build; the fast proxy's data (tools/fast_proxy.sh).
+  manifest_sha1: 91f5c2c2caea4ccd19e78bb94b634928cb5aa850
+  paths: [data/mastfox_c9_half]

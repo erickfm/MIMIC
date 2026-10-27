@@ -1,0 +1,12 @@
+{
+ "name": "fox-M-bc1-legacy",
+ "stage": "bc",
+ "recipe": "recipes/bc-M-v1.yaml",
+ "seed": null,
+ "parent": null,
+ "char": "fox",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/checkpoints/box_20261020/eval/condheads_avg",
+ "note": "fox-20261020-condheads, tail-SWA of the last 5 checkpoints; trained with EMA and val every 1%; seed not recorded",
+ "registered": "2026-10-27T21:52:56+00:00"
+}

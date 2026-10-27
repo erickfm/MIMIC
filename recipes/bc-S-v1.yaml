@@ -1,0 +1,28 @@
+# S base: fox-20261024-S-full56k (checkpoints/smallfox/base_full56k), 2026-10-24. 2 h 05 min on one 4090.
+# Its run used train.py defaults of that day; every one of them is pinned here.
+tag: bc1
+stage: bc
+scale: S
+data: fox-hf-647
+steps: 56000
+eff_batch: 768
+max_local_batch: 768        # per-GPU batch cap; grad accumulation makes up the rest
+export: last                # policy = the final step checkpoint (no averaging)
+args:
+  model: S
+  encoder: mimic_flat
+  stick-clusters: hal37
+  mimic-controller-encoding: true
+  self-inputs: true
+  reaction-delay: 0
+  cond-heads: true
+  optimizer: muon
+  muon-lr: 0.02
+  lr: 3.0e-4
+  cosine-min-lr: 1.0e-6
+  no-warmup: true
+  weight-decay: 0.01
+  grad-clip-norm: 1.0
+  dropout: 0.2
+  val-frac: 0.025
+  lean-metrics: true

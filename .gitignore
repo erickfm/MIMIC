@@ -233,3 +233,10 @@ states/
 # local eval working dirs (checkpoints pulled from HF, h2h/CPU results)
 hf_eval/
 eval_results/
+
+# runs/<name>/: only run.json and the small h2h result files are tracked (tools/run.py)
+runs/*/*
+!runs/*/run.json
+!runs/*/eval/
+runs/*/eval/*
+!runs/*/eval/*.result.json

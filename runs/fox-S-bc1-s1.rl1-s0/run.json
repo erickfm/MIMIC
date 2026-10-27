@@ -1,0 +1,12 @@
+{
+ "name": "fox-S-bc1-s1.rl1-s0",
+ "stage": "rl",
+ "recipe": "recipes/rl-v1.yaml",
+ "seed": 0,
+ "parent": "fox-S-bc1-s1",
+ "char": "fox",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/checkpoints/smallfox/SF7-full56k_16k_u100/eval_final",
+ "note": "SF7u100 (checkpoints/smallfox/SF7-full56k_16k_u100), update 100",
+ "registered": "2026-10-27T21:52:56+00:00"
+}

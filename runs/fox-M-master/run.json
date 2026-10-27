@@ -1,0 +1,12 @@
+{
+ "name": "fox-M-master",
+ "stage": "bc",
+ "recipe": null,
+ "seed": 42,
+ "parent": null,
+ "char": "fox",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/hf_eval/fox-master",
+ "note": "production fox-master = fox-mastfox-20260717-cstick9-nomirror AVG_c9nm (AdamW, independent heads, seed 42); older code, no recipe",
+ "registered": "2026-10-27T21:52:56+00:00"
+}

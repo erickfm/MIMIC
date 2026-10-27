@@ -1,0 +1,28 @@
+# M base: fox-20261020-condheads (cond-heads M), 2026-10-20, ~9 h on 2x5090. Beat fox-master 610-446
+# in the sim. Its run also kept a weight EMA (removed 2026-10-22; tail-SWA is used instead) and
+# validated every 1%; otherwise this is its recipe: the July champion's plus cond-heads.
+tag: bc1
+stage: bc
+scale: M
+data: fox-hf-full
+steps: 280000
+eff_batch: 768
+max_local_batch: 384
+export: {swa_last: 5}
+args:
+  model: M
+  encoder: mimic_flat
+  stick-clusters: hal37
+  mimic-controller-encoding: true
+  self-inputs: true
+  reaction-delay: 0
+  cond-heads: true
+  optimizer: adamw
+  lr: 3.0e-4
+  cosine-min-lr: 1.0e-6
+  no-warmup: true
+  weight-decay: 0.01
+  grad-clip-norm: 1.0
+  dropout: 0.2
+  val-frac: 0.01
+  lean-metrics: true

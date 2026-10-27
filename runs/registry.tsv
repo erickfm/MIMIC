@@ -1,0 +1,5 @@
+name	stage	recipe	parent	seed	status	started_pt	wall_min	host	commit	val_fixed	h2h
+fox-M-bc1-legacy	bc	bc-M-v1			legacy						
+fox-M-master	bc			42	legacy						
+fox-S-bc1-s1	bc	bc-S-v1		1	legacy						
+fox-S-bc1-s1.rl1-s0	rl	rl-v1	fox-S-bc1-s1	0	legacy						

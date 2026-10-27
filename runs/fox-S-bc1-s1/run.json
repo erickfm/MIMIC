@@ -1,0 +1,12 @@
+{
+ "name": "fox-S-bc1-s1",
+ "stage": "bc",
+ "recipe": "recipes/bc-S-v1.yaml",
+ "seed": 1,
+ "parent": null,
+ "char": "fox",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/checkpoints/smallfox/base_full56k",
+ "note": "fox-20261024-S-full56k (base_full56k), raw step-56k checkpoint",
+ "registered": "2026-10-27T21:52:56+00:00"
+}

@@ -1,0 +1,16 @@
+# The sim RL default since 2026-10-27 (b9a5749): rl-v1 without the critic and without the
+# per-decision KL; the global anchor (0.01) is the only KL term. 406-362 vs SF7u100 pooled over
+# 2 runs x 2 h2h seeds; 103.5 min on one 4090 for an S policy.
+tag: rl2
+stage: rl
+templates: replays_doc_rt
+args:
+  vr: "stock_delta:1,damage_delta:1"
+  updates: 100
+  frames-per-update: 16384
+  ppo-epochs: 4
+  lr: 1.0e-5
+  kl-beta: 0.0
+  global-kl-beta: 0.01
+  envs: 64
+  workers: 16

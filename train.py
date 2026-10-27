@@ -62,6 +62,7 @@ SEQUENCE_LENGTH = 180
 REACTION_DELAY  = 0     # v2 shards bake in the next-frame target; 1 only for legacy leaked shards
 DATA_DIR        = "./data/full"
 MAX_SAMPLES     = 2_000_000
+CKPT_DIR        = "checkpoints"   # --ckpt-dir; tools/run.py points it at runs/<name>/ckpt
 
 GRAD_CLIP_NORM      = 1.0
 TASK_NAMES          = ["main", "l", "r", "cdir", "btn"]
@@ -944,8 +945,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     def _save_snapshot(step):
         if not _is_main:
             return
-        os.makedirs("checkpoints", exist_ok=True)
-        _p = f"checkpoints/{run_name}_snap{step:06d}.pt"
+        os.makedirs(CKPT_DIR, exist_ok=True)
+        _p = f"{CKPT_DIR}/{run_name}_snap{step:06d}.pt"
         c = {
             "global_step":      step,
             "model_state_dict": _raw_model.state_dict(),
@@ -1226,8 +1227,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                 if cur_val_f1 > best_val_f1:
                     best_val_f1 = cur_val_f1
                     if _is_main:
-                        os.makedirs("checkpoints", exist_ok=True)
-                        best_path = f"checkpoints/{run_name}_best.pt"
+                        os.makedirs(CKPT_DIR, exist_ok=True)
+                        best_path = f"{CKPT_DIR}/{run_name}_best.pt"
                         torch.save(_build_best_ckpt(), best_path)
                         _log(f"  -- new best val f1={cur_val_f1:.1%} → {best_path}")
                 if cur_val_loss < best_val_loss:
@@ -1235,8 +1236,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
                     best_val_loss_step = step
                     evals_since_improve = 0
                     if _is_main:
-                        os.makedirs("checkpoints", exist_ok=True)
-                        best_loss_path = f"checkpoints/{run_name}_bestloss.pt"
+                        os.makedirs(CKPT_DIR, exist_ok=True)
+                        best_loss_path = f"{CKPT_DIR}/{run_name}_bestloss.pt"
                         torch.save(_build_best_ckpt(), best_loss_path)
                         _log(f"  -- new best val loss={cur_val_loss:.4f} → {best_loss_path}")
                 elif math.isfinite(cur_val_loss):
@@ -1252,8 +1253,8 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         # Checkpoint
         if step % ckpt_interval == 0 or step == max_steps:
             if _is_main:
-                os.makedirs("checkpoints", exist_ok=True)
-                ckpt_path = f"checkpoints/{run_name}_step{step:06d}.pt"
+                os.makedirs(CKPT_DIR, exist_ok=True)
+                ckpt_path = f"{CKPT_DIR}/{run_name}_step{step:06d}.pt"
                 _cfg_save = {**cfg.__dict__, "model_preset": model_preset, "run_name": run_name}
                 ckpt_data = {
                     "global_step":          step,
@@ -1288,7 +1289,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
     if input_gate_l1 > 0 and _is_main and hasattr(_raw_model.encoder, "input_gate_logits"):
         import json
         report = _raw_model.encoder.gate_report()
-        gate_path = f"checkpoints/{run_name}_gate_report.json"
+        gate_path = f"{CKPT_DIR}/{run_name}_gate_report.json"
         with open(gate_path, "w") as f:
             json.dump(
                 {"input_gate_l1": input_gate_l1,
@@ -1330,6 +1331,8 @@ if __name__ == "__main__":
                         help="Learning rate (default: 3e-4; the aux-AdamW groups under Muon)")
     parser.add_argument("--run-name",   type=str, default=None,
                         help="Wandb run name (auto-generated if not set)")
+    parser.add_argument("--ckpt-dir",   type=str, default="checkpoints",
+                        help="Where checkpoints are written as {run_name}_*.pt (default: checkpoints)")
     parser.add_argument("--wandb-tags", type=str, default=None,
                         help="Comma-separated wandb tags (e.g. 'lr-sweep,small')")
     parser.add_argument("--wandb-group", type=str, default=None,
@@ -1448,6 +1451,7 @@ if __name__ == "__main__":
     parser.add_argument("--character-filter", type=int, default=None,
                         help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
     args = parser.parse_args()
+    CKPT_DIR = args.ckpt_dir
 
     if args.seed is not None:
         import random

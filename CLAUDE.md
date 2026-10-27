@@ -325,6 +325,26 @@ aliased presets.
   --no-load-optim --warm-restart --lr 1e-4`, 2k steps.
 - Score sliding-window models with `tools/eval_last_frame.py`.
 
+### Recipes and run names (`recipes/`, `tools/run.py`, since 2026-10-27)
+
+New runs go through `tools/run.py`, not hand-written queue scripts.
+
+- **Recipes** are frozen YAML files in `recipes/` that pin every flag (current defaults drift), the
+  dataset by id (`recipes/datasets.yaml` pins each by manifest SHA-1 and lists where it lives on each
+  machine) and the step budget. Never edit one in place: a change is a new version. `bc-S-v1`
+  (`base_full56k`), `bc-S-proxy-v1` (the 5-minute proxy), `bc-M-v1` (cond-heads M), `rl-v1` (SF7; runs
+  only at `c2df04b`, the critic is gone after it), `rl-v2` (today's sim RL default).
+- **Names** are built by the launcher: BC `{char}-{scale}-{tag}[-{runtag}]-s{seed}` (`fox-S-bc1-s1`),
+  RL `{parent}.{tag}[-{runtag}]-s{seed}` (`fox-S-bc1-s1.rl2-s1`). `--set key=value` overrides need a
+  `--tag` saying what changed (`fox-S-bc1-14k-s1`).
+- **Each run** is `runs/<name>/`: `run.json` (recipe, overrides, command, commit, host, wall-clock),
+  `logs/`, `ckpt/` or `rl/`, `policy/` (model.pt + norm JSONs) and `eval/*.result.json` (one per h2h).
+  Only `run.json` and the result files are tracked in git; `runs/registry.tsv` is rebuilt from them.
+- `tools/run.py launch RECIPE --char fox --seed N` / `--parent RUN --seed N`; `tools/run.py h2h A B`
+  (192 games, seed 41, bf16); `tools/run.py registry`. Runs made before this exist as `legacy` entries
+  (`fox-S-bc1-s1` = `base_full56k`, `fox-S-bc1-s1.rl1-s0` = SF7u100, `fox-M-bc1-legacy` = cond-heads M,
+  `fox-M-master`); on another machine, `tools/run.py register NAME --policy DIR` relinks their policy.
+
 ### Do NOT run inference while training on the same GPU
 
 GPU contention causes frame drops in Dolphin, making the model appear
