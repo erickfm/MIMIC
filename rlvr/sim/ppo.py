@@ -35,13 +35,6 @@ class OnlinePPOConfig:
     advantage_eps: float = 1e-8
     minibatch_frames: int = 64        # chunk size for GPU forward
     normalize_by_std: bool = True
-    # Off by default (normal path unchanged). When True, each episode
-    # must carry a precomputed scalar advantage in
-    # ep.metadata["advantage"]; every frame of that episode gets it and
-    # the global return z-scoring above is bypassed (e.g. matched-context
-    # group means, reward - group mean, rather than batch-wide z-scores;
-    # the removed savestate drill loop used it).
-    use_metadata_advantage: bool = False
 
 
 def collate(obs_list, device="cuda"):
@@ -264,6 +257,7 @@ def ppo_update(
     cfg: OnlinePPOConfig = OnlinePPOConfig(),
     device: str = "cuda",
     ref_model=None,
+    extra_loss=None,
     packs=None,
 ) -> Dict[str, float]:
     """Run one PPO epoch over the collected episodes.
@@ -287,16 +281,9 @@ def ppo_update(
     if N == 0:
         return {"n_frames": 0, "n_episodes": len(episodes)}
 
-    if cfg.use_metadata_advantage:
-        advantages = torch.cat([
-            torch.full((len(ep.frames),), float(ep.metadata["advantage"]),
-                       dtype=torch.float32)
-            for ep in episodes
-        ]).to(device).detach()
-    else:
-        advantages = _compute_advantages(
-            episodes, cfg.gamma, cfg.normalize_by_std, cfg.advantage_eps
-        ).to(device).detach()
+    advantages = _compute_advantages(
+        episodes, cfg.gamma, cfg.normalize_by_std, cfg.advantage_eps
+    ).to(device).detach()
 
     sampled_indices = torch.stack(
         [fr.sampled_indices for fr in all_frames], dim=0
@@ -385,6 +372,12 @@ def ppo_update(
         ) * (end - start)
         total_n += (end - start)
 
+    extra = None
+    if extra_loss is not None:
+        # Optional extra objective (e.g. the sim RL's global KL anchor), added to the same step.
+        extra = extra_loss()
+        if extra.requires_grad:   # a hook may backpropagate itself (e.g. in chunks) and return the value
+            extra.backward()
     grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
     optimizer.step()
 
@@ -398,4 +391,5 @@ def ppo_update(
         "grad_norm": float(grad_norm),
         "n_frames": total_n,
         "n_episodes": len(episodes),
+        "extra_loss": float(extra.item()) if extra is not None else None,
     }

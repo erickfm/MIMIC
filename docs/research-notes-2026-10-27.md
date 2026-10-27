@@ -7,7 +7,7 @@ pairs are two samples of the recipe, not a replication with a second seed. Nothi
 
 **Reproducing SF7:** commit `c2df04b` is the last one whose sim_rl dense defaults are SF7's recipe (critic, both KL
 terms); its first update reproduces SF7's to every logged digit. Commit `1a91438` has the first pass's recipe (no
-critic, anchor only). The current defaults are the second pass's (critic, per-decision KL only).
+critic, anchor only), which is the current default again (see the end).
 
 ## Setup
 
@@ -66,8 +66,8 @@ were re-tested on SF7 (critic kept):
 | Recipe | vs SF7u100, pooled | Train |
 |---|---|---|
 | SF7 retrain | 181–203 (47.1%), 1 run × 2 seeds | 111.3 min |
-| No critic, anchor only | 406–362 (52.9%), 2 runs × 2 seeds | 103.5 |
-| Critic, per-decision only (current default) | 180–204 (46.9%), 1 run × 2 seeds | 107.3 |
+| **No critic, anchor only (current default)** | 406–362 (52.9%), 2 runs × 2 seeds | 103.5 |
+| Critic, per-decision only (default in 3becd33) | 180–204 (46.9%), 1 run × 2 seeds | 107.3 |
 | Critic, anchor only | 86–105–1 (45.1%), 1 match | 107.5 |
 | No critic, both KL | 172–212 (44.8%), 2 runs, seed 41 | 107.3–107.4 |
 | 50 updates at 2× lr | 172–212 (44.8%), 2 runs (critic and not) | 51.5–53.6 |
@@ -95,7 +95,12 @@ were re-tested on SF7 (critic kept):
   others).
 - **Cheap predictors.** Over the 10 ablation runs, the vs-SF7u100 win rate correlates 0.75 with the rollout record of
   the last 10 updates (free) and 0.74 with the 192-game vs-base screen.
-- **Logging.** The `anchor_kl` field and `--global-kl-beta` / `--anchor-frames` are gone with the anchor;
-  `vr_rl_run.sh`'s summary prints `kl`.
-- Open: the default is the greedy procedure's output, which failed its final check; switching to the no-critic +
-  anchor-only recipe (better pooled record, faster) is the owner's call.
+- **Logging.** In dense mode the `kl` field (per-decision KL to BC) is `null`; the anchor KL is in `anchor_kl`.
+  `vr_rl_run.sh`'s summary prints whichever are present.
+
+## Decision
+
+The greedy procedure's output (SF7 minus the anchor) failed its final check, and it was briefly the default
+(`3becd33`). The owner then chose to drop the critic ("not very helpful"). The default is the tested no-critic
+recipe with the best pooled record: no critic, global anchor 0.01 only, per-decision KL 0 (the code of `1a91438`;
+the critic code is deleted). No critic with per-decision KL only was never trained.

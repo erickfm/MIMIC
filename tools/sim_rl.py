@@ -26,8 +26,10 @@ Dense verifiable rewards (--vr "stock_delta:1,damage_delta:0.01"): rlvr/sim/vr m
 sim workers on every frame; their weighted sum is the reward stream. A sampled learner decision
 (probability 1/--sample-every) gets the discounted return of the next --horizon frames (or until
 the match ends, plus each module's end-of-match term) and becomes a one-frame episode, so
-ppo_update's batch normalization turns returns into advantages. Every finished rollout game is
-also a game against frozen BC: the log carries the learner's record.
+ppo_update's batch normalization turns returns into advantages (the batch mean is the baseline;
+no critic). The policy is held near BC by an exact KL on a random sample of all its frames
+(--global-kl-beta), not by PPO's per-decision term (--kl-beta, 0 in dense mode). Every finished
+rollout game is also a game against frozen BC: the log carries the learner's record.
 """
 import argparse, copy, json, os, random as _random_mod, sys, time
 from pathlib import Path
@@ -55,8 +57,14 @@ def main():
                     help="also keep collecting until the batch holds this many misses (batch grows "
                          "~1/miss-rate as success saturates: the tuned recipe's batch scaling)")
     ap.add_argument("--max-episodes-per-update", type=int, default=2000)
+    ap.add_argument("--global-kl-beta", type=float, default=None,
+                    help="anchor the policy to BC on a random sample of ALL its frames (exact KL over "
+                         "the 4 heads), not just the L-cancel episode frames PPO's KL term sees "
+                         "(default: 0.01 dense, 0 L-cancel)")
+    ap.add_argument("--anchor-frames", type=int, default=512, help="anchor sample size per update")
     ap.add_argument("--lr", type=float, default=None, help="default: 1e-5 dense, 3e-5 L-cancel")
-    ap.add_argument("--kl-beta", type=float, default=None, help="default: 0.03 dense, 0.003 L-cancel")
+    ap.add_argument("--kl-beta", type=float, default=None,
+                    help="per-decision KL to BC on the sampled actions (default: 0 dense, 0.003 L-cancel)")
     ap.add_argument("--ppo-epochs", type=int, default=4)
     ap.add_argument("--ppo-minibatch", type=int, default=0,
                     help="decisions per update forward (memory only; default: 64 at 180 frames, fewer for "
@@ -79,10 +87,6 @@ def main():
                     help="sliding-window models, dense mode: stitch each slot's overlapping decision "
                          "contexts into one sequence and score all its decisions in one forward "
                          "(exact; ppo.pack_streams). --no-packed-update scores each decision alone")
-    ap.add_argument("--critic", action=argparse.BooleanOptionalAction, default=None,
-                    help="dense mode (on by default there): learned value baseline V(s) on the frozen "
-                         "BC's features; advantage = return - V, z-scored. V is fit after use (lagged), "
-                         "on the last 3 updates")
     ap.add_argument("--guards", default=None,
                     help="dense mode: 'id[:margin],...' VRs kept at least at BC's level (+margin, relative) "
                          "in the same rollout games, by adaptive (Lagrangian) weights")
@@ -91,19 +95,16 @@ def main():
     ap.add_argument("--guard-max", type=float, default=2.0)
     ap.add_argument("--normalize", action="store_true",
                     help="dense mode: scale each VR's returns by its running std, so weights compare across VRs")
-    ap.add_argument("--critic-lr", type=float, default=1e-3)
-    ap.add_argument("--critic-epochs", type=int, default=20)
     a = ap.parse_args()
-    # Dense defaults = the recipe that beat frozen BC (stock 1 + damage 0.25: 56.3% over 1,152 games,
-    # docs/research-notes-2026-10-23.md); the old ones (lr 3e-5, KL 0.003, no anchor, no critic)
-    # drifted every outcome VR into a worse player within 30 updates. L-cancel keeps the July recipe.
-    # 100 dense updates since 2026-10-26: 16,384 x 100 beat every 30-update run, bigger batches included
-    # (docs/research-notes-2026-10-26.md). Gains stop there: continued to 200, u150 and u200 tied u100.
-    # The global KL anchor was removed 2026-10-27, the one change a greedy ablation kept: 180-204 vs SF7u100 over
-    # two h2h seeds, where a retrain of SF7's own recipe scores 181-203 (docs/research-notes-2026-10-27.md).
+    # Dense defaults: 16,384 decisions x 100 updates, 4 PPO epochs, lr 1e-5, the global KL anchor
+    # (0.01) and nothing else: no critic (batch-mean baseline) and no per-decision KL term. Chosen
+    # 2026-10-27 on the best pooled record vs SF7u100 (406-362 over 2 runs x 2 h2h seeds; a retrain of
+    # SF7, which had both, scores 181-203) at 103.5 vs 111.3 min (one training seed,
+    # docs/research-notes-2026-10-27.md; commit c2df04b reproduces SF7). Gains stop at ~100
+    # updates (u150 and u200 tied u100). L-cancel keeps the July recipe.
     dense_defaults = a.vr is not None
-    for k, dense_v, lc_v in (("updates", 100, 60), ("lr", 1e-5, 3e-5), ("kl_beta", 0.03, 0.003),
-                             ("critic", True, False)):
+    for k, dense_v, lc_v in (("updates", 100, 60), ("lr", 1e-5, 3e-5), ("kl_beta", 0.0, 0.003),
+                             ("global_kl_beta", 0.01, 0.0)):
         if getattr(a, k) is None:
             setattr(a, k, dense_v if dense_defaults else lc_v)
 
@@ -177,14 +178,33 @@ def main():
     dense = bool(vr_ids)
     packed = bool(window and a.packed_update and dense)
     sample_rng = _random_mod.Random(a.seed + 1)
+    import random as _random
+    anchor_rng = _random.Random(a.seed)
+    anchor = []           # reservoir sample of the learner's frame windows, refilled per update
+    anchor_seen = 0
 
     def ppo_idx(row):   # BatchedPolicy order (main, c, shoulder, button) -> PPO order
         m, c, sh, b = (int(x) for x in row)
         return torch.tensor([m, sh, c, b], dtype=torch.long)
 
     def on_decide(name, idx, pol):
+        nonlocal anchor_seen
         if name != "LEARN":
             return
+        if a.global_kl_beta > 0:
+            picks = []
+            for s in slots:   # reservoir sampling over every learner frame of this update's rollouts
+                anchor_seen += 1
+                j = anchor_rng.randrange(anchor_seen) if len(anchor) >= a.anchor_frames else len(anchor)
+                if j < a.anchor_frames:
+                    picks.append((j, s))
+            if picks:
+                for (j, s), obs in zip(picks, pol.context([s["slot"] for _, s in picks])):
+                    w = (obs, ppo_idx(idx[s["slot"]]))
+                    if j < len(anchor):
+                        anchor[j] = w
+                    else:
+                        anchor.append(w)
         if dense:   # sample decisions; their returns accumulate from the next frame on
             chosen = [s for s in slots if sample_rng.random() * a.sample_every < 1.0]
             step = int(pol.hist_g) if packed else -1
@@ -216,16 +236,6 @@ def main():
     # ~8% slower per update than 64 (2026-10-23).
     mb = a.ppo_minibatch or max(4, 64 * 180 // ctx_len)
     pcfg = OnlinePPOConfig(kl_beta=a.kl_beta, minibatch_frames=mb)
-    critic = None
-    if a.critic:   # value baseline on the frozen BC's final-norm features at the decision frame
-        critic = torch.nn.Sequential(torch.nn.Linear(cfg.d_model, 256), torch.nn.GELU(),   # one output per VR
-                                     torch.nn.Linear(256, max(1, len(vr_ids)))).cuda()
-        critic_opt = torch.optim.Adam(critic.parameters(), lr=a.critic_lr)
-        critic_replay = []
-        crit_path = a.resume and Path(a.resume).with_name(Path(a.resume).name.replace("rl_u", "critic_u"))
-        if crit_path and crit_path.exists():   # runs saved before 2026-10-26 have none: the critic restarts
-            cs = torch.load(crit_path, map_location="cuda", weights_only=False)
-            critic.load_state_dict(cs["critic"]); critic_opt.load_state_dict(cs["opt"])
     log = open(out / "metrics.jsonl", "a")
     t_start = time.time()
     from rlvr.sim.trajectory import Episode
@@ -347,45 +357,47 @@ def main():
                 chunk = frames[i:j]
                 idx = torch.stack([fr.sampled_indices for fr in chunk]).cuda()
                 lp = _logprob_at_indices(head_logits(learner, None, None, idx, h=feats_of(learner, i, j, pk)), idx).cpu()
-                lr_ = _logprob_at_indices(head_logits(ref, None, None, idx, h=feats_of(ref, i, j, pk)), idx).cpu()
+                lr_ = lp if a.kl_beta == 0 else \
+                    _logprob_at_indices(head_logits(ref, None, None, idx, h=feats_of(ref, i, j, pk)), idx).cpu()
                 for fr, x, y in zip(chunk, lp, lr_):   # the reference never changes: score it once
                     fr.logprob_old, fr.logprob_ref = x, y
-        critic_stats = {}
-        if critic is not None and episodes:
+        extra = None
+        if a.global_kl_beta > 0 and anchor:
+            # KL(policy || BC) summed over the 4 heads at each anchor frame: exact for independent
+            # heads; for --cond-heads each head's KL is conditioned on the rollout's sampled
+            # classes for the earlier heads (a one-sample estimate of the joint KL's chain rule).
+            achunks = []
             with torch.no_grad():
-                feats = []
-                for i, j, pk in spans:
-                    with torch.autocast("cuda", dtype=torch.bfloat16):
-                        f = feats_of(ref, i, j, pk)
-                    feats.append(f.float())
-                feats = torch.cat(feats)
-                G = torch.tensor(Gm / vr_scale, dtype=torch.float32, device="cuda")   # (N, n_vr) scaled
-                W = torch.tensor(vr_w, dtype=torch.float32, device="cuda")
-                resid = ((G - critic(feats)) * W).sum(-1)   # the critic has not seen this batch
-                R = (G * W).sum(-1)
-                critic_stats["explained_var"] = float(1 - resid.var() / R.var().clamp_min(1e-12))
-                adv = (resid - resid.mean()) / (resid.std() + 1e-8)
-            for ep, x in zip(episodes, adv.tolist()):
-                ep.metadata["advantage"] = x
-            pcfg.use_metadata_advantage = True
-            critic_replay = (critic_replay + [(feats, G)])[-3:]
-            X = torch.cat([f for f, _ in critic_replay]); Y = torch.cat([g for _, g in critic_replay])
-            for _ in range(a.critic_epochs):
-                perm = torch.randperm(len(X), device="cuda")
-                for j in range(0, len(X), 512):
-                    sel = perm[j:j + 512]
-                    loss = torch.nn.functional.mse_loss(critic(X[sel]), Y[sel])
-                    critic_opt.zero_grad(); loss.backward(); critic_opt.step()
-            critic_stats["critic_mse"] = float(loss)
+                for i in range(0, len(anchor), pcfg.minibatch_frames):
+                    part = anchor[i:i + pcfg.minibatch_frames]
+                    ab, al = collate([o for o, _ in part])
+                    ai = torch.stack([x for _, x in part]).cuda()
+                    ref_logp = {h: torch.log_softmax(x.float(), -1) for h, x in head_logits(ref, ab, al, ai).items()}
+                    achunks.append((ab, al, ai, ref_logp))
+
+            def extra():
+                n, total = len(anchor), 0.0
+                for ab, al, ai, ref_logp in achunks:   # chunked like PPO's own forward
+                    out = head_logits(learner, ab, al, ai)
+                    kl = 0.0
+                    for h, lr_ in ref_logp.items():
+                        lp = torch.log_softmax(out[h].float(), -1)
+                        kl = kl + (lp.exp() * (lp - lr_)).sum(-1).sum()
+                    (a.global_kl_beta * kl / n).backward()
+                    total += float(kl)
+                return torch.tensor(a.global_kl_beta * total / n)
         for _ in range(a.ppo_epochs):
-            m = ppo_update(learner, episodes, opt, pcfg, device="cuda", ref_model=None,
+            m = ppo_update(learner, episodes, opt, pcfg, device="cuda", ref_model=None, extra_loss=extra,
                            packs=packs)
         v.policies["LEARN"].refresh()   # sliding-window learner: re-key its cache with the new weights
-        rec = dict(update=upd, episodes=len(episodes), misses=len(episodes) - n_succ,
+        anchor_kl = (m.get("extra_loss") / a.global_kl_beta) if (a.global_kl_beta > 0 and m.get("extra_loss") is not None) else None
+        anchor.clear()
+        anchor_seen = 0
+        rec = dict(update=upd, episodes=len(episodes), misses=len(episodes) - n_succ, anchor_kl=anchor_kl,
                    lcancel_rate=n_succ / max(1, len(episodes)),
                    frames_recorded=len(frames), rollout_s=round(t_roll, 1),
                    env_fps=round((v.frames - f0) / max(t_roll, 1e-9)),
-                   update_s=round(time.time() - t0 - t_roll, 1), kl=m.get("kl"), clip_frac=m.get("clip_frac"),
+                   update_s=round(time.time() - t0 - t_roll, 1), kl=m.get("kl") if a.kl_beta > 0 else None, clip_frac=m.get("clip_frac"),
                    grad_norm=m.get("grad_norm"), elapsed_min=round((time.time() - t_start) / 60, 1))
         if dstats is not None:   # dense mode: per-frame VR means (learner / opponent) and the record
             n = max(1, dstats["learner_frames"])
@@ -394,8 +406,7 @@ def main():
                            for i, x, y in zip(vr_ids, dstats["vr_learn"], dstats["vr_opp"])},
                        games=dict(win=dstats["win"], loss=dstats["loss"], draw=dstats["draw"]),
                        return_mean=float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None,
-                       guards=guard_stats or None, vr_scale=[round(float(x), 4) for x in vr_scale],
-                       **critic_stats)
+                       guards=guard_stats or None, vr_scale=[round(float(x), 4) for x in vr_scale])
         print(json.dumps(rec), flush=True)
         log.write(json.dumps(rec) + "\n")
         log.flush()
@@ -405,8 +416,6 @@ def main():
             ck["rl"] = dict(task="vr_sim" if dense else "l_cancel_sim", update=upd, args=vars(a))
             torch.save(ck, out / f"rl_u{upd:04d}.pt")
             torch.save(opt.state_dict(), out / f"opt_u{upd:04d}.pt")
-            if critic is not None:
-                torch.save(dict(critic=critic.state_dict(), opt=critic_opt.state_dict()), out / f"critic_u{upd:04d}.pt")
     v.close()
 
 
