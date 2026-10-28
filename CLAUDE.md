@@ -333,7 +333,10 @@ New runs go through `tools/run.py`, not hand-written queue scripts.
   dataset by id (`recipes/datasets.yaml` pins each by manifest SHA-1 and lists where it lives on each
   machine) and the step budget. Never edit one in place: a change is a new version. `bc-S-v1`
   (`base_full56k`), `bc-S-proxy-v1` (the 5-minute proxy), `bc-M-v1` (cond-heads M), `bc-M-v2` (`bc-S-v1` at M), `rl-v1` (SF7; runs
-  only at `c2df04b`, the critic is gone after it), `rl-v2` (today's sim RL default).
+  only at `c2df04b`, the critic is gone after it), `rl-v2` (today's sim RL default). `bc-XS-v1` (`bc-S-v1` at
+  d_model 128, 1.66M params) is **deprecated (owner, 2026-10-28)**: XS loses 21.9% to S and 9.4% to M at the
+  same recipe, trains only 1.6× faster than S on the 4090, and XS BC + RL (156 min) is weaker than S BC alone
+  (125 min; `docs/research-notes-2026-10-28.md`). Don't launch it or build on XS.
 - **Names** are built by the launcher: BC `{char}-{scale}-{tag}[-{runtag}]-s{seed}` (`fox-S-bc1-s1`),
   RL `{parent}.{tag}[-{runtag}]-s{seed}` (`fox-S-bc1-s1.rl2-s1`). `--set key=value` overrides need a
   `--tag` saying what changed (`fox-S-bc1-14k-s1`).

@@ -72,3 +72,14 @@ frames per game / 60.
 
 Step 100 loses 167–25 to step 50 with shorter games; not looked at in replays yet (why it regresses is
 unknown). The last 6k steps (LR near the floor) add nothing; 10k → 50k still does.
+
+## XS deprecated (owner, 2026-10-28)
+
+XS loses to S (21.9%) and M (9.4%) at the same recipe, trains only 1.6× faster than S on the 4090, and XS
+BC + RL (156 min, 37.7% vs S BC) is weaker than S BC alone (125 min). `recipes/bc-XS-v1.yaml` stays as a
+frozen record; don't launch it. The runs (`fox-XS-bc1-s1`, `fox-XS-bc1-s1.rl2-s1`) and the snapshot
+ladder stay on disk for reference.
+
+Dolphin watch games (realtime, one match per adjacent snapshot pair, `runs/fox-XS-bc1-s1/eval/watch/`,
+not tracked): the later snapshot won 8 of 11. The exceptions were step 50 over step 100 (as in the sim),
+step 500 over step 1k (against the sim's 43–149), and step 50k over step 56k (sim 96–96). Single games.
