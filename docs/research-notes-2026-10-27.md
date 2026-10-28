@@ -125,3 +125,23 @@ Does training S past a few thousand steps buy win rate? `base_full56k` (`fox-S-b
 - Caveats: one training run; mid-run checkpoints are at a higher LR than the annealed final (cosine), so
   they understate what a shorter run with a full decay reaches. Separating steps from annealing needs
   short runs with their own full schedule.
+
+## The S recipe at M: fox-M-bc2-s1
+
+`recipes/bc-M-v2.yaml` = `bc-S-v1` (647-shard data, 46,277 games; 56k steps; batch 768; Muon;
+cond-heads; seed 1) with model M. Trained on a rented 2×5090 box (vast 58014809, since destroyed):
+108 min, 384 per GPU. In-training val 0.6870 vs S's 0.7190 on the same val split (100 random batches,
+not a fixed subset). Policy = the step-56k checkpoint.
+
+Sim h2h, 192 games × h2h seeds 41/42/43, bf16 (`tools/run.py h2h`; results in `runs/fox-M-bc2-s1/eval/`):
+
+| Opponent | Seeds 41 / 42 / 43 | Pooled | Win rate [95%] | p | Stock margin |
+|---|---|---|---|---|---|
+| `fox-S-bc1-s1` (same recipe at S) | 129–63 / 123–69 / 128–64 | 380–196 | 66.0% [62.0, 69.7] | < 0.001 | +0.60 to +0.76 |
+| `fox-M-bc1-legacy` (cond-heads M: AdamW, 280k steps, 97k games) | 68–124 / 72–120 / 76–116 | 216–360 | 37.5% [33.6, 41.5] | < 0.001 | −0.49 to −0.64 |
+| `fox-M-master` (production) | 83–109 / 78–114 / 69–123 | 230–346 | 39.9% [36.0, 44.0] | < 0.001 | −0.19 to −0.53 |
+
+- At matched data, steps and seed, M beats S 66%.
+- M on the S recipe loses to both full-budget M models. That recipe differs from cond-heads M in
+  steps (5×), data (2×) and optimizer at once, so this doesn't say which of them the gap comes from.
+- One training seed. An M h2h match took ~7–9 min on the box (S: ~6–7 min locally).
