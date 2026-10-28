@@ -1,0 +1,32 @@
+# bc-S-v1 at XS scale (2026-10-27): the same data, steps, batch, optimizer and seed, S at half width
+# (d_model 128, 2 heads of dim 64, FFN 512, depth 6; 1.66M params vs S 5.34M, M 19.97M). Third point
+# of the fixed-recipe size curve. Log-spaced weights-only snapshots (_snapNNNNNN.pt, 0 = init) on top
+# of the usual every-5% checkpoints; they don't change training.
+tag: bc1
+stage: bc
+scale: XS
+data: fox-hf-647
+steps: 56000
+eff_batch: 768
+max_local_batch: 768
+export: last                # policy = the final step checkpoint (no averaging)
+args:
+  model: S
+  arch: d_model=128,nhead=2,dim_feedforward=512
+  encoder: mimic_flat
+  stick-clusters: hal37
+  mimic-controller-encoding: true
+  self-inputs: true
+  reaction-delay: 0
+  cond-heads: true
+  optimizer: muon
+  muon-lr: 0.02
+  lr: 3.0e-4
+  cosine-min-lr: 1.0e-6
+  no-warmup: true
+  weight-decay: 0.01
+  grad-clip-norm: 1.0
+  dropout: 0.2
+  val-frac: 0.025
+  lean-metrics: true
+  save-steps: "0,1,5,10,50,100,500,1000,5000,10000,50000"
