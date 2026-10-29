@@ -83,3 +83,34 @@ ladder stay on disk for reference.
 Dolphin watch games (realtime, one match per adjacent snapshot pair, `runs/fox-XS-bc1-s1/eval/watch/`,
 not tracked): the later snapshot won 8 of 11. The exceptions were step 50 over step 100 (as in the sim),
 step 500 over step 1k (against the sim's 43–149), and step 50k over step 56k (sim 96–96). Single games.
+
+## Does the S recipe transfer to M? One-knob variants of `bc-M-v2` (vast box, 2× RTX 5090)
+
+Owner's question: with data and steps fixed, does the config tuned at S (`bc-S-v1`: Muon 0.02, batch 768, 56k
+steps, 647-shard data, cond-heads) carry over to M unchanged? Each run is `bc-M-v2` (= `bc-S-v1` at M) with one
+change, one run per GPU (384 local × accum 2; 4.8–5.0 step/s each, 9.6 combined vs 8.6 for one 2-GPU DDP run),
+~3 h 10 m each, commit 8290988. Each plays `fox-M-bc2-s1` (Muon 0.02, seed 1) at h2h seeds 41/42/43 on the
+local 4090.
+
+| Run | Change | Seeds 41 / 42 / 43 | Total | Win rate [95%] | Final val |
+|---|---|---|---|---|---|
+| `fox-M-bc2-mlr01-s1` | Muon LR 0.01 | 109–83, 113–79, 110–82 | 332–244 | 57.6% [53.6, 61.6] | 0.6844 |
+| `fox-M-bc2-adamw-s1` | AdamW (lr 3e-4) | 86–106, 91–101, 92–100 | 269–307 | 46.7% [42.7, 50.8] | 0.6877 |
+| `fox-M-bc2-s2` | training seed 2 | 89–103, 74–118, 87–105 | 250–326 | 43.4% [39.4, 47.5] | 0.6874 |
+| `fox-M-bc2-mlr04-s1` | Muon LR 0.04 | 0–192, 0–192, 1–191 | 1–575 | 0.2% | 0.7972 |
+
+`fox-M-bc2-s1` final val 0.6870.
+
+- The seed-2 rerun (same recipe) loses 43.4%: training-seed noise alone moves the win rate ~6–7 points, more than
+  the ~±4 of a 576-game match. One training seed per variant only resolves differences larger than that.
+- AdamW at fixed data and steps is inside that noise, so AdamW is not what makes `bc-M-v1` (AdamW, 2× data,
+  5× steps) beat `fox-M-bc2-s1` 62.5%; data and/or steps are (untested: whether AdamW gains more on a long schedule).
+- Muon 0.04 is unstable at M: val rose from 0.80 to 0.83 over the first ~20k steps and never recovered.
+- Muon 0.01 wins all three seeds by a similar margin, 14 points above the seed-2 rerun. One training seed.
+  Muon LR 0.02 came from the 20M C cell at 6,500 steps (vs AdamW and 0.04; 0.01 was never tried there) and
+  0.01 has not been tried at S.
+
+**Defaults changed (owner):** `train.py --muon-lr` now defaults per size, M 0.01 / S 0.02
+(`MUON_LR_DEFAULT`); new recipe `recipes/bc-M-v3.yaml` = `bc-M-v2` with `muon-lr: 0.01`. So S and M now differ in
+one knob. Box run dirs (all checkpoints, logs, offline wandb, queue/setup logs) copied back with every file's
+SHA-256 matched (`checkpoints/box_20261028/`), then the box was destroyed.

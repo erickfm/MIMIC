@@ -1,6 +1,10 @@
 name	stage	recipe	parent	seed	status	started_pt	wall_min	host	commit	val_fixed	h2h
 fox-M-bc1-legacy	bc	bc-M-v1			legacy						
+fox-M-bc2-adamw-s1	bc	bc-M-v2		1	done	2026-10-28 09:51 AM	186.7	432d79d5aa5d	8290988		vs fox-M-bc2-s1: 86-106 (44.8%); vs fox-M-bc2-s1: 91-101 (47.4%); vs fox-M-bc2-s1: 92-100 (47.9%)
+fox-M-bc2-mlr01-s1	bc	bc-M-v2		1	done	2026-10-28 01:01 PM	189.4	432d79d5aa5d	8290988-dirty		vs fox-M-bc2-s1: 109-83 (56.8%); vs fox-M-bc2-s1: 113-79 (58.9%); vs fox-M-bc2-s1: 110-82 (57.3%)
+fox-M-bc2-mlr04-s1	bc	bc-M-v2		1	done	2026-10-28 12:58 PM	190.7	432d79d5aa5d	8290988-dirty		vs fox-M-bc2-s1: 0-192 (0.0%); vs fox-M-bc2-s1: 0-192 (0.0%); vs fox-M-bc2-s1: 1-191 (0.5%)
 fox-M-bc2-s1	bc	bc-M-v2		1	done	2026-10-27 03:00 PM	108.2	ab78bee73477	cef6c2a		vs fox-M-bc1-legacy: 68-124 (35.4%); vs fox-M-bc1-legacy: 72-120 (37.5%); vs fox-M-bc1-legacy: 76-116 (39.6%); vs fox-M-master: 83-109 (43.2%); vs fox-M-master: 78-114 (40.6%); vs fox-M-master: 69-123 (35.9%); vs fox-S-bc1-s1: 129-63 (67.2%); vs fox-S-bc1-s1: 123-69 (64.1%); vs fox-S-bc1-s1: 128-64 (66.7%)
+fox-M-bc2-s2	bc	bc-M-v2		2	done	2026-10-28 09:51 AM	190.3	432d79d5aa5d	8290988		vs fox-M-bc2-s1: 89-103 (46.4%); vs fox-M-bc2-s1: 74-118 (38.5%); vs fox-M-bc2-s1: 87-105 (45.3%)
 fox-M-master	bc			42	legacy						
 fox-S-bc1-14k-s1	bc	bc-S-v1		1	done	2026-10-28 02:12 AM	36.9	aurora	b25c988-dirty		vs fox-S-bc1-s1: 63-129 (32.8%); vs fox-S-bc1-s1: 71-121 (37.0%); vs fox-S-bc1-s1: 63-129 (32.8%)
 fox-S-bc1-28k-s1	bc	bc-S-v1		1	done	2026-10-28 03:08 AM	67.4	aurora	b25c988-dirty		vs fox-S-bc1-s1: 95-97 (49.5%); vs fox-S-bc1-s1: 82-110 (42.7%); vs fox-S-bc1-s1: 91-101 (47.4%)

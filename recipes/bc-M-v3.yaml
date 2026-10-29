@@ -1,0 +1,28 @@
+# bc-M-v2 with Muon LR 0.01 (2026-10-28): at bc-M-v2 Muon LR 0.01 beat 0.02 332-244 (57.6%, 3 h2h seeds) and 0.04
+# lost 1-575; AdamW (46.7%) and a seed-2 rerun (43.4%) did not beat it. Otherwise bc-S-v1 at M.
+tag: bc3
+stage: bc
+scale: M
+data: fox-hf-647
+steps: 56000
+eff_batch: 768
+max_local_batch: 384
+export: last                # policy = the final step checkpoint (no averaging)
+args:
+  model: M
+  encoder: mimic_flat
+  stick-clusters: hal37
+  mimic-controller-encoding: true
+  self-inputs: true
+  reaction-delay: 0
+  cond-heads: true
+  optimizer: muon
+  muon-lr: 0.01
+  lr: 3.0e-4
+  cosine-min-lr: 1.0e-6
+  no-warmup: true
+  weight-decay: 0.01
+  grad-clip-norm: 1.0
+  dropout: 0.2
+  val-frac: 0.025
+  lean-metrics: true
