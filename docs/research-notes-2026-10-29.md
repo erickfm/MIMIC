@@ -18,3 +18,7 @@ native sim, bf16, 192 games per seed.
   its base, 37.7% vs S), the gain holds against models it never trained against: 81.1% vs production `fox-M-master`
   and 73.2% vs cond-heads M, which its base recipe lost to (`fox-M-bc2-s1` 37.5% vs cond-heads M; `fox-M-bc2-mlr01-s1`
   itself was not played vs either). SF7 (S + RL) for reference: 56.8% vs `fox-M-master`, 46.2% vs cond-heads M.
+
+**Default changed (owner, 10-29):** `train.py --muon-lr` defaults to 0.01 for every size (S was 0.02); the
+per-size `MUON_LR_DEFAULT` from 10-28 is gone. New recipe `recipes/bc-S-v2.yaml` = `bc-S-v1` at 0.01, so `bc-S-v2`
+and `bc-M-v3` differ only in model size. `tools/fast_proxy.sh` pins 0.02 to keep `results.tsv` comparable.

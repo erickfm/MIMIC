@@ -210,10 +210,11 @@ and the multi-label heads were removed). A bare `train.py --data-dir D
 --run-name N` trains the production recipe.
 
 **Muon is the default optimizer (since 2026-10-22).** `--optimizer muon`
-(implicit): Muon on the hidden 2D matrices at `--muon-lr`, default per size since 2026-10-28:
-**M 0.01, S 0.02** (`train.py:MUON_LR_DEFAULT`). At `bc-M-v2` (S recipe at M) Muon LR 0.01 beat 0.02
-332–244 (57.6%, 3 h2h seeds), 0.04 lost 1–575, AdamW was a wash (46.7%) and a seed-2 rerun scored 43.4%;
-0.01 is untested at S (`docs/research-notes-2026-10-28.md`). Aux-AdamW
+(implicit): Muon on the hidden 2D matrices at `--muon-lr`, **default 0.01 since 2026-10-29** (was 0.02).
+At `bc-M-v2` (S recipe at M) Muon 0.01 beat 0.02 332–244 (57.6%, 3 h2h seeds), 0.005 lost to 0.01 (46.4%),
+0.04 lost 1–575, AdamW was a wash (46.7%) and a seed-2 rerun scored 43.4%; at S, 0.01 tied 0.02 (52.3%)
+(`docs/research-notes-2026-10-28.md`, `-29.md`). `tools/fast_proxy.sh` pins 0.02 so its results stay
+comparable. Aux-AdamW
 runs at `--lr` on embeddings / heads / relpos tables / norms /
 biases, one cosine schedule over all groups. On the 20M proxy Muon beat
 AdamW by −1.6% val, and a 3,500-step Muon run beat a 6,500-step AdamW
@@ -335,7 +336,7 @@ New runs go through `tools/run.py`, not hand-written queue scripts.
 - **Recipes** are frozen YAML files in `recipes/` that pin every flag (current defaults drift), the
   dataset by id (`recipes/datasets.yaml` pins each by manifest SHA-1 and lists where it lives on each
   machine) and the step budget. Never edit one in place: a change is a new version. `bc-S-v1`
-  (`base_full56k`), `bc-S-proxy-v1` (the 5-minute proxy), `bc-M-v1` (cond-heads M), `bc-M-v2` (`bc-S-v1` at M), `bc-M-v3` (`bc-M-v2` at Muon LR 0.01, the current M recipe), `rl-v1` (SF7; runs
+  (`base_full56k`), `bc-S-proxy-v1` (the 5-minute proxy), `bc-M-v1` (cond-heads M), `bc-M-v2` (`bc-S-v1` at M), `bc-M-v3` (`bc-M-v2` at Muon LR 0.01, the current M recipe), `bc-S-v2` (`bc-S-v1` at Muon LR 0.01, the current S recipe), `rl-v1` (SF7; runs
   only at `c2df04b`, the critic is gone after it), `rl-v2` (today's sim RL default). `bc-XS-v1` (`bc-S-v1` at
   d_model 128, 1.66M params) is **deprecated (owner, 2026-10-28)**: XS loses 21.9% to S and 9.4% to M at the
   same recipe, trains only 1.6× faster than S on the 4090, and XS BC + RL (156 min) is weaker than S BC alone

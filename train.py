@@ -38,10 +38,6 @@ import wandb
 from mimic.dataset import StreamingMeleeDataset
 from mimic.model   import FramePredictor, ModelConfig, MODEL_PRESETS
 
-# Default --muon-lr per --model preset. M 0.01 won 332-244 vs 0.02 at bc-M-v2 (0.04 lost 1-575);
-# S keeps 0.02, its recipe's LR (0.01 untested at S). docs/research-notes-2026-10-28.md.
-MUON_LR_DEFAULT = {"M": 0.01, "S": 0.02}
-
 # ---------------------------------------------------------------------------
 # Distributed helpers
 # ---------------------------------------------------------------------------
@@ -515,7 +511,7 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
           distill_alpha: float = 1.0,
           lean_metrics: bool = False,
           optimizer: str = "muon",
-          muon_lr: float = 0.02,
+          muon_lr: float = 0.01,
           whole_games_from: float = None,
           arch: dict = None,
           save_steps: str = None):
@@ -1427,10 +1423,10 @@ if __name__ == "__main__":
     parser.add_argument("--whole-games-from", type=float, default=None, metavar="F",
                         help="from step F*max_steps on (0 = from the start), train on entire games, padded to "
                              "batch_size*seq_len frames per micro-batch, instead of seq_len windows")
-    parser.add_argument("--muon-lr", type=float, default=None,
+    parser.add_argument("--muon-lr", type=float, default=0.01,
                         help="LR for the Muon group (2D hidden matrices) when "
-                             "--optimizer muon; the aux-AdamW group keeps --lr. "
-                             "Default per --model: " + ", ".join(f"{k} {v}" for k, v in MUON_LR_DEFAULT.items()))
+                             "--optimizer muon; the aux-AdamW group keeps --lr. 0.01 since "
+                             "2026-10-29 (was 0.02; docs/research-notes-2026-10-29.md).")
     parser.add_argument("--plain-ce", action="store_true",
                         help="No-op: the mimic loss is always plain cross-entropy (kept so old "
                              "commands parse)")
@@ -1456,8 +1452,6 @@ if __name__ == "__main__":
     parser.add_argument("--character-filter", type=int, default=None,
                         help="Only train on games where self_character matches this index (e.g. 1 for Fox)")
     args = parser.parse_args()
-    if args.muon_lr is None:
-        args.muon_lr = MUON_LR_DEFAULT[args.model]
     CKPT_DIR = args.ckpt_dir
 
     if args.seed is not None:
