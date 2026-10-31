@@ -90,7 +90,8 @@ Two choices name a model: a size preset and an attention mode.
 
 - **Size:** **`M`** (`--model M`, default) — production, d_model=512, 6 layers, 8
   heads, ~20.0M params. **`S`** (`--model S`) — half width (256, 4 heads), ~5.4M
-  params, the fast research proxy. Older checkpoints record `model_preset: "mimic"`
+  params, the fast research proxy. **`L`** (`--model L`, 2026-10-29) — 1.5× width (768, 12 heads, 6
+  layers), ~44.3M params; ~2.0 BC steps/s and ~229 s per RL update on the 4090. Older checkpoints record `model_preset: "mimic"`
   (= M) or `"mimic-w256"` (= S); it's only a label, loading reads the config fields.
   The 11.5M–154M presets (`mimic-w384/w768/w1024/xl/xxl`) were removed 2026-10-23
   (git history).
@@ -336,7 +337,7 @@ New runs go through `tools/run.py`, not hand-written queue scripts.
 - **Recipes** are frozen YAML files in `recipes/` that pin every flag (current defaults drift), the
   dataset by id (`recipes/datasets.yaml` pins each by manifest SHA-1 and lists where it lives on each
   machine) and the step budget. Never edit one in place: a change is a new version. `bc-S-v1`
-  (`base_full56k`), `bc-S-proxy-v1` (the 5-minute proxy), `bc-M-v1` (cond-heads M), `bc-M-v2` (`bc-S-v1` at M), `bc-M-v3` (`bc-M-v2` at Muon LR 0.01, the current M recipe), `bc-S-v2` (`bc-S-v1` at Muon LR 0.01, the current S recipe), `rl-v1` (SF7; runs
+  (`base_full56k`), `bc-S-proxy-v1` (the 5-minute proxy), `bc-M-v1` (cond-heads M), `bc-M-v2` (`bc-S-v1` at M), `bc-M-v3` (`bc-M-v2` at Muon LR 0.01, the current M recipe), `bc-S-v2` (`bc-S-v1` at Muon LR 0.01, the current S recipe), `bc-L-v1` (`bc-M-v3` at L, 24k steps; `--set steps=56000` for the matched budget), `rl-v1` (SF7; runs
   only at `c2df04b`, the critic is gone after it), `rl-v2` (today's sim RL default). `bc-XS-v1` (`bc-S-v1` at
   d_model 128, 1.66M params) is **deprecated (owner, 2026-10-28)**: XS loses 21.9% to S and 9.4% to M at the
   same recipe, trains only 1.6× faster than S on the 4090, and XS BC + RL (156 min) is weaker than S BC alone
@@ -583,7 +584,12 @@ Set `--run-name` to `{char}-{YYYYMMDD}-{descriptor}`; step suffix is
 appended when promoting the `_best.pt`.
 
 Current per-character production:
-- `fox-master` — `fox-mastfox-20260717-cstick9-nomirror` (tail-SWA of steps
+- `fox-master` — `fox-M-bc2-mlr01-s1.rl2-s1` since 2026-10-29: M BC (`bc-M-v3` recipe, 56k
+  steps) + 100 sim RL updates (`rl-v2`). Beat the previous `fox-master` (below) 467–109 (81.1%) in
+  the sim (bf16, 3 × 192 games); not yet played against it in Dolphin. Uses cond-heads, so the bot
+  needs code from 2026-10-22 or later. vs Phillip's released agents (realtime Dolphin, 20 games
+  each): 11–9 vs the `master` tier, 2–18 vs `gm`.
+- previous `fox-master` — `fox-mastfox-20260717-cstick9-nomirror` (tail-SWA of steps
   224k–280k = `AVG_c9nm.pt`), promoted 2026-07-18. Champion recipe (280k
   steps, eff batch 768, seed 42) on freshly rebuilt v2 shards with the
   **nearest-of-9 c-stick history encoding** (commit `fb7bb1a`), **no mirror

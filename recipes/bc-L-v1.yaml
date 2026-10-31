@@ -1,0 +1,28 @@
+# bc-M-v3 at L (d_model 768, 12 heads, 6 layers, 44.3M params), 2026-10-29. 24k steps instead of 56k so
+# BC + rl-v2 + h2h fit one night on the local 4090 (~2.0 step/s at eff batch 768; local batch 192 x 4).
+tag: bc1
+stage: bc
+scale: L
+data: fox-hf-647
+steps: 24000
+eff_batch: 768
+max_local_batch: 192
+export: last                # policy = the final step checkpoint (no averaging)
+args:
+  model: L
+  encoder: mimic_flat
+  stick-clusters: hal37
+  mimic-controller-encoding: true
+  self-inputs: true
+  reaction-delay: 0
+  cond-heads: true
+  optimizer: muon
+  muon-lr: 0.01
+  lr: 3.0e-4
+  cosine-min-lr: 1.0e-6
+  no-warmup: true
+  weight-decay: 0.01
+  grad-clip-norm: 1.0
+  dropout: 0.2
+  val-frac: 0.025
+  lean-metrics: true

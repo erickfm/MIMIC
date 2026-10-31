@@ -1,8 +1,12 @@
 name	stage	recipe	parent	seed	status	started_pt	wall_min	host	commit	val_fixed	h2h
+fox-L-bc1-56k-s1	bc	bc-L-v1		1	done	2026-10-30 09:37 AM	514.8	aurora	32ffd19-dirty		
+fox-L-bc1-56k-s1.rl2-s1	rl	rl-v2	fox-L-bc1-56k-s1	1	done	2026-10-30 06:12 PM	375.6	aurora	32ffd19-dirty		vs fox-L-bc1-56k-s1: 160-32 (83.3%); vs fox-M-bc2-mlr01-s1.rl2-s1: 92-100 (47.9%)
+fox-L-bc1-s1	bc	bc-L-v1		1	done	2026-10-29 10:12 PM	199.0	aurora	32ffd19-dirty		
+fox-L-bc1-s1.rl2-s1	rl	rl-v2	fox-L-bc1-s1	1	done	2026-10-30 01:31 AM	375.8	aurora	32ffd19-dirty		vs fox-L-bc1-s1: 152-40 (79.2%); vs fox-M-bc2-mlr01-s1.rl2-s1: 103-89 (53.6%)
 fox-M-bc1-legacy	bc	bc-M-v1			legacy						
 fox-M-bc2-adamw-s1	bc	bc-M-v2		1	done	2026-10-28 09:51 AM	186.7	432d79d5aa5d	8290988		vs fox-M-bc2-s1: 86-106 (44.8%); vs fox-M-bc2-s1: 91-101 (47.4%); vs fox-M-bc2-s1: 92-100 (47.9%)
 fox-M-bc2-mlr01-s1	bc	bc-M-v2		1	done	2026-10-28 01:01 PM	189.4	432d79d5aa5d	8290988-dirty		vs fox-M-bc2-s1: 109-83 (56.8%); vs fox-M-bc2-s1: 113-79 (58.9%); vs fox-M-bc2-s1: 110-82 (57.3%)
-fox-M-bc2-mlr01-s1.rl2-s1	rl	rl-v2	fox-M-bc2-mlr01-s1	1	done	2026-10-29 04:44 AM	219.3	aurora	b12a159-dirty		vs fox-M-bc1-legacy: 142-50 (74.0%); vs fox-M-bc1-legacy: 139-53 (72.4%); vs fox-M-bc2-mlr01-s1: 150-42 (78.1%); vs fox-M-bc2-mlr01-s1: 158-34 (82.3%); vs fox-M-bc2-mlr01-s1: 153-39 (79.7%); vs fox-M-master: 151-41 (78.6%); vs fox-M-master: 155-37 (80.7%); vs fox-M-master: 161-31 (83.9%)
+fox-M-bc2-mlr01-s1.rl2-s1	rl	rl-v2	fox-M-bc2-mlr01-s1	1	done	2026-10-29 04:44 AM	219.3	aurora	b12a159-dirty		vs fox-M-bc1-legacy: 142-50 (74.0%); vs fox-M-bc1-legacy: 139-53 (72.4%); vs fox-M-bc2-mlr01-s1: 150-42 (78.1%); vs fox-M-bc2-mlr01-s1: 158-34 (82.3%); vs fox-M-bc2-mlr01-s1: 153-39 (79.7%); vs fox-M-master: 151-41 (78.6%); vs fox-M-master: 155-37 (80.7%); vs fox-M-master: 161-31 (83.9%); vs fox-S-bc1-s1.rl1-s0: 152-40 (79.2%)
 fox-M-bc2-mlr04-s1	bc	bc-M-v2		1	done	2026-10-28 12:58 PM	190.7	432d79d5aa5d	8290988-dirty		vs fox-M-bc2-s1: 0-192 (0.0%); vs fox-M-bc2-s1: 0-192 (0.0%); vs fox-M-bc2-s1: 1-191 (0.5%)
 fox-M-bc2-s1	bc	bc-M-v2		1	done	2026-10-27 03:00 PM	108.2	ab78bee73477	cef6c2a		vs fox-M-bc1-legacy: 68-124 (35.4%); vs fox-M-bc1-legacy: 72-120 (37.5%); vs fox-M-bc1-legacy: 76-116 (39.6%); vs fox-M-master: 83-109 (43.2%); vs fox-M-master: 78-114 (40.6%); vs fox-M-master: 69-123 (35.9%); vs fox-S-bc1-s1: 129-63 (67.2%); vs fox-S-bc1-s1: 123-69 (64.1%); vs fox-S-bc1-s1: 128-64 (66.7%)
 fox-M-bc2-s2	bc	bc-M-v2		2	done	2026-10-28 09:51 AM	190.3	432d79d5aa5d	8290988		vs fox-M-bc2-s1: 89-103 (46.4%); vs fox-M-bc2-s1: 74-118 (38.5%); vs fox-M-bc2-s1: 87-105 (45.3%)

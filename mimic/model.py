@@ -131,6 +131,10 @@ MODEL_PRESETS = {
     "S": dict(d_model=256, nhead=4, num_layers=6, dim_feedforward=1024,
               dropout=0.2, max_seq_len=180, pos_enc="relpos",
               num_stages=6, num_characters=27, num_actions=396, num_c_dirs=9),
+    # L: 1.5x-width M (~44M params; same head_dim 64, 4x FFN, depth 6). Added 2026-10-29 (bc-L-v1).
+    "L": dict(d_model=768, nhead=12, num_layers=6, dim_feedforward=3072,
+              dropout=0.2, max_seq_len=180, pos_enc="relpos",
+              num_stages=6, num_characters=27, num_actions=396, num_c_dirs=9),
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

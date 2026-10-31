@@ -41,6 +41,35 @@ perspectives), so the version change doesn't alter what our model sees.
 | `fox_d18_imitation_v3` (imitation only) | Master Player (default) | 20–0 | 49 / 0 | 125 s |
 
 Phillip's RL Fox 4-stocked us in 10 of 20 games; we 3- or 2-stocked its imitation-only Fox in every game. Not
-separated: the imitation agent played as the generic "Master Player" name while the RL agent played as "Cody",
-and both handicap Phillip by an 18-frame reaction delay that ours doesn't have. Replays and per-game JSON:
+separated: the imitation agent played as the generic "Master Player" name while the RL agent played as "Cody".
+"Master Player" is the name of every master-rank player in the anonymized ranked collections, so it is Phillip
+imitating the same kind of data our BC trains on (our BC base never played it; the 20–0 is our RL model).
+Reaction delay: Phillip has a hard 18-frame delay and ours has none in code, but BC learns human reaction timing
+(~21 frames on master ranked netplay), and 100 RL updates are unlikely to make it much faster (owner), so the
+effective delays are close; not measured for this RL model. Replays and per-game JSON:
 `checkpoints/vs_phillip_20261029/` (not tracked).
+
+### Phillip's `master` and `gm` tiers (same harness, 10-29 afternoon)
+
+The released folder also has `master.onnx` and `gm.onnx` (agents that set their own rating from RL: 2200 and
+2500). Same setup as above, 20 games each, ours = `fox-M-bc2-mlr01-s1.rl2-s1`.
+
+| Phillip agent | Result (ours) | Stocks left (ours / Phillip) | 4-stocks against us | Mean game |
+|---|---|---|---|---|
+| `master` (rating 2200) | 11–9 | 17 / 15 | 0 | 137 s |
+| `gm` (rating 2500) | 2–18 | 3 / 41 | 4 | 115 s |
+
+Logs `checkpoints/vs_phillip_20261029/run2.log` (master), `run4.log` (gm).
+
+**Costumes in `vs_phillip.py`.** Each agent now keeps one Fox costume whichever port it plays (ours green, Phillip
+blue). libmelee can't read costumes on the offline character screen, so `CostumeMenu` plans Y presses from the
+costumes each game started with. Two bugs in the first version: one Y press selects the *previous* costume (fit to
+19 of 19 game-to-game changes in the gm run), and Melee drops Y presses made right after the coins go down or on
+both ports in the same frame. Fix: presses wait 60 frames after both coins are down and ports are 10 frames apart.
+4 of 4 test games (no models) then started in the wanted costumes. `tools/recolor_replays.py` rewrites the costume
+byte in existing replays (used on the gm replays).
+
+## Promotion
+
+`erickfm/MIMIC/fox-master` = `fox-M-bc2-mlr01-s1.rl2-s1` since 10-29 ~9:30 PM (owner: promote if it wins). The
+previous `fox-mastfox-20260717-cstick9-nomirror` stays in HF history. Not yet played against it in Dolphin.
