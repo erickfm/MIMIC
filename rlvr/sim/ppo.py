@@ -259,11 +259,17 @@ def ppo_update(
     ref_model=None,
     extra_loss=None,
     packs=None,
+    batches=None,
+    amp: bool = False,
 ) -> Dict[str, float]:
     """Run one PPO epoch over the collected episodes.
 
     packs: pack_streams() packs over the episodes' frames, in that order (sliding-window models);
     each pack is one minibatch, forwarded once for all its decisions.
+    batches: precollated [(batch, last)] on the device, one per minibatch of cfg.minibatch_frames
+    decisions in order (collate() once per update instead of once per epoch).
+    amp: run the forward under bf16 autocast (the model keeps its attention math in fp32). The
+    PPO "old" log-probs must have been scored with the same setting.
 
     Returns a metrics dict averaged over the batch (mean reward, KL,
     clip frac, loss, etc.).
@@ -317,9 +323,10 @@ def ppo_update(
     model.eval()
     optimizer.zero_grad()
     minibatch = cfg.minibatch_frames
-    total_loss = 0.0
-    total_kl = 0.0
-    total_clip = 0.0
+    # Metric sums stay on the device: no host sync per minibatch.
+    total_loss = torch.zeros((), device=device)
+    total_kl = torch.zeros((), device=device)
+    total_clip = torch.zeros((), device=device)
     total_n = 0
 
     if packs is not None:
@@ -330,21 +337,25 @@ def ppo_update(
         spans = list(zip(bounds[:-1], bounds[1:], packs))
     else:
         spans = [(s, min(s + minibatch, N), None) for s in range(0, N, minibatch)]
-    for start, end, pk in spans:
+    if batches is not None:
+        assert packs is None and len(batches) == len(spans), (len(batches), len(spans))
+    for k, (start, end, pk) in enumerate(spans):
         idx = sampled_indices[start:end]
-        if pk is not None:
-            batch = last = None
-            lp_theta = _logprob_at_indices(head_logits(model, None, None, idx, h=packed_features(model, pk, device)), idx)
-        else:
-            batch, last = collate([fr.obs for fr in all_frames[start:end]], device)
-            lp_theta = _logprob_at_indices(head_logits(model, batch, last, idx), idx)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
+            if pk is not None:
+                batch = last = None
+                lp_theta = _logprob_at_indices(head_logits(model, None, None, idx, h=packed_features(model, pk, device)), idx)
+            else:
+                batch, last = batches[k] if batches is not None else \
+                    collate([fr.obs for fr in all_frames[start:end]], device)
+                lp_theta = _logprob_at_indices(head_logits(model, batch, last, idx), idx)
         all_logprobs_theta.append(lp_theta.detach())
 
         # Per-chunk PPO objective (bptt cheap since per-chunk).
         adv_chunk = advantages[start:end]
         lp_old_chunk = logprobs_old[start:end]
         if ref_model is not None:
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp):
                 ref_logits = head_logits(ref_model, batch, last, idx,
                                          h=packed_features(ref_model, pk, device) if pk is not None else None)
             lp_ref_chunk = _logprob_at_indices(ref_logits, idx).detach()
@@ -365,11 +376,9 @@ def ppo_update(
         loss = pg_loss + cfg.kl_beta * kl
         (loss * (end - start) / N).backward()   # accumulate, scaled by chunk frac
 
-        total_loss += float(loss.item()) * (end - start)
-        total_kl += float(kl.item()) * (end - start)
-        total_clip += float(
-            ((ratio < 1 - cfg.clip_eps) | (ratio > 1 + cfg.clip_eps)).float().mean().item()
-        ) * (end - start)
+        total_loss += loss.detach() * (end - start)
+        total_kl += kl.detach() * (end - start)
+        total_clip += ((ratio < 1 - cfg.clip_eps) | (ratio > 1 + cfg.clip_eps)).float().mean().detach() * (end - start)
         total_n += (end - start)
 
     extra = None
@@ -382,9 +391,9 @@ def ppo_update(
     optimizer.step()
 
     return {
-        "loss": total_loss / max(total_n, 1),
-        "kl": total_kl / max(total_n, 1),
-        "clip_frac": total_clip / max(total_n, 1),
+        "loss": float(total_loss) / max(total_n, 1),
+        "kl": float(total_kl) / max(total_n, 1),
+        "clip_frac": float(total_clip) / max(total_n, 1),
         "reward_mean": float(rewards_end.mean().item()),
         "advantage_mean": float(advantages.mean().item()),
         "advantage_std": float(advantages.std(unbiased=False).item()),

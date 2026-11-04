@@ -69,6 +69,10 @@ def main():
     ap.add_argument("--ppo-minibatch", type=int, default=0,
                     help="decisions per update forward (memory only; default: 64 at 180 frames, fewer for "
                          "longer contexts)")
+    ap.add_argument("--ppo-amp", action=argparse.BooleanOptionalAction, default=False,
+                    help="bf16 autocast for the update's forwards (old log-prob scoring, PPO epochs, "
+                         "global anchor), like BC training; attention math stays fp32. Off = the "
+                         "fp32 update every recipe up to rl-v2 used")
     ap.add_argument("--checkpoint-every", type=int, default=5)
     ap.add_argument("--rng", default="online", choices=["online", "offline"])
     ap.add_argument("--seed", type=int, default=0)
@@ -346,13 +350,19 @@ def main():
             if packs else [(i, min(i + pcfg.minibatch_frames, len(frames)), None)
                            for i in range(0, len(frames), pcfg.minibatch_frames)]
 
+        t_sc = time.time()
+        # Full-causal models: collate each minibatch onto the GPU once, reused by the scoring pass
+        # and every PPO epoch (identical tensors to per-epoch collate()).
+        pre = None if packs else [collate([fr.obs for fr in frames[i:j]]) for i, j, _ in spans]
+
         def feats_of(model, i, j, pk):
             if pk is not None:
                 return packed_features(model, pk)
-            batch, last = collate([fr.obs for fr in frames[i:j]])
+            batch, last = pre[i // pcfg.minibatch_frames]
             return last_features(model, batch, last)
         learner.eval()
-        with torch.no_grad():
+        amp_ctx = lambda: torch.autocast("cuda", dtype=torch.bfloat16, enabled=a.ppo_amp)
+        with torch.no_grad(), amp_ctx():
             for i, j, pk in spans:
                 chunk = frames[i:j]
                 idx = torch.stack([fr.sampled_indices for fr in chunk]).cuda()
@@ -367,7 +377,7 @@ def main():
             # heads; for --cond-heads each head's KL is conditioned on the rollout's sampled
             # classes for the earlier heads (a one-sample estimate of the joint KL's chain rule).
             achunks = []
-            with torch.no_grad():
+            with torch.no_grad(), amp_ctx():
                 for i in range(0, len(anchor), pcfg.minibatch_frames):
                     part = anchor[i:i + pcfg.minibatch_frames]
                     ab, al = collate([o for o, _ in part])
@@ -378,7 +388,8 @@ def main():
             def extra():
                 n, total = len(anchor), 0.0
                 for ab, al, ai, ref_logp in achunks:   # chunked like PPO's own forward
-                    out = head_logits(learner, ab, al, ai)
+                    with amp_ctx():
+                        out = head_logits(learner, ab, al, ai)
                     kl = 0.0
                     for h, lr_ in ref_logp.items():
                         lp = torch.log_softmax(out[h].float(), -1)
@@ -386,9 +397,15 @@ def main():
                     (a.global_kl_beta * kl / n).backward()
                     total += float(kl)
                 return torch.tensor(a.global_kl_beta * total / n)
+        torch.cuda.synchronize()
+        t_ep = time.time()
         for _ in range(a.ppo_epochs):
             m = ppo_update(learner, episodes, opt, pcfg, device="cuda", ref_model=None, extra_loss=extra,
-                           packs=packs)
+                           packs=packs, batches=pre, amp=a.ppo_amp)
+        torch.cuda.synchronize()
+        t_ep = time.time() - t_ep
+        t_sc = time.time() - t_sc - t_ep
+        pre = None
         v.policies["LEARN"].refresh()   # sliding-window learner: re-key its cache with the new weights
         anchor_kl = (m.get("extra_loss") / a.global_kl_beta) if (a.global_kl_beta > 0 and m.get("extra_loss") is not None) else None
         anchor.clear()
@@ -397,7 +414,8 @@ def main():
                    lcancel_rate=n_succ / max(1, len(episodes)),
                    frames_recorded=len(frames), rollout_s=round(t_roll, 1),
                    env_fps=round((v.frames - f0) / max(t_roll, 1e-9)),
-                   update_s=round(time.time() - t0 - t_roll, 1), kl=m.get("kl") if a.kl_beta > 0 else None, clip_frac=m.get("clip_frac"),
+                   update_s=round(time.time() - t0 - t_roll, 1), score_s=round(t_sc, 1),
+                   epochs_s=round(t_ep, 1), kl=m.get("kl") if a.kl_beta > 0 else None, clip_frac=m.get("clip_frac"),
                    grad_norm=m.get("grad_norm"), elapsed_min=round((time.time() - t_start) / 60, 1))
         if dstats is not None:   # dense mode: per-frame VR means (learner / opponent) and the record
             n = max(1, dstats["learner_frames"])
