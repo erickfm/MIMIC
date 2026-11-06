@@ -755,7 +755,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         if _diffs and not warm_restart:   # warm starts may switch architecture on purpose
             raise _arch_error(resume, _diffs, "resume; use --warm-restart to start a new run from "
                                               "these weights with a different architecture")
-        model.load_state_dict(ckpt['model_state_dict'])
+        _sd = ckpt['model_state_dict']
+        _want = next(iter(model.state_dict())).startswith("_orig_mod.")   # compiled now?
+        if next(iter(_sd)).startswith("_orig_mod.") != _want:   # saved compiled, loaded with --no-compile (or back)
+            _sd = {(("_orig_mod." + k) if _want else k.removeprefix("_orig_mod.")): v for k, v in _sd.items()}
+        model.load_state_dict(_sd)
         if not no_load_optim:
             _base_lrs = [g['lr'] for g in optimiser.param_groups]   # this run's per-group base LRs
             try:
