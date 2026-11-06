@@ -39,7 +39,13 @@ REPO = Path(__file__).resolve().parents[1]
 RUNS = REPO / "runs"
 DATASETS = REPO / "recipes" / "datasets.yaml"
 NORM_JSONS = ("cat_maps", "controller_combos", "mimic_norm", "norm_stats", "stick_clusters")
-CHARS = {"fox": "FOX"}          # run-name char -> libmelee name for sim_h2h; add as needed
+# run-name char -> libmelee character name (sim_rl, sim_h2h)
+CHARS = {"fox": "FOX", "falco": "FALCO", "marth": "MARTH", "sheik": "SHEIK", "zelda": "ZELDA",
+         "cptfalcon": "CPTFALCON", "puff": "JIGGLYPUFF", "peach": "PEACH", "luigi": "LUIGI",
+         "pikachu": "PIKACHU", "samus": "SAMUS", "yoshi": "YOSHI", "ganondorf": "GANONDORF",
+         "doc": "DOC", "mario": "MARIO", "link": "LINK", "ylink": "YLINK", "roy": "ROY", "dk": "DK",
+         "bowser": "BOWSER", "ness": "NESS", "mewtwo": "MEWTWO", "gameandwatch": "GAMEANDWATCH",
+         "kirby": "KIRBY", "pichu": "PICHU", "popo": "POPO"}
 H2H_DEFAULTS = dict(games=192, seed=41, envs=48, workers=16, templates="replays_doc_rt")
 
 
@@ -214,7 +220,7 @@ def launch_rl(r, a, name, rd, info):
         sys.exit(f"parent {a.parent} has no policy/model.pt")
     out = rd / "rl"
     cmd = ["python3", "tools/sim_rl.py", "--policy-dir", str(parent), "--templates", r["templates"],
-           "--out-dir", str(out), "--seed", str(a.seed), *flags(r["args"])]
+           "--char", CHARS[info["char"]], "--out-dir", str(out), "--seed", str(a.seed), *flags(r["args"])]
     info.update(cmd=cmd)
     if a.dry_run:
         print(" ".join(cmd))
