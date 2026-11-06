@@ -76,6 +76,8 @@ Tested end to end in headless Chrome on the owner's replays (WAVE#666 Falco; STU
 The viewer (`web/viewer`, MIT) is built from melee-3d-viewer `3ec3322` plus `tools/coach/viewer.patch`: live append (the HUD and camera follow a growing replay), and a `speed` message (sets its `fps`) for slow motion, a `ghostAlpha` message (ghost opacity; the app uses 0.45, the viewer's default is 0.9), and a ghost labelled `@` gets no number badge. A try is sent as two one-player ghosts (`?only=<port>`): you in blue, the opponent in red, the timeline's colors.
 
 Limits, measured:
+- Without an NVIDIA GPU (server on the CPU): a game's review took 326 s (GPU: 4.3 s) and each master comparison
+  minutes; "Try it yourself" is CPU by design and unaffected. Measured 2026-11-05 on Stuckey's games.
 - A tested move's ± is only the luck of the opponent's responses in the sim. It doesn't include the value
   model's own error or the opponent model being a generic master; two moves within a few points are not
   reliably ordered.

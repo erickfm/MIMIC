@@ -11,6 +11,7 @@ const api = async (path, body) => {
 };
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 const fmtTime = (f) => { const s = Math.max(0, f) / 60; return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`; };
+const fmtTimeTenth = (f) => { const t = Math.max(0, f) / 60; return `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`; };
 const fmtTimeFine = (f) => { const s = Math.max(0, f) / 60; return `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`; };
 const fmtDate = (iso) => { if (!iso) return ""; const d = new Date(iso); return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }); };
 function toast(msg, ms = 2600) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), ms); }
@@ -583,7 +584,7 @@ async function game(id, st, startAt = null) {
         ? `<span class="c ${p.tag}" title="How much your expected score moved">${p.cost > 0 ? "+" : ""}${p.cost.toFixed(0)}</span>`
         : `<span class="c ${vs <= -8 ? "costly" : vs >= 8 ? "great" : ""}" title="Your choice minus the master's average, in expected score">${vs > 0 ? "+" : ""}${vs.toFixed(0)}</span>`;
       const sub = vs != null && vs <= -8 && c.best ? `<span class="faint sub">master: ${esc(c.best)}</span>` : "";
-      return `<button class="rev ${p.tag}" data-f="${p.frame}"><span class="mono">${fmtTime(p.frame)}</span><span class="lbl">${esc(p.did)}${sub}</span>${right}</button>`;
+      return `<button class="rev ${p.tag}" data-f="${p.frame}"><span class="mono">${fmtTimeTenth(p.frame)}</span><span class="lbl">${esc(p.did)}${sub}</span>${right}</button>`;
     }).join("");
     $("#revList").querySelectorAll(".rev").forEach((b) => (b.onclick = () => { send({ type: "pause" }); send({ type: "range", start: null }); seek(+b.dataset.f); ask(+b.dataset.f); }));
   }
