@@ -140,6 +140,24 @@ python3 tools/play_human.py \
 
 Your adapter (Wii U mode) is port 1 and the bot is port 2. You pick your character and the stage.
 
+## Coach
+
+A web app that goes through your Slippi replays with a master model: where each game swung and
+which decisions cost you, what a master would have done at any moment (played out in the native
+sim from that exact frame), and a chance to play the moment yourself against the bot.
+
+```bash
+bash setup.sh            # once; it also builds the native sim (tools/build_native_sim.sh)
+tools/coach/coach.sh     # starts the server and opens http://localhost:8765
+```
+
+It needs Linux, the Melee NTSC 1.02 ISO that Slippi Launcher uses (found from Launcher's settings)
+and your replays (Launcher's replay folder or `~/Slippi`). The master models download from Hugging
+Face the first time they're needed. Reviews also need a value model for your character
+(`data/coach_rank/value_<char>.pt`, trained by `tools/coach/after_queue.py`). An NVIDIA GPU makes
+the master's tries take seconds; on the CPU alone they take about 80 s. How it works and what
+was measured: `docs/coach-design.md`.
+
 ---
 
 ## Discord bot
