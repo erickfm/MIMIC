@@ -1,4 +1,6 @@
 name	stage	recipe	parent	seed	status	started_pt	wall_min	host	commit	val_fixed	h2h
+cptfalcon-S-bc2-hf12k-s1	bc	bc-S-v2		1	done	2026-11-06 09:51 AM	30.9	aurora	2f71728-dirty		
+cptfalcon-S-bc2-hf12k-s1.rl2-s1	rl	rl-v2	cptfalcon-S-bc2-hf12k-s1	1	done	2026-11-06 10:22 AM	101.0	aurora	468ab89-dirty		vs cptfalcon-S-bc2-hf12k-s1: 160-32 (83.3%)
 falco-M-bc3-hf28k-s1	bc	bc-M-v3		1	done	2026-11-05 05:13 PM	136.5	aurora	f6030d7		
 falco-M-bc3-hf28k-s1.rl2-s1	rl	rl-v2	falco-M-bc3-hf28k-s1	1	done	2026-11-05 07:30 PM	223.1	aurora	2a4dfec-dirty		vs falco-M-bc3-hf28k-s1: 181-11 (94.3%)
 falco-S-bc2-hf28k-s1	bc	bc-S-v2		1	done	2026-11-05 11:24 PM	65.1	aurora	5d241f5-dirty		
