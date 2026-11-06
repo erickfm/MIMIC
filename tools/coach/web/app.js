@@ -31,6 +31,8 @@ function timer() {
     return (txt = r < 10 ? " · a few seconds left" : r < 90 ? ` · about ${Math.round(r / 5) * 5} s left` : ` · about ${Math.round(r / 60)} min left`);
   };
 }
+// live play: before the moment the game replays as it was; the countdown says when the player takes over
+const readyMsg = (frames) => `Get ready… ${(frames / 60).toFixed(1)} s`;
 const crumbs = (html) => ($("#crumbs").innerHTML = html);
 
 let gameFiles = null;   // File[] from an ISO picked in this browser (only when the server has none)
@@ -667,7 +669,7 @@ function makeLive(c) {
       if (!speeds.length) speeds.push([j.max_speed, `${Math.round(j.max_speed * 100)}%`]);
       if (!speeds.some(([v]) => v === speed)) speed = speeds[0][0];
       panel(`<h3>Try it yourself</h3>
-        <div class="lead2">${a.lab ? "Your setup, played live: you control your character from the first frame." : `You take over at <b>${fmtTimeFine(j.moment)}</b>, after a 1-second run-up of what really happened.`}${a.ghost ? ` The <b style="color:${ME_COL}">blue ghost</b> is the master's try (${esc(a.label)}) to follow.` : ""}</div>
+        <div class="lead2">${a.lab ? "Your setup, played live: you control your character from the first frame." : `You take over at <b>${fmtTimeFine(j.moment)}</b>, after 1 second of what really happened, to get ready.`}${a.ghost ? ` The <b style="color:${ME_COL}">blue ghost</b> is the master's try (${esc(a.label)}) to follow.` : ""}</div>
         <div class="faint">Your opponent: a model of a master ${esc(c.s.opp.char_name)}${j.bot_kind === "S RL" ? "" : `, running on this computer's processor${j.max_speed < 1 ? `: the game runs at up to ${Math.round(j.max_speed * 100)}% speed until this character's faster model is trained` : ""}`}.</div>
         ${controllerLine()}
         <div class="speeds">${speeds.map(([v, n]) => `<button class="btn tiny ${v === speed ? "on" : ""}" data-sp="${v}">${n}</button>`).join("")}</div>
@@ -692,7 +694,7 @@ function makeLive(c) {
 
   async function play() {
     const j = sess;
-    panel(`<div class="bigmsg liveMsg">${j.start < j.moment ? "Run-up…" : "Your turn!"}</div><div class="bar thin"><i class="liveBar"></i></div>${controllerLine()}`);
+    panel(`<div class="bigmsg liveMsg">${j.start < j.moment ? readyMsg(j.moment - j.start) : "Your turn!"}</div><div class="bar thin"><i class="liveBar"></i></div>${controllerLine()}`);
     // the replay up to the start, then the frames as they're played
     await new Promise((res) => { onLoaded = res; c.send({ type: "load", url: `/api/live/${j.id}/prefix.slp`, name: "attempt.slp", frame: j.start - 1 }); });
     c.send({ type: "live", sizes: j.sizes });
@@ -736,7 +738,7 @@ function makeLive(c) {
     if (!on || !sess) return;
     const j = sess, m = q(".liveMsg"), b = q(".liveBar"), cur = c.cur();
     if (!m) return;
-    m.textContent = cur < j.moment ? "Run-up…" : "Your turn!";
+    m.textContent = cur < j.moment ? readyMsg(j.moment - cur) : "Your turn!";
     m.classList.toggle("go", cur >= j.moment);
     if (b) b.style.width = `${Math.max(0, Math.min(100, ((cur - j.start) / (j.end - j.start)) * 100))}%`;
   }
