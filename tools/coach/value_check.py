@@ -30,6 +30,10 @@ def main():
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--s", type=int, default=60, help="frames before V takes over")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--all-held-out", action="store_true",
+                    help="every game in --replays is held out (V was trained on other replays, e.g. ranked "
+                         "archives the sim can't replay exactly): don't filter by value.is_val, and take "
+                         "several spots per game when there are fewer games than --n")
     a = ap.parse_args()
     from branch import Brancher
     from serve import POLICY
@@ -41,7 +45,7 @@ def main():
     from peppi_py import read_slippi
     import glob
     for p in sorted(glob.glob(os.path.join(os.path.expanduser(a.replays), "**", "*.slp"), recursive=True)):
-        if not is_val(p):
+        if not a.all_held_out and not is_val(p):
             continue
         try:
             g = read_slippi(p, skip_frames=True)
@@ -55,12 +59,18 @@ def main():
             continue
         if len(pl) != 2 or not all(c in POLICY for _, c in pl):
             continue
+        if a.char not in (c for _, c in pl):
+            continue
+        n = (g.metadata or {}).get("lastFrame")
+        if n is None:                                  # no metadata: the length from the frames
+            n = int(read_slippi(p).frames.id[-1])
         for port, c in pl:
-            n = (g.metadata or {}).get("lastFrame") or 0
             if c == a.char and n > 1500:
                 games.append((p, port, n, pl))
     rng.shuffle(games)
     print(f"{len(games)} held-out {a.char} perspectives; using {min(a.n, len(games))}", flush=True)
+    if a.all_held_out and games and len(games) < a.n:  # several spots per game (a new random frame each)
+        games = (games * (a.n // len(games) + 1))[:a.n]
     br = Brancher("cuda")
     V = Value(a.value, "cuda")
     rows = []

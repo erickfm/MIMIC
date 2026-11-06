@@ -9,7 +9,8 @@ coach uses that policy. Per character:
      erickfm/melee-ranked-replays (master-vs-master first, about 1.5 GB; see ranked_replays);
   3. value.py extract --policy (GPU) -> data/coach_rank/vfeat_<char>_rl.npz; train -> value_<char>.pt
      (the BC one is kept as value_<char>_bc.pt);
-  4. value_check.py --n 40 -> data/coach_rank/vcheck_<char>_rl.json;
+  4. value_check.py --n 40 on ~/Slippi (the sim is exact on current Slippi, not on the older ranked
+     archives) -> data/coach_rank/vcheck_<char>_rl.json;
   5. tools/coach/policies.json gets the character (the coach reads it at start).
 Needs the GPU to itself: run it only once the queue has finished.
 
@@ -151,8 +152,11 @@ def main():
         # the coach uses the RL policy from here on (value_check reads POLICY through serve)
         done[char] = pol
         POLICIES.write_text(json.dumps(done, indent=1) + "\n")
+        # checked on ~/Slippi either way: the sim replays current Slippi exactly, not the older ranked
+        # archives; a V trained on ranked replays has never seen any of these games
         rc = sh(["python3", "tools/coach/value_check.py", "--char", char, "--value", str(vpath), "--n", "40",
-                 "--out", str(DATA / f"vcheck_{char.lower()}_rl.json"), "--replays", replays], log)
+                 "--out", str(DATA / f"vcheck_{char.lower()}_rl.json"), "--replays", str(Path.home() / "Slippi"),
+                 *([] if n_local >= LOCAL_ENOUGH else ["--all-held-out"])], log)
         report[char] = "ok" if rc == 0 else "value_check failed"
     print(json.dumps(report, indent=1))
 

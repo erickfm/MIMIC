@@ -79,6 +79,8 @@ def _per_game_1(job):
     ctx = _CTX[1]
     try:
         frames = game_frames(slp)
+        if len(frames) < 1200:      # replays without metadata (the ranked dataset) are checked here
+            return None
         parser = SlippiParser(slp)
         ports = sorted(p for (p, _) in frames[-1].post)
         if len(ports) != 2 or port not in ports:
@@ -122,8 +124,8 @@ def candidates(replays, char):
         pls = [(i, pl) for i, pl in enumerate(g.start.players) if pl]
         if len(pls) != 2 or g.start.slippi.version[:2] < (3, 0):
             continue
-        n = (g.metadata or {}).get("lastFrame") or 0
-        if n < 1200:
+        n = (g.metadata or {}).get("lastFrame")
+        if n is not None and n < 1200:   # no metadata (ranked replays): the length is checked per game
             continue
         for i, pl in pls:
             if EXT_TO_MELEE.get(pl.character) == char:
