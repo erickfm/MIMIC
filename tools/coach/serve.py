@@ -1175,7 +1175,7 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             if m.group(2) == "pad":
                 from live import pad_from_json
-                sess.pad = pad_from_json(b)
+                sess.set_pad(pad_from_json(b))
             elif m.group(2) == "go":
                 sess.go(float(b.get("speed", 1.0)))
             else:

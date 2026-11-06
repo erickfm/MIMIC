@@ -499,14 +499,18 @@ async function game(id, st, startAt = null) {
     });
     await api(`/api/live/${j.id}/go`, { speed: liveSpeed });
     // the controller, sent whenever it changes (and every 100 ms anyway)
-    let last = null, lastT = 0, inflight = false;
+    // (a button pressed while a send is under way goes with the next send, so a quick tap still counts)
+    let last = null, lastT = 0, inflight = false, held = new Set();
     const loopPad = () => {
       if (!liveOn || !liveSess) return;
       const p = pad.read(), t = performance.now();
+      p.buttons.forEach((b) => held.add(b));
       const n = $("#ctlName"); if (n) n.textContent = pad.source();
-      if (!inflight && (!samePad(p, last) || t - lastT > 100)) {
+      if (!inflight && (!samePad(p, last) || held.size > p.buttons.length || t - lastT > 100)) {
+        const out = { ...p, buttons: [...new Set([...p.buttons, ...held])] };
+        held = new Set();
         inflight = true; last = p; lastT = t;
-        fetch(`/api/live/${j.id}/pad`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) })
+        fetch(`/api/live/${j.id}/pad`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(out) })
           .catch(() => {}).finally(() => { inflight = false; });
       }
       requestAnimationFrame(loopPad);

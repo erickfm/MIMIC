@@ -58,6 +58,7 @@ class LiveSession:
         self.ghost, self.script = ghost, script or {}
         self.state, self.error, self.result = "preparing", None, None
         self.pad = None              # the player's latest pad (pad_from_json), None = neutral
+        self.latch = 0               # buttons pressed since the last frame took the pad (a quick tap still counts)
         self.speed = 1.0
         self.listeners = []          # queues of ("f", bytes) / ("s", dict) for the page's streams
         self.timing = dict(late=0, ticks=0, max_ms=0.0, bot_ms=[])
@@ -87,6 +88,10 @@ class LiveSession:
         for k, v in kw.items():
             setattr(self, k, v)
         self._emit("s", self.status())
+
+    def set_pad(self, p):
+        self.pad = p
+        self.latch |= p.button
 
     def go(self, speed=1.0):
         self.speed = max(0.1, min(float(speed), getattr(self, "max_speed", 1.0)))
@@ -236,6 +241,10 @@ class LiveSession:
                         p = pad_from_json(json_from_pad(self.pad_from_pre(self.scripts[mp][(f + 1, mp, 0)])))
                     else:
                         p = self.pad or self.Pad()
+                        if self.latch:
+                            import dataclasses
+                            p = dataclasses.replace(p, button=p.button | self.latch)
+                            self.latch = 0
                     wire[8 * mp:8 * mp + 8] = p.pack()
                 fr = self.sim.step(bytes(wire))
                 if fr is None:
