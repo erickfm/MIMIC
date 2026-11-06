@@ -159,7 +159,7 @@ class Brancher:
         frame (F is then that frame, not the one asked for).
         pads_slp: take the inputs up to F from this .slp instead (a branch written earlier: the real
         game, the placement, then that try), so a branch can continue from any frame of a try.
-        force: (port, slp, n): for the first n live frames, that side presses exactly what it pressed
+        force: (port, slp, n), or a list of them (both sides): for the first n live frames, that side presses exactly what it pressed
         in `slp` (a try, or the real game) from frame F on; its model then takes over, with the forced
         inputs in its controller history. Used to test one option against many opponent responses."""
         import torch
@@ -289,16 +289,16 @@ class Brancher:
             return out
 
         roll = [dict(frames=[snap(gs_F[i])], dealt={}, done=False) for i in range(k)]
-        fport, fwire = None, {}
-        if force:
-            fport, fslp, fn = force
+        # forced sides: {port: {step: wire}}; `force` is one (port, slp, n) or a list of them
+        fwires = {}
+        for fport, fslp, fn in ([force] if force and isinstance(force[0], int) else (force or [])):
             fpre, _ = recorded(fslp)
+            fw = fwires.setdefault(fport, {})
             for st_ in range(int(fn)):
                 key = (F + st_ + 1, fport, 0)
                 if key not in fpre:
                     break
-                fwire[st_] = pad_from_pre(fpre[key]).pack()
-            fside = next(s for s in sides if s["port"] == fport)
+                fw[st_] = pad_from_pre(fpre[key]).pack()
         feats_v = {}
         gss = gs_F
         for step in range(horizon):
@@ -320,8 +320,8 @@ class Brancher:
                         feats_v[step] = self.model(s["dir"])[0].features(buf)[:, -1].float()
                 wire = pads_from_indices(idx)
                 for i in range(k):
-                    pads[i][8 * s["port"]:8 * s["port"] + 8] = (fwire[step] if s["port"] == fport and step in fwire
-                                                                  else wire[i].tobytes())
+                    fw = fwires.get(s["port"], {})
+                    pads[i][8 * s["port"]:8 * s["port"] + 8] = fw[step] if step in fw else wire[i].tobytes()
             live = [i for i in range(k) if not sims[i].done]
             for i in live:
                 sims[i].send(bytes(pads[i]))
@@ -332,8 +332,10 @@ class Brancher:
                 cur[i] = fr
                 gss[i] = parsers[i].parse(fr)
                 roll[i]["frames"].append(snap(gss[i]))
-                if step in fwire:   # the forced side's model sees what was really pressed
-                    cs = gss[i].players[fport + 1].controller_state
+                for fside in sides:   # a forced side's model sees what was really pressed
+                    if step not in fwires.get(fside["port"], {}):
+                        continue
+                    cs = gss[i].players[fside["port"] + 1].controller_state
                     ctrl = fside["build"](gss[i], prev_from_controller(cs), fside["ctx"])["self_controller"][0].numpy()
                     li = fside["pol"].last_idx
                     li[i].copy_(torch.tensor(ctrl_indices(ctrl), device=li.device, dtype=li.dtype))
