@@ -48,6 +48,22 @@ A web app: the player's browser draws everything; a server runs the game simulat
   real models; its embed page takes `load`, `seek`, `play`, `pause`, `range` and `ghosts`
   messages (`src/embed.tsx`). Nothing existing does model-based branching on replays; Slippi
   Lab's Training Mode savestate export is the closest (it hands control to the player in Dolphin).
+- **Opponent realism** (`tools/coach/realism_check.py`, 2026-11-05, CPU, k=16): at 60 random real
+  decisions per player, the player's real inputs are forced over the decision's stretch and the
+  opponent is the master model. A control (both sides' real inputs forced) reproduced the real stretch
+  exactly in 120/120 decisions and scores the real outcome through the same sim + V pipeline. If the
+  model opponent were indistinguishable from the real one, the real outcome's rank among the 16 tries
+  would be uniform (mean 0.5 ± 0.037):
+
+  | player (opponents) | mean rank | rank quintiles | KS (5% crit) | tries − real | real reaction among tries |
+  |---|---|---|---|---|---|
+  | WAVE#666 Falco (mostly Stuckey's Falco) | 0.566 | 7 10 19 7 17 | 0.150 (0.176) | −1.2 ± 0.6 | 77% of decisions, 50% of tries |
+  | STUC#911 Fox (WAVE's Falco, BILL's Luigi) | 0.503 | 9 14 17 10 10 | 0.117 (0.176) | −0.8 ± 1.2 | 85%, 48% |
+
+  Neither rejects uniformity. In the owner's games the model opponent is slightly tougher than the
+  real ones (the real outcome sits about 1 point above the tries' mean, ~2 SE; 0.62 mean rank on the 23
+  decisions whose tries spread by more than 2 points), so the coach's numbers may lean slightly
+  pessimistic there. Nothing in the app was changed on this basis. Single run, 60 decisions each.
 
 ## Open (owner)
 
