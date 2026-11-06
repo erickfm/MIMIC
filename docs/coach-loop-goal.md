@@ -89,6 +89,9 @@ moment themselves against the bot, live, from the exact game state.
 ## Rules
 
 - Never use the GPU while another GPU job runs (the queue counts). Check `nvidia-smi` first.
+- Heavy CPU work slows the queue too, even at nice 19: a 12-process value extraction (after_queue
+  `--device cpu`, 2026-11-06 1:20 AM) took S RL rollouts from 30 s to 47–56 s per update. Keep CPU jobs
+  light (a few threads) while the queue runs.
 - Premium and simple: plain words, nothing a player wouldn't understand.
 - Don't stop before Sat 2026-11-07, 6:00 PM Pacific. After that, stop when 1–4 are done, or when
   blocked on something only the owner can provide.

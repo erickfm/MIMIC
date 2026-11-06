@@ -121,10 +121,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--chars", nargs="*")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--device", default=None,
+                    help="cpu: run it while the GPU is busy (slower; start it with CUDA_VISIBLE_DEVICES= and nice)")
     a = ap.parse_args()
     from serve import RUN_CHAR
     chars = a.chars or sorted(RUN_CHAR)
     done = json.loads(POLICIES.read_text()) if POLICIES.exists() else {}
+    dev = ["--device", a.device] if a.device else []
     report = {}
     for char in chars:
         pol = rl_policy(char)
@@ -141,12 +144,12 @@ def main():
         feats = DATA / f"vfeat_{char.lower()}_rl.npz"
         vpath = DATA / f"value_{char.lower()}.pt"
         if sh(["python3", "tools/coach/value.py", "extract", "--char", char, "--replays", replays, "--out", str(feats),
-               "--policy", pol, "--max-games", "1500"], log):
+               "--policy", pol, "--max-games", "1500", *dev], log):
             report[char] = "extract failed"
             continue
         if vpath.exists() and not (DATA / f"value_{char.lower()}_bc.pt").exists():
             shutil.copy(vpath, DATA / f"value_{char.lower()}_bc.pt")
-        if sh(["python3", "tools/coach/value.py", "train", "--data", str(feats), "--out", str(vpath)], log):
+        if sh(["python3", "tools/coach/value.py", "train", "--data", str(feats), "--out", str(vpath), *dev], log):
             report[char] = "train failed"
             continue
         # the coach uses the RL policy from here on (value_check reads POLICY through serve)
@@ -156,7 +159,7 @@ def main():
         # archives; a V trained on ranked replays has never seen any of these games
         rc = sh(["python3", "tools/coach/value_check.py", "--char", char, "--value", str(vpath), "--n", "40",
                  "--out", str(DATA / f"vcheck_{char.lower()}_rl.json"), "--replays", str(Path.home() / "Slippi"),
-                 *([] if n_local >= LOCAL_ENOUGH else ["--all-held-out"])], log)
+                 *([] if n_local >= LOCAL_ENOUGH else ["--all-held-out"]), *dev], log)
         report[char] = "ok" if rc == 0 else "value_check failed"
     print(json.dumps(report, indent=1))
 
