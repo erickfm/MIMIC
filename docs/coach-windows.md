@@ -35,8 +35,8 @@ hosted server? Findings from reading melee-unlocked at our pinned commit; nothin
 
 Everything else is portable already: the server is standard-library Python, torch/peppi/libmelee
 have Windows wheels, the page runs in any modern browser, and the ISO is found through Slippi
-Launcher's settings on Windows too (its settings path differs: `%APPDATA%/Slippi Launcher/Settings`,
-which `serve.py` would need to check).
+Launcher's settings on Windows too (`serve.py` already checks `%APPDATA%/Slippi Launcher/Settings`
+and the Mac location as well as Linux's).
 
 ## A cheaper route: WSL2
 
