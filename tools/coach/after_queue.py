@@ -4,7 +4,8 @@
 A value model reads its policy's trunk, so each character's value model is retrained on the RL
 policy's features (and re-validated against sim rollouts, tools/coach/value_check.py) before the
 coach uses that policy. Per character:
-  1. the policy: Falco's M RL run, Fox's M RL run (fox-master), else the character's S RL run;
+  1. the policy: the character's S RL run (owner, 2026-11-06: the coach uses S RL models throughout,
+     the same ones live play uses); Fox's is SF7u100 (fox-S-bc1-s1.rl1-s0, rl-v1);
   2. replays: ~/Slippi when it has enough games of that character, else ranked archives from
      erickfm/melee-ranked-replays (master-vs-master first, about 1.5 GB; see ranked_replays);
   3. value.py extract --policy (GPU) -> data/coach_rank/vfeat_<char>_rl.npz; train -> value_<char>.pt
@@ -29,7 +30,7 @@ DATA = ROOT / "data" / "coach_rank"
 POLICIES = ROOT / "tools" / "coach" / "policies.json"
 RANKED = "erickfm/melee-ranked-replays"
 LOCAL_ENOUGH = 600        # perspectives of the character in ~/Slippi to train on them alone
-FIXED = {"FOX": "runs/fox-M-bc2-mlr01-s1.rl2-s1/policy"}   # fox-master (M BC + RL), already promoted
+FIXED = {"FOX": "runs/fox-S-bc1-s1.rl1-s0/policy"}   # SF7u100: Fox's S RL (beat fox-master 109-83 in the sim)
 HF_BUCKET = {"JIGGLYPUFF": "JIGGLYPUFF", "GAMEANDWATCH": "GAMEANDWATCH"}
 
 
@@ -46,12 +47,9 @@ def rl_policy(char):
     key = RUN_CHAR.get(char)
     if not key:
         return None
-    for scale in ("M", "S"):
-        runs = sorted((ROOT / "runs").glob(f"{key}-{scale}-*.rl2-s*"), key=lambda q: q.stat().st_mtime)
-        runs = [r for r in runs if run_status(r.name) == "done" and (r / "policy" / "model.pt").exists()]
-        if runs:
-            return str((runs[-1] / "policy").relative_to(ROOT))
-    return None
+    runs = sorted((ROOT / "runs").glob(f"{key}-S-*.rl2-s*"), key=lambda q: q.stat().st_mtime)
+    runs = [r for r in runs if run_status(r.name) == "done" and (r / "policy" / "model.pt").exists()]
+    return str((runs[-1] / "policy").relative_to(ROOT)) if runs else None
 
 
 def local_count(char):

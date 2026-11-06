@@ -8,11 +8,11 @@ twice from a game-level split of their replays:
   - a training set whose own val shards pick the checkpoint (train.py's bestloss), and
   - a test set (--val-frac 1.0) that no choice is made on: the reported numbers.
 
-  python3 tools/coach/player_model.py finetune --parent falco-M-bc3-hf28k-s1 \\
-      --data data/stuckey/falco_train --name stuckey-falco-M-ft1 --steps 2000
+  python3 tools/coach/player_model.py finetune --parent falco-S-bc2-hf28k-s1 \\
+      --data data/stuckey/falco_train --name stuckey-falco-S-ft1 --steps 2000
   python3 tools/coach/player_model.py eval --data data/stuckey/falco_test \\
-      --policies runs/falco-M-bc3-hf28k-s1/policy runs/falco-M-bc3-hf28k-s1.rl2-s1/policy \\
-                 runs/stuckey-falco-M-ft1/policy
+      --policies runs/falco-S-bc2-hf28k-s1/policy runs/falco-S-bc2-hf28k-s1.rl2-s1/policy \\
+                 runs/stuckey-falco-S-ft1/policy
 Both use the GPU: run them only when nothing else does.
 """
 import argparse, json, re, shutil, subprocess, sys, time

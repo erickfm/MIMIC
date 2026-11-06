@@ -54,8 +54,8 @@ moment themselves against the bot, live, from the exact game state.
 
 ## 3. After the queue finishes (GPU free)
 
-- Switch the coach to RL policies (Falco: the new M RL; Fox: `fox-M-bc2-mlr01-s1.rl2-s1`; others:
-  their S RL), retrain the value models on those policies (`tools/coach/value.py`), and re-validate
+- Switch the coach to S RL policies for every character (owner, 2026-11-06: S with RL throughout,
+  the same models live play uses; Fox: SF7u100 `fox-S-bc1-s1.rl1-s0`), retrain the value models on those policies (`tools/coach/value.py`), and re-validate
   them (`tools/coach/value_check.py`) before the app uses them. Train value models for the other
   characters too.
 - Upload the value models to Hugging Face so a fresh machine gets them, and make the coach download
@@ -66,9 +66,9 @@ moment themselves against the bot, live, from the exact game state.
 1. `python3 tools/coach/after_queue.py` (RL policies + value models, item 3 above).
 2. Stuckey's Falco model (backlog 4): shards are built (`data/stuckey/falco_train`: 365 games + 40
    for picking the checkpoint; `data/stuckey/falco_test`: 46 games no choice is made on). Then
-   `python3 tools/coach/player_model.py finetune --parent falco-M-bc3-hf28k-s1 --data data/stuckey/falco_train
-   --name stuckey-falco-M-ft1 --steps 2000` and `player_model.py eval --data data/stuckey/falco_test
-   --policies <BC> <RL> runs/stuckey-falco-M-ft1/policy`. Both paths were smoke-tested on the CPU.
+   `python3 tools/coach/player_model.py finetune --parent falco-S-bc2-hf28k-s1 --data data/stuckey/falco_train
+   --name stuckey-falco-S-ft1 --steps 2000` and `player_model.py eval --data data/stuckey/falco_test
+   --policies <S BC> <S RL> runs/stuckey-falco-S-ft1/policy` (S, like everything else in the coach). Both paths were smoke-tested on the CPU.
 3. `python3 tools/coach/upload_coach.py` lists what would go to `erickfm/MIMIC/coach/` (each character's
    policy + value model, only pairs that belong together); **ask the owner**, then `--push`. The coach
    fetches the value models at start and a policy the first time it needs it (tested: a value model is
