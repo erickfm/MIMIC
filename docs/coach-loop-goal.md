@@ -20,6 +20,15 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 - If the queue process died, restart it the same way. Never run a second copy.
 - Record each finished character's h2h result (RL vs its BC parent) in the report.
 
+### Results (RL vs its BC parent, 192 games, sim, bf16, seed 41)
+
+| run | RL vs BC | stock margin | finished |
+|---|---|---|---|
+| falco-M-bc3-hf28k-s1.rl2-s1 | 181–11 (94.3%) | +1.91 | Thu 11/5 11:24 PM |
+
+The BC parent is also the opponent RL trained against, so this measures the gain against that one
+opponent.
+
 ## 2. "Try it yourself" (build now, on CPU)
 
 From any coach suggestion (a master try, a tested move, or the paused moment), the player plays that
