@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """L-cancel RL in the native sim: rollouts from rlvr/sim/vec_env.py, update from rlvr/sim/ppo.py.
 
-The learner plays Fox dittos against a frozen copy of the starting policy (frozen BC, not CPU-9:
+The learner plays dittos of its character (--char, default Fox) against a frozen copy of the starting policy (frozen BC, not CPU-9:
 see memory feedback_rlvr_training_opponent), ports alternated across envs. Episodes and reward
 are rlvr/sim/lcancel.py (the l_cancel_online definitions, resolved live from the sim's exact
 post-frames). PPO is the unchanged ppo_update with a frozen reference for the KL term; the
@@ -46,7 +46,8 @@ os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":0:0")
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--policy-dir", required=True, help="hf-style dir: model.pt + norm JSONs")
-    ap.add_argument("--templates", required=True, help="1v1 .slp templates (made into Fox dittos)")
+    ap.add_argument("--templates", required=True, help="1v1 .slp templates (made into dittos of --char)")
+    ap.add_argument("--char", default="FOX", help="libmelee character both sides play (the policy's character)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--envs", type=int, default=64)
     ap.add_argument("--workers", type=int, default=16)
@@ -145,7 +146,7 @@ def main():
     tdir.mkdir(exist_ok=True)
     templates = []
     for src in sorted(Path(a.templates).glob("*.slp")):
-        make_ditto(src, "FOX", tdir / src.name)
+        make_ditto(src, a.char, tdir / src.name)
         templates.append(tdir / src.name)
     assign = lambda e, side, ch: ("LEARN", "OPP")[(e + side) % 2]
     vr_ids, vr_w = [], []
