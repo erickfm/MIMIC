@@ -156,6 +156,9 @@ def find_iso(cfg):
 
 
 def default_replay_dir():
+    root = slippi_launcher_settings().get("rootSlpPath")
+    if root and Path(root).is_dir():
+        return str(root)
     for p in (Path.home() / "Slippi", Path.home() / "Documents" / "Slippi"):
         if p.is_dir():
             return str(p)
@@ -227,11 +230,16 @@ class Library:
         self.cache[key] = h
         return h
 
-    def scan(self, folder):
+    def rescan(self, folder):
+        """Scan `folder` in the background; `scanning` is set before this returns, so a status read
+        right after it never shows the old folder's games as the new folder's."""
         with self.lock:
             if self.scanning:
                 return
             self.scanning = True
+        threading.Thread(target=self._scan, args=(folder,), daemon=True).start()
+
+    def _scan(self, folder):
         try:
             files = sorted(Path(folder).rglob("*.slp"), key=lambda p: p.name, reverse=True)
             games = []
@@ -414,30 +422,46 @@ class Jobs:
         return self.values[char]
 
     def loop(self):
-        from branch import Brancher
         while True:
-            _, _, jid, game, an = self.q.get()
-            job = self.jobs[jid]
+            self.run_job(*self.q.get()[2:])
+
+    def urgent(self):
+        """Is one of the player's own requests waiting (not a background review or its master tries)?"""
+        with self.q.mutex:
+            return bool(self.q.queue) and self.q.queue[0][0] == 0
+
+    def yield_to_player(self):
+        """Run the player's waiting requests now, from inside a long background job."""
+        while self.urgent():
             try:
-                job["state"] = "loading" if self.brancher is None else "running"
-                if self.brancher is None:
-                    self.brancher = Brancher(self.device, iso=self.iso_path)
-                job["state"] = "running"
-                if job["kind"] == "review":
-                    self.do_review(job, game, an)
-                elif job["kind"] == "lab":
-                    self.do_lab(jid, job, game, an)
-                elif job["kind"] == "patterns":
-                    self.do_patterns(jid, job, game, an)
-                elif job["kind"] == "earlier":
-                    self.do_earlier(jid, job, game, an)
-                elif job["kind"] == "test":
-                    self.do_test(jid, job, game, an)
-                else:
-                    self.do_branch(jid, job, game, an)
-            except Exception as e:
-                traceback.print_exc()
-                job.update(state="error", error=str(e)[:300])
+                item = self.q.get_nowait()
+            except queue.Empty:
+                return
+            self.run_job(*item[2:])
+
+    def run_job(self, jid, game, an):
+        from branch import Brancher
+        job = self.jobs[jid]
+        try:
+            job["state"] = "loading" if self.brancher is None else "running"
+            if self.brancher is None:
+                self.brancher = Brancher(self.device, iso=self.iso_path)
+            job["state"] = "running"
+            if job["kind"] == "review":
+                self.do_review(job, game, an)
+            elif job["kind"] == "lab":
+                self.do_lab(jid, job, game, an)
+            elif job["kind"] == "patterns":
+                self.do_patterns(jid, job, game, an)
+            elif job["kind"] == "earlier":
+                self.do_earlier(jid, job, game, an)
+            elif job["kind"] == "test":
+                self.do_test(jid, job, game, an)
+            else:
+                self.do_branch(jid, job, game, an)
+        except Exception as e:
+            traceback.print_exc()
+            job.update(state="error", error=str(e)[:300])
 
     def do_review(self, job, game, an, compare=True):
         """V along the game, and each decision's cost: what your choice did to the expected 5-second
@@ -449,8 +473,17 @@ class Jobs:
             raise RuntimeError(f"No review model for {me['char_name']} yet.")
         pdir = policy_dir(me["char"])
         m = self.brancher.model(pdir)[0]
-        with self.brancher.lock:
-            frames, out = game_value(game["path"], me["port"], pdir, m, V, self.device)
+        lock = self.brancher.lock
+        def between(f):
+            job["progress"] = round(0.95 * f, 3)
+            if self.urgent():   # the player asked for something: do it first (a CPU review takes minutes)
+                lock.release()
+                try:
+                    self.yield_to_player()
+                finally:
+                    lock.acquire()
+        with lock:
+            frames, out = game_value(game["path"], me["port"], pdir, m, V, self.device, between=between)
         sc = score(out)
         a = an["_arrays"]
         fr_idx = {int(f): i for i, f in enumerate(a["frames"])}
@@ -881,7 +914,7 @@ class App:
         self.iso, self.iso_from, self.iso_path = find_iso(self.cfg)
         self.live, self.cpu, self.cpu_values = {}, None, {}   # live play: sessions, CPU models
         self.jobs.iso_path = self.iso_path if self.iso else None
-        threading.Thread(target=self.lib.scan, args=(self.cfg["replay_dir"],), daemon=True).start()
+        self.lib.rescan(self.cfg["replay_dir"])
 
     def cpu_models(self):
         """Models on the CPU for live play (the GPU may be training)."""
@@ -1089,7 +1122,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             g = a.lib.by_id.get(m.group(1))
             if not g:
-                return self.send_json(dict(error="unknown game"), 404)
+                return self.send_json(dict(error="That game isn't in your replay folder (it may have been moved or deleted)."), 404)
             if m.group(2):
                 return self.send_file(g["path"], "application/octet-stream")
             s = summary(g, a.me())
@@ -1101,7 +1134,7 @@ class Handler(BaseHTTPRequestHandler):
         if m:
             g = a.lib.by_id.get(m.group(1))
             if not g:
-                return self.send_json(dict(error="unknown game"), 404)
+                return self.send_json(dict(error="That game isn't in your replay folder (it may have been moved or deleted)."), 404)
             f = int(parse_qs(u.query).get("f", ["0"])[0])
             return self.send_json(game_state(g, a.me(), f))
         m = re.fullmatch(r"/api/job/(\w+)", p)
@@ -1156,7 +1189,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not Path(d).is_dir():
                     return self.send_json(dict(error="That folder doesn't exist."), 400)
                 a.cfg["replay_dir"] = d
-                threading.Thread(target=a.lib.scan, args=(d,), daemon=True).start()
+                a.lib.rescan(d)
             if "me" in b:
                 a.cfg["me"] = b["me"]
             if "iso" in b:
@@ -1168,13 +1201,13 @@ class Handler(BaseHTTPRequestHandler):
             save_config(a.cfg)
             return self.send_json(dict(ok=True))
         if p == "/api/rescan":
-            threading.Thread(target=a.lib.scan, args=(a.cfg["replay_dir"],), daemon=True).start()
+            a.lib.rescan(a.cfg["replay_dir"])
             return self.send_json(dict(ok=True))
         if p == "/api/branch":
             b = self.body()
             g = a.lib.by_id.get(b.get("game"))
             if not g:
-                return self.send_json(dict(error="unknown game"), 404)
+                return self.send_json(dict(error="That game isn't in your replay folder (it may have been moved or deleted)."), 404)
             why = support(g, a.me())
             if why:
                 return self.send_json(dict(error=why), 400)
@@ -1187,7 +1220,7 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             g = a.lib.by_id.get(b.get("game"))
             if not g:
-                return self.send_json(dict(error="unknown game"), 404)
+                return self.send_json(dict(error="That game isn't in your replay folder (it may have been moved or deleted)."), 404)
             why = support(g, a.me())
             if why:
                 return self.send_json(dict(error=why), 400)
@@ -1214,7 +1247,7 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             g = a.lib.by_id.get(b.get("game"))
             if not g:
-                return self.send_json(dict(error="unknown game"), 404)
+                return self.send_json(dict(error="That game isn't in your replay folder (it may have been moved or deleted)."), 404)
             why = support(g, a.me())
             if why:
                 return self.send_json(dict(error=why), 400)
@@ -1229,7 +1262,7 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             g = a.lib.by_id.get(b.get("game"))
             if not g:
-                return self.send_json(dict(error="unknown game"), 404)
+                return self.send_json(dict(error="That game isn't in your replay folder (it may have been moved or deleted)."), 404)
             why = support(g, a.me())
             if why:
                 return self.send_json(dict(error=why), 400)
@@ -1240,7 +1273,7 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             g = a.lib.by_id.get(b.get("game"))
             if not g:
-                return self.send_json(dict(error="unknown game"), 404)
+                return self.send_json(dict(error="That game isn't in your replay folder (it may have been moved or deleted)."), 404)
             why = support(g, a.me())
             if why:
                 return self.send_json(dict(error=why), 400)
@@ -1274,7 +1307,7 @@ class Handler(BaseHTTPRequestHandler):
             b = self.body()
             g = a.lib.by_id.get(b.get("game"))
             if not g:
-                return self.send_json(dict(error="unknown game"), 404)
+                return self.send_json(dict(error="That game isn't in your replay folder (it may have been moved or deleted)."), 404)
             why = support(g, a.me())
             if why:
                 return self.send_json(dict(error=why), 400)

@@ -15,6 +15,22 @@ const fmtTimeTenth = (f) => { const t = Math.max(0, f) / 60; return `${Math.floo
 const fmtTimeFine = (f) => { const s = Math.max(0, f) / 60; return `${Math.floor(s / 60)}:${(s % 60).toFixed(2).padStart(5, "0")}`; };
 const fmtDate = (iso) => { if (!iso) return ""; const d = new Date(iso); return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }) + " · " + d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" }); };
 function toast(msg, ms = 2600) { const t = $("#toast"); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => (t.hidden = true), ms); }
+// " · about 40 s left", from how fast the job has gone since it started moving (model loading and
+// queueing don't count); nothing until there's enough to go on
+function timer() {
+  let t1 = null, p1 = 0, pLast = null, txt = "";
+  return (p) => {
+    if (!(p > 0) || p >= 1) return "";
+    if (p === pLast) return txt;    // re-estimate only when progress moves (it comes in steps)
+    pLast = p;
+    const now = performance.now();
+    if (t1 === null) { t1 = now; p1 = p; return (txt = ""); }
+    const el = (now - t1) / 1000, dp = p - p1;
+    if (el < 4 || dp < 0.05) return (txt = "");
+    const r = el * (1 - p) / dp;
+    return (txt = r < 10 ? " · a few seconds left" : r < 90 ? ` · about ${Math.round(r / 5) * 5} s left` : ` · about ${Math.round(r / 60)} min left`);
+  };
+}
 const crumbs = (html) => ($("#crumbs").innerHTML = html);
 
 let gameFiles = null;   // File[] from an ISO picked in this browser (only when the server has none)
@@ -39,12 +55,16 @@ async function route() {
   if (!st) { view.innerHTML = `<div class="setup"><h1>Can't reach the coach</h1><p class="lead">The coach program isn't running. Start it and reload this page.</p></div>`; return; }
   serverIso = !!st.iso?.ok;
   if (h.startsWith("/setup") || !(serverIso || gameFiles) || !st.me || !st.replay_dir_exists) return setup(st);
-  const lm = h.match(/^\/lab\/(\w+)(?:\?f=(-?\d+))?/);
-  if (lm) return lab(lm[1], lm[2] != null ? +lm[2] : null);
-  if (h.startsWith("/patterns")) return patterns(st);
-  const m = h.match(/^\/game\/(\w+)(?:\?f=(-?\d+))?/);
-  if (m) return game(m[1], st, m[2] != null ? +m[2] : null);
-  return library(st);
+  try {
+    const lm = h.match(/^\/lab\/(\w+)(?:\?f=(-?\d+))?/);
+    if (lm) return await lab(lm[1], lm[2] != null ? +lm[2] : null);
+    if (h.startsWith("/patterns")) return await patterns(st);
+    const m = h.match(/^\/game\/(\w+)(?:\?f=(-?\d+))?/);
+    if (m) return await game(m[1], st, m[2] != null ? +m[2] : null);
+    return await library(st);
+  } catch (e) {
+    view.innerHTML = `<div class="setup"><h1>Couldn't open this page</h1><p class="lead">${esc(e.message)}</p><a class="btn" href="#/">Back to your games</a></div>`;
+  }
 }
 let cleanup = null;
 window.addEventListener("hashchange", route);
@@ -82,8 +102,12 @@ async function setup(st) {
       $("#drop").hidden = true;
     } else if (gameFiles) $("#isoMsg").textContent = `Melee files ready (${gameFiles.length} files). Drop another ISO to replace them.`;
     s2.classList.toggle("ok", s.replay_dir_exists && s.games > 0 && !!s.me);
-    $("#dirMsg").textContent = !s.replay_dir_exists ? "That folder doesn't exist." : s.scanning ? "Looking through your replays…" : `${s.games} games found.`;
-    if (s.codes.length && !s.scanning) {
+    $("#dirMsg").textContent = !s.replay_dir_exists ? "That folder doesn't exist."
+      : s.scanning ? "Looking through your replays…"
+      : s.games ? `Using ${s.replay_dir}: ${s.games} games found.`
+      : "No Slippi replays in this folder. Slippi Launcher shows where it saves them under Settings → Replays.";
+    if (!s.codes.length || s.scanning) $("#who").innerHTML = "";
+    else {
       $("#who").innerHTML = `<div class="row"><span class="dim" style="flex:none">You are</span><select id="me">${s.codes.map(([c, n]) => `<option value="${esc(c)}" ${c === s.me ? "selected" : ""}>${esc(c)} — ${n} games</option>`).join("")}</select></div>`;
       $("#me").onchange = async (e) => { await api("/api/config", { me: e.target.value }); refresh(); };
     }
@@ -109,7 +133,7 @@ async function setup(st) {
   $("#dirSave").onclick = async () => {
     $("#dirErr").textContent = "";
     try { await api("/api/config", { replay_dir: $("#dir").value }); } catch (e) { $("#dirErr").textContent = e.message; }
-    setTimeout(refresh, 300);
+    refresh();
   };
   $("#go").onclick = () => { location.hash = "#/"; };
   refresh();
@@ -302,11 +326,11 @@ async function game(id, st, startAt = null) {
     $("#prog .bar i").style.width = "0%";
     try {
       const job = await api("/api/branch", { game: id, frame: f, k: 16 });
-      let j = job;
+      let j = job; const left = timer();
       while (j.state !== "done" && j.state !== "error") {
         await new Promise((r) => setTimeout(r, 300));
         j = await api(`/api/job/${job.id}`);
-        $("#progMsg").textContent = j.state === "queued" ? "Waiting for the simulator…" : j.state === "loading" ? "Loading the models (first time only)…" : `Trying it ${j.k} ways from this exact moment…`;
+        $("#progMsg").textContent = j.state === "queued" ? "Waiting for the simulator…" : j.state === "loading" ? "Loading the models (first time only)…" : `Trying it ${j.k} ways from this exact moment…${left(j.progress)}`;
         $("#prog .bar i").style.width = `${Math.round((j.progress || 0) * 100)}%`;
       }
       if (j.state === "error") throw new Error(j.error);
@@ -454,11 +478,11 @@ async function game(id, st, startAt = null) {
     const msg = $("#tests");
     try {
       const job = await api("/api/test", { game: id, frame: branch.frame, k: 32, label, ...body });
-      let j = job;
+      let j = job; const left = timer();
       while (j.state !== "done" && j.state !== "error") {
         await new Promise((r) => setTimeout(r, 300));
         j = await api(`/api/job/${job.id}`);
-        if ($("#testProg")) $("#testProg").innerHTML = `<div class="testing">Testing <b>${esc(label)}</b> against 32 opponents… ${Math.round((j.progress || 0) * 100)}%</div>`;
+        if ($("#testProg")) $("#testProg").innerHTML = `<div class="testing">Testing <b>${esc(label)}</b> against 32 opponents… ${Math.round((j.progress || 0) * 100)}%${left(j.progress)}</div>`;
       }
       if (j.state === "error") throw new Error(j.error);
       if (!alive || branch?.frame !== j.frame) return;
@@ -537,11 +561,11 @@ async function game(id, st, startAt = null) {
     const btn = $("#goBack"); btn.disabled = true; btn.textContent = "Starting…";
     try {
       const job = await api("/api/earlier", { game: id, frame: branch.frame, k: 8 });
-      let j = job;
+      let j = job; const left = timer();
       while (j.state !== "done" && j.state !== "error") {
         await new Promise((r) => setTimeout(r, 400));
         j = await api(`/api/job/${job.id}`);
-        if ($("#goBack")) $("#goBack").textContent = j.state === "queued" ? "Waiting for the simulator…" : `Playing out the earlier moments… ${Math.round((j.progress || 0) * 100)}%`;
+        if ($("#goBack")) $("#goBack").textContent = j.state === "queued" ? "Waiting for the simulator…" : `Playing out the earlier moments… ${Math.round((j.progress || 0) * 100)}%${left(j.progress)}`;
       }
       if (j.state === "error") throw new Error(j.error);
       if (!alive) return;
@@ -552,8 +576,11 @@ async function game(id, st, startAt = null) {
   async function loadReview() {
     $("#revState").textContent = "Reviewing the game…";
     try {
-      let j = await api("/api/review", { game: id });
-      while (j.state && j.state !== "done" && j.state !== "error") { await new Promise((r) => setTimeout(r, 500)); j = await api(`/api/job/${j.id}`); }
+      let j = await api("/api/review", { game: id }); const left = timer();
+      while (j.state && j.state !== "done" && j.state !== "error") {
+        await new Promise((r) => setTimeout(r, 500)); j = await api(`/api/job/${j.id}`);
+        if (alive && j.progress > 0) $("#revState").textContent = `Reviewing the game… ${Math.round(j.progress * 100)}%${left(j.progress)}`;
+      }
       if (j.state === "error") throw new Error(j.error);
       if (!alive) return;
       review = j;
@@ -778,12 +805,12 @@ async function patterns(st) {
     draw(`<div class="labcard"><div id="pmsg" class="dim">Starting…</div><div class="bar" style="margin-top:8px"><i id="pbar"></i></div><div class="faint" style="margin-top:8px;font-size:12px">This looks through your 40 most recent games and asks the master about the situations that stand out. It takes a few minutes the first time.</div></div>`);
     let key = `pat:${char}`, j;
     try {
-      j = await api("/api/patterns", { char, n: 40 });
+      j = await api("/api/patterns", { char, n: 40 }); const left = timer();
       while (j.state !== "done" && j.state !== "error") {
         await new Promise((r) => setTimeout(r, 1000));
         if (!location.hash.startsWith("#/patterns")) return;
         j = await api(`/api/job/${j.id}`);
-        const m = $("#pmsg"); if (m) m.textContent = j.message || "Working…";
+        const m = $("#pmsg"); if (m) m.textContent = (j.message || "Working…") + left(j.progress);
         const b = $("#pbar"); if (b) b.style.width = `${Math.round((j.progress || 0) * 100)}%`;
       }
       if (j.state === "error") throw new Error(j.error);
@@ -961,11 +988,11 @@ async function lab(id, f0) {
     try {
       const body = { game: id, at, k: 6, horizon: 300, ...setup() };
       if (from) Object.assign(body, from);
-      let j = await api("/api/lab", body);
+      let j = await api("/api/lab", body); const left = timer();
       while (j.state !== "done" && j.state !== "error") {
         await new Promise((r) => setTimeout(r, 300));
         j = await api(`/api/job/${j.id}`);
-        $("#progMsg").textContent = j.state === "loading" ? "Loading the models (first time only)…" : `Playing it out ${j.k} ways…`;
+        $("#progMsg").textContent = j.state === "loading" ? "Loading the models (first time only)…" : `Playing it out ${j.k} ways…${left(j.progress)}`;
         $("#prog .bar i").style.width = `${Math.round((j.progress || 0) * 100)}%`;
       }
       if (j.state === "error") throw new Error(j.error);

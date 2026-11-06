@@ -52,9 +52,21 @@ _CTX = None
 
 
 def _per_game(job):
-    """CPU side: (slp, port, policy_dir, stride) -> stacked features of every frame + labels."""
+    """CPU side: (slp, port, policy_dir, stride) -> stacked features of every frame + labels.
+    One torch thread while it runs (it's run many at a time in extract's pool), then the caller's
+    count again: torch's thread count is per thread, and the coach's job worker runs its CPU
+    rollouts after this on the same thread (left at 1, a CPU branch took 4-5x longer)."""
     import torch
+    n0 = torch.get_num_threads()
     torch.set_num_threads(1)
+    try:
+        return _per_game_1(job)
+    finally:
+        torch.set_num_threads(n0)
+
+
+def _per_game_1(job):
+    import torch
     from inference_utils import build_frame, build_frame_p2, load_inference_context, load_mimic_model
     from play import _make_ctx
     from rlvr.sim.gamestate import SlippiParser
@@ -258,9 +270,10 @@ if __name__ == "__main__":
     main()
 
 
-def game_value(slp, port, pdir, model, head, device="cuda", stride=2, batch=256):
+def game_value(slp, port, pdir, model, head, device="cuda", stride=2, batch=256, between=None):
     """V along a whole game for one player: (frames, (N, 4) predicted outcomes), every `stride` frames
-    from the first full 180-frame window on. model: the char's BC model (features), head: Value."""
+    from the first full 180-frame window on. model: the char's BC model (features), head: Value.
+    between(fraction done): called after each batch (progress, and letting other work run)."""
     import torch
     r = _per_game((slp, port, pdir, 10 ** 9))
     if r is None or "error" in r:
@@ -277,6 +290,8 @@ def game_value(slp, port, pdir, model, head, device="cuda", stride=2, batch=256)
         with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=device == "cuda"):
             h = model.features(x)[:, -1].float()
         outs.append(head(h))
+        if between:
+            between(min(1.0, (b + batch) / len(ts)))
     return frames_all[ts], np.concatenate(outs)
 
 
