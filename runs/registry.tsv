@@ -25,3 +25,5 @@ fox-XS-bc1-s1	bc	bc-XS-v1		1	done	2026-10-27 11:41 PM	77.5	aurora	b25c988		vs fo
 fox-XS-bc1-s1.rl2-s1	rl	rl-v2	fox-XS-bc1-s1	1	done	2026-10-28 04:37 AM	78.2	aurora	b25c988-dirty		vs fox-S-bc1-s1: 72-120 (37.5%); vs fox-S-bc1-s1: 80-112 (41.7%); vs fox-S-bc1-s1: 65-127 (33.9%); vs fox-XS-bc1-s1: 143-49 (74.5%)
 marth-S-bc2-hf21k-s1	bc	bc-S-v2		1	done	2026-11-06 02:22 AM	49.6	aurora	62ddfde-dirty		
 marth-S-bc2-hf21k-s1.rl2-s1	rl	rl-v2	marth-S-bc2-hf21k-s1	1	done	2026-11-06 03:12 AM	100.6	aurora	8b84a04-dirty		vs marth-S-bc2-hf21k-s1: 169-23 (88.0%)
+sheik-S-bc2-hf17k-s1	bc	bc-S-v2		1	done	2026-11-06 04:59 AM	41.6	aurora	8b84a04-dirty		
+sheik-S-bc2-hf17k-s1.rl2-s1	rl	rl-v2	sheik-S-bc2-hf17k-s1	1	done	2026-11-06 05:41 AM	100.2	aurora	d15224a-dirty		vs sheik-S-bc2-hf17k-s1: 155-37 (80.7%)
