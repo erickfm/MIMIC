@@ -590,7 +590,7 @@ async function game(id, st, startAt = null) {
       drawList();
       drawTl(); tick();
       // master tries run in the background at each flagged moment; show them as they land
-      while (alive && review && Object.values(review.compare || {}).some((c) => c.state !== "done")) {
+      while (alive && review && Object.values(review.compare || {}).some((c) => c.state !== "done" && c.state !== "error")) {
         await new Promise((r) => setTimeout(r, 1500));
         const k = await api(`/api/job/${review.id}`).catch(() => null) || await api("/api/review", { game: id }).catch(() => null);
         if (!k || !review || !alive) break;
@@ -602,7 +602,7 @@ async function game(id, st, startAt = null) {
   function drawList() {
     const tagged = review.points.filter((p) => p.tag).sort((a, b) => a.frame - b.frame);
     $("#revSec").hidden = !tagged.length;
-    const pending = Object.values(review.compare || {}).filter((c) => c.state !== "done").length;
+    const pending = Object.values(review.compare || {}).filter((c) => c.state !== "done" && c.state !== "error").length;
     $("#revHead").innerHTML = `Biggest swings <span class="faint" style="text-transform:none;letter-spacing:0;font-weight:400">${pending ? `· comparing with the master… ${tagged.length - pending}/${tagged.length}` : "· you vs the master (gaps under 8 are within luck)"}</span>`;
     $("#revList").innerHTML = tagged.map((p) => {
       const c = review.compare?.[String(p.frame)];

@@ -462,6 +462,42 @@ class Jobs:
         except Exception as e:
             traceback.print_exc()
             job.update(state="error", error=str(e)[:300])
+            rv = self.reviews.get(game["id"]) if job.get("review") else None
+            c = (rv or {}).get("compare", {}).get(str(job.get("frame")))
+            if c is not None and c.get("job") == jid:   # a master comparison for the review: don't wait on it
+                c.update(state="error")
+
+    # reviews are kept on disk (a CPU review takes a minute or more, its master comparisons longer),
+    # valid while the player, the value model and the policy are the ones they were made with
+    def _review_key(self, an):
+        char = an["me"]["char"]
+        vp = value_path(char)
+        return dict(me=an["me"].get("code"), value=str(vp), value_mtime=vp.stat().st_mtime if vp else None,
+                    policy=str(Path(policy_dir(char)).resolve()))
+
+    def have_review(self, game, an):
+        if game["id"] in self.reviews:
+            return True
+        f = HOME / "reviews" / f"{game['id']}.json"
+        try:
+            rv = json.loads(f.read_text())
+        except Exception:
+            return False
+        if rv.pop("key", None) != self._review_key(an):
+            return False
+        rv["compare"] = {fr: c for fr, c in (rv.get("compare") or {}).items() if c.get("state") == "done"}
+        self.reviews[game["id"]] = rv
+        return True
+
+    def save_review(self, game, an):
+        rv = self.reviews.get(game["id"])
+        if rv is None:
+            return
+        d = HOME / "reviews"
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f"{game['id']}.json.tmp"
+        tmp.write_text(json.dumps(dict(rv, key=self._review_key(an))))
+        tmp.replace(d / f"{game['id']}.json")
 
     def do_review(self, job, game, an, compare=True):
         """V along the game, and each decision's cost: what your choice did to the expected 5-second
@@ -521,6 +557,7 @@ class Jobs:
                 b = self.submit("branch", game, an, frame=p["frame"], k=16, horizon=-1, review=job["id"])
                 job["compare"][str(p["frame"])] = dict(job=b["id"], state="queued")
         self.reviews[game["id"]]["compare"] = job["compare"]
+        self.save_review(game, an)
 
     def do_branch(self, jid, job, game, an):
         from labels import describe
@@ -574,6 +611,7 @@ class Jobs:
                 c.update(state="done", model=round(float(np.mean(exp)), 1) if exp else None,
                          you=you.get("expected"),
                          best=collections.Counter(o["group"] for o in options).most_common(1)[0][0])
+                self.save_review(game, an)
         (out_dir / "result.json").write_text(json.dumps(job))
 
 
@@ -626,7 +664,7 @@ def _earlier(self, jid, job, game, an):
     V = self.value(me["char"])
     if V is None:
         raise RuntimeError(f"No review model for {me['char_name']} yet.")
-    if game["id"] not in self.reviews:
+    if not self.have_review(game, an):
         self.do_review(dict(), game, an, compare=False)
     rv = self.reviews[game["id"]]
     pt = next((p for p in an["points"] if p["frame"] <= D < p["frame"] + p["wait"] + 30), None)
@@ -832,7 +870,7 @@ def _patterns(self, jid, job, games, me_code):
         job.update(progress=round(0.7 * gi / len(games), 3), message=f"Reviewing game {gi + 1} of {len(games)}…")
         try:
             an = analyse(g, me_code)
-            if g["id"] not in self.reviews:
+            if not self.have_review(g, an):
                 rj = dict(id=uuid.uuid4().hex[:12], kind="review", state="running")
                 self.do_review(rj, g, an, compare=False)
             rv = self.reviews[g["id"]]
@@ -1311,19 +1349,19 @@ class Handler(BaseHTTPRequestHandler):
             why = support(g, a.me())
             if why:
                 return self.send_json(dict(error=why), 400)
-            if g["id"] in a.jobs.reviews:
+            an = analyse(g, a.me())
+            if a.jobs.have_review(g, an):
                 rv = a.jobs.reviews[g["id"]]
-                if not rv.get("compare") and any(p_["tag"] for p_ in rv["points"]):   # reviewed by the pattern report
-                    an = analyse(g, a.me())
-                    rv["compare"] = {}
-                    for p_ in rv["points"]:
-                        if p_["tag"]:
-                            bj = a.jobs.submit("branch", g, an, frame=p_["frame"], k=16, horizon=-1, review=rv["id"])
-                            rv["compare"][str(p_["frame"])] = dict(job=bj["id"], state="queued")
+                live = lambda c: c.get("state") in ("done", "error") or a.jobs.jobs.get(c.get("job"), {}).get("state") in ("queued", "loading", "running")
+                missing = [p_ for p_ in rv["points"] if p_["tag"] and not live((rv.get("compare") or {}).get(str(p_["frame"]), {}))]
+                if missing:   # reviewed by the pattern report, or comparisons lost with a restart
+                    rv.setdefault("compare", {})
+                    for p_ in missing:
+                        bj = a.jobs.submit("branch", g, an, frame=p_["frame"], k=16, horizon=-1, review=rv["id"])
+                        rv["compare"][str(p_["frame"])] = dict(job=bj["id"], state="queued")
                     if rv["id"] in a.jobs.jobs:
                         a.jobs.jobs[rv["id"]]["compare"] = rv["compare"]
                 return self.send_json({k: v for k, v in rv.items() if k != "eval_full"})
-            an = analyse(g, a.me())
             me = an["me"]
             if not value_path(me["char"]):
                 return self.send_json(dict(error=f"No review model for {me['char_name']} yet."), 400)
