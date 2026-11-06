@@ -5,8 +5,8 @@ A value model reads its policy's trunk, so each character's value model is retra
 policy's features (and re-validated against sim rollouts, tools/coach/value_check.py) before the
 coach uses that policy. Per character:
   1. the policy: Falco's M RL run, Fox's M RL run (fox-master), else the character's S RL run;
-  2. replays: ~/Slippi when it has enough games of that character, else master-vs-master archives
-     from erickfm/melee-ranked-replays (smallest first, about 1.5 GB);
+  2. replays: ~/Slippi when it has enough games of that character, else ranked archives from
+     erickfm/melee-ranked-replays (master-vs-master first, about 1.5 GB; see ranked_replays);
   3. value.py extract --policy (GPU) -> data/coach_rank/vfeat_<char>_rl.npz; train -> value_<char>.pt
      (the BC one is kept as value_<char>_bc.pt);
   4. value_check.py --n 40 -> data/coach_rank/vcheck_<char>_rl.json;
@@ -66,25 +66,47 @@ def local_count(char):
 
 
 def ranked_replays(char, budget=1.5e9):
-    """Master-vs-master archives of `char` from the ranked dataset, extracted; returns the folder."""
+    """Ranked replays of `char` from the ranked dataset, extracted; returns the folder. Master-vs-master
+    archives first (smallest first); when a character has too few of those (Mewtwo, Ness, Zelda),
+    master-vs-diamond and master-vs-platinum fill the budget, the same master-* pairs its BC model
+    was trained on. Resumable: `.archives` lists what is extracted."""
     from huggingface_hub import HfApi, hf_hub_download
     out = DATA / "ranked" / char.lower()
-    if out.exists() and any(out.rglob("*.slp")):
-        return out
     bucket = HF_BUCKET.get(char, char)
     files = [f for f in HfApi().list_repo_tree(RANKED, path_in_repo=bucket, repo_type="dataset")
-             if hasattr(f, "size") and "master-master" in f.path and f.size > 1e6]
-    files.sort(key=lambda f: f.size)
-    got = 0
+             if hasattr(f, "size") and f.size > 1e6]
+    pair = lambda f: next((i for i, k in enumerate(("master-master", "master-diamond", "master-platinum"))
+                           if f"_{k}_" in f.path), None)
+    mm = sorted((f for f in files if pair(f) == 0), key=lambda f: f.size)
+    files = sorted((f for f in files if pair(f) is not None), key=lambda f: (pair(f), f.size))
+    mark = out / ".archives"
+    if mark.exists():
+        have = set(mark.read_text().split())
+    elif out.exists() and any(out.rglob("*.slp")):   # extracted before .archives existed: master-master only
+        have, got = set(), 0
+        for f in mm:
+            if got > budget:
+                break
+            have.add(f.path)
+            got += f.size
+    else:
+        have = set()
     out.mkdir(parents=True, exist_ok=True)
+    got = sum(f.size for f in files if f.path in have)
     for f in files:
         if got > budget:
             break
+        if f.path in have:
+            continue
         p = hf_hub_download(RANKED, f.path, repo_type="dataset", local_dir=str(DATA / "ranked" / "_dl"))
         with tarfile.open(p) as t:
             t.extractall(out, filter="data")
         os.remove(p)
         got += f.size
+        have.add(f.path)
+        mark.write_text("\n".join(sorted(have)) + "\n")
+    if not mark.exists():
+        mark.write_text("\n".join(sorted(have)) + "\n")
     return out
 
 
@@ -109,7 +131,7 @@ def main():
             print(f"{char}: no RL run yet", flush=True)
             continue
         n_local = local_count(char)
-        src = "~/Slippi" if n_local >= LOCAL_ENOUGH else "ranked master-master"
+        src = "~/Slippi" if n_local >= LOCAL_ENOUGH else "ranked master-*"
         print(f"{char}: {pol}; replays from {src} ({n_local} local)", flush=True)
         if a.dry_run or done.get(char) == pol:
             continue
