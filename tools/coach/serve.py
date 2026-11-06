@@ -121,9 +121,9 @@ def live_policy(char):
     key = RUN_CHAR.get(char)
     runs = ROOT / "runs"
     if key:
-        cands = sorted(runs.glob(f"{key}-S-*.rl*-s*/policy/model.pt"), key=lambda q: q.stat().st_mtime)
+        cands = sorted(runs.glob(f"{key}-S-*.rl2-s*/policy/model.pt"), key=lambda q: q.stat().st_mtime)
         if key == "fox" and (runs / "fox-S-bc1-s1.rl1-s0/policy/model.pt").exists():
-            cands.append(runs / "fox-S-bc1-s1.rl1-s0/policy/model.pt")   # SF7u100: beat fox-master
+            cands.insert(0, runs / "fox-S-bc1-s1.rl1-s0/policy/model.pt")   # SF7u100, until a Fox S rl2 run exists
         cands = [c for c in cands if (c.parent.parent / "run.json").exists()
                  and json.loads((c.parent.parent / "run.json").read_text()).get("status") in ("done", "legacy")]
         if cands:

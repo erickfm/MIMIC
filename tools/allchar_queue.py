@@ -26,11 +26,14 @@ DATASETS = REPO / "recipes" / "datasets.yaml"
 PT = ZoneInfo("America/Los_Angeles")
 
 # (char, scale): Falco M first (asked for), then S for every character with shards, biggest data
-# first. Fox already has RL models; Ice Climbers don't reproduce in the sim (0/36), so no RL.
+# first. Ice Climbers don't reproduce in the sim (0/36), so no RL. Fox S and Zelda S added at the end
+# (owner, 2026-11-06: the coach uses S RL throughout; Fox's only S RL was rl-v1, Zelda had none).
+# Zelda has no shards on HF: they're built locally from its master-* ranked archives into data_dir.
 JOBS = [("falco", "M"), ("falco", "S"), ("marth", "S"), ("sheik", "S"), ("puff", "S"), ("cptfalcon", "S"),
         ("peach", "S"), ("samus", "S"), ("luigi", "S"), ("pikachu", "S"), ("dk", "S"), ("doc", "S"),
         ("yoshi", "S"), ("ganondorf", "S"), ("link", "S"), ("bowser", "S"), ("gameandwatch", "S"),
-        ("mario", "S"), ("roy", "S"), ("ness", "S"), ("ylink", "S"), ("mewtwo", "S")]
+        ("mario", "S"), ("roy", "S"), ("ness", "S"), ("ylink", "S"), ("mewtwo", "S"),
+        ("fox", "S"), ("zelda", "S")]
 RECIPE = {"M": "recipes/bc-M-v3.yaml", "S": "recipes/bc-S-v2.yaml"}
 
 
