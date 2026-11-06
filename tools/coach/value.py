@@ -141,7 +141,8 @@ def extract(a):
     import torch
     from inference_utils import load_mimic_model
     pdir = str(Path(a.policy).resolve()) if a.policy else policy_for(a.char)
-    model, cfg = load_mimic_model(str(Path(pdir) / "model.pt"), "cuda")
+    dev = a.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    model, cfg = load_mimic_model(str(Path(pdir) / "model.pt"), dev)
     model.eval()
     cands = candidates(os.path.expanduser(a.replays), a.char)
     if a.max_games:
@@ -167,8 +168,8 @@ def extract(a):
             for b in range(0, len(ts), a.batch):
                 tb = ts[b:b + a.batch]
                 idx = tb[:, None] + np.arange(-179, 1)[None]          # (B, 180)
-                batch = {k: torch.from_numpy(v[idx]).cuda() for k, v in f.items()}
-                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+                batch = {k: torch.from_numpy(v[idx]).to(dev) for k, v in f.items()}
+                with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=dev == "cuda"):
                     h = model.features(batch)[:, -1].float()
                 out["x"].append(h.cpu().numpy().astype(np.float16))
             out["y"].append(r["labels"]); out["frame"].append(r["frames"])
@@ -190,8 +191,10 @@ def train(a):
     z = np.load(a.data)
     x, y, val = z["x"].astype(np.float32), z["y"].astype(np.float32), z["val"].astype(bool)
     print(f"{len(x)} samples, {val.mean():.1%} held out (by game); games {len(z['games'])}")
+    if not val.any() or val.all():
+        sys.exit("need both held-out and training games (value.is_val holds out ~10% of games by file name)")
     scale = np.array([30, 30, 1, 1], np.float32)
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    dev = a.device or ("cuda" if torch.cuda.is_available() else "cpu")
     X, Y = torch.from_numpy(x).to(dev), torch.from_numpy(y / scale).to(dev)
     tr, va = torch.from_numpy(~val).to(dev), torch.from_numpy(val).to(dev)
     head = make_head(x.shape[1]).to(dev)
@@ -258,11 +261,13 @@ def main():
     e.add_argument("--batch", type=int, default=128)
     e.add_argument("--jobs", type=int, default=12)
     e.add_argument("--max-games", type=int, default=0)
+    e.add_argument("--device", help="cuda or cpu (default: cuda if available)")
     e.add_argument("--policy", help="policy dir whose trunk gives the features (default: the coach's policy for --char)")
     t = sub.add_parser("train")
     t.add_argument("--data", required=True)
     t.add_argument("--out", required=True)
     t.add_argument("--epochs", type=int, default=30)
+    t.add_argument("--device", help="cuda or cpu (default: cuda if available)")
     t.add_argument("--lr", type=float, default=1e-3)
     a = ap.parse_args()
     extract(a) if a.cmd == "extract" else train(a)

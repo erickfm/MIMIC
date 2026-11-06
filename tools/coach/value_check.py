@@ -30,6 +30,7 @@ def main():
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--s", type=int, default=60, help="frames before V takes over")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--device", default="cuda", help="cuda or cpu (smoke tests)")
     ap.add_argument("--all-held-out", action="store_true",
                     help="every game in --replays is held out (V was trained on other replays, e.g. ranked "
                          "archives the sim can't replay exactly): don't filter by value.is_val, and take "
@@ -71,8 +72,8 @@ def main():
     print(f"{len(games)} held-out {a.char} perspectives; using {min(a.n, len(games))}", flush=True)
     if a.all_held_out and games and len(games) < a.n:  # several spots per game (a new random frame each)
         games = (games * (a.n // len(games) + 1))[:a.n]
-    br = Brancher("cuda")
-    V = Value(a.value, "cuda")
+    br = Brancher(a.device)
+    V = Value(a.value, a.device)
     rows = []
     for p, port, n, pl in games[:a.n]:
         F = rng.randint(600, n - 400)
