@@ -95,12 +95,23 @@ class SlpWriter:
         self.raw.append(FRAME_BOOKEND)
         self.raw += fit(struct.pack(">ii", frame.index, frame.index), self.sizes[FRAME_BOOKEND])
 
-    def write(self, path, end_method=2):
-        """end_method 2 = game end (stocks/time); the sim does not emit Game End in env mode."""
+    def write(self, path, end_method=2, metadata=None):
+        """end_method 2 = game end (stocks/time); the sim does not emit Game End in env mode.
+        metadata: optional {key: str | int} for the .slp's metadata block (startAt, lastFrame,
+        playedOn), which replay browsers like Slippi Launcher show."""
         if GAME_END in self.sizes:
             self.raw.append(GAME_END)
             self.raw += fit(bytes([end_method, 0xFF]), self.sizes[GAME_END])
+        md = b""
+        for k, v in (metadata or {}).items():
+            kb = k.encode()
+            md += b"U" + bytes([len(kb)]) + kb
+            if isinstance(v, int):
+                md += b"l" + struct.pack(">i", v)
+            else:
+                vb = str(v).encode()
+                md += b"SU" + bytes([len(vb)]) + vb
         out = (b"{U\x03raw[$U#l" + struct.pack(">I", len(self.raw)) + bytes(self.raw)
-               + b"U\x08metadata{}" + b"}")
+               + b"U\x08metadata{" + md + b"}" + b"}")
         with open(path, "wb") as f:
             f.write(out)

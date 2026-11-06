@@ -135,10 +135,10 @@ index ccca855..7ebe289 100644
      Presentation presentation;
 diff --git a/port/linux/replay_host.cpp b/port/linux/replay_host.cpp
 new file mode 100644
-index 0000000..b6acb23
+index 0000000..7cf4fbb
 --- /dev/null
 +++ b/port/linux/replay_host.cpp
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,404 @@
 +// Linux --replay. See replay_host.h.
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +#include "replay_host.h"
@@ -322,6 +322,9 @@ index 0000000..b6acb23
 +  return codes;
 +}
 +
++bool g_place[4];            // MIMIC lab placements waiting for the next frame record (read_pads)
++float g_place_val[4][4];    // x, y, facing, percent
++
 +const MuReplayStart* h_start() { return g_game ? &g_start : nullptr; }
 +
 +void h_frame(int32_t frame, MuReplayFrame* out) {
@@ -334,6 +337,15 @@ index 0000000..b6acb23
 +    } else if (frame == Slippi::GAME_FIRST_FRAME && g_has_first_seed) {
 +      out->seed_exists = 1;
 +      out->seed = g_first_seed;
++    }
++    for (int i = 0; i < 4; ++i) {
++      if (!g_place[i]) continue;
++      g_place[i] = false;
++      MuReplayCharacter& c = out->character[i][0];
++      c.present = 1;
++      c.buttons = 0x504C4143u;   // "PLAC": mu_lab_place
++      c.x = g_place_val[i][0]; c.y = g_place_val[i][1]; c.facing = g_place_val[i][2];
++      c.percent = g_place_val[i][3];
 +    }
 +    return;
 +  }
@@ -459,11 +471,31 @@ index 0000000..b6acb23
 +
 +bool env_active() { return g_env; }
 +
++// MIMIC lab: a pad message whose first 4 bytes are FF FF 'P' 'L' is a placement: 4 ports x
++// {u8 apply, u8 unused[3], f32 x, f32 y, f32 facing, f32 percent} (little-endian), then the
++// frame's real pads. The next frame's record for each placed port carries it to the game
++// (mu_replay.c mu_lab_place), once.
 +static void read_pads() {
 +  uint8_t wire[32];
 +  if (!read_all(g_in, wire, sizeof wire)) {
 +    logf("env: controller closed the pipe; stopping");
 +    request_stop(0);
++    return;
++  }
++  if (wire[0] == 0xFF && wire[1] == 0xFF && wire[2] == 'P' && wire[3] == 'L') {
++    uint8_t body[4 * 20];
++    std::memcpy(body, wire + 4, 28);
++    if (!read_all(g_in, body + 28, sizeof body - 28)) {
++      request_stop(0);
++      return;
++    }
++    for (int i = 0; i < 4; ++i) {
++      const uint8_t* b = body + 20 * i;
++      if (!b[0]) continue;
++      g_place[i] = true;
++      std::memcpy(g_place_val[i], b + 4, 16);
++    }
++    read_pads();
 +    return;
 +  }
 +  for (int i = 0; i < 4; ++i) {
@@ -556,10 +588,19 @@ index 33bfb6a..cf0add5 100644
  
  /* One character's record in a fetched frame (Dolphin's prepareCharacterFrameData). */
 diff --git a/sourceport/game/shim/mu_replay.c b/sourceport/game/shim/mu_replay.c
-index 2b6a70b..aa451fc 100644
+index 2b6a70b..a63d718 100644
 --- a/sourceport/game/shim/mu_replay.c
 +++ b/sourceport/game/shim/mu_replay.c
-@@ -42,6 +42,7 @@ int mu_replay_abi_active(void);
+@@ -16,6 +16,8 @@
+ #include <melee/ft/ftcamera.h>
+ #include <melee/ft/ftparts.h>
+ #include <melee/ft/types.h>
++#include <melee/ft/ftcommon.h>
++#include <melee/ft/kinds/ftCommon/ftCo_Fall.h>
+ #include <melee/gm/gmscene.h>
+ #include <melee/gm/gm_1A3F.h>
+ #include <melee/gm/gmvs.h>
+@@ -42,6 +44,7 @@ int mu_replay_abi_active(void);
  unsigned int mu_replay_abi_codes(void);
  const unsigned char* mu_replay_abi_game_info(unsigned int* seed);
  int mu_replay_abi_resync(void);
@@ -567,12 +608,61 @@ index 2b6a70b..aa451fc 100644
  int mu_replay_abi_ps_frozen_toggle(void);
  int mu_replay_abi_fetch(int frame);
  int mu_replay_abi_last_result(void);
-@@ -644,6 +645,11 @@ void mu_replay_input(Fighter* fp)
+@@ -627,6 +630,45 @@ void mu_replay_post_frame(Fighter* fp)
+     mu_replay_abi_event(0x38, b + 1, sizeof b - 1);
+ }
+ 
++/* MIMIC lab: the host asked to place this fighter (env mode, a frame record marked "PLAC"): put it
++ * at (x, y) facing that way, at that percent, standing still and falling, so the game's own
++ * collision sets it down where it lands. The same fields Slippi's resync writes, plus a clean
++ * airborne state (ftCommon_8007D5D4 + ftCo_Fall_Enter) and zero velocity. */
++#define MU_LAB_PLACE 0x504C4143u
++static void mu_lab_place(Fighter* fp)
++{
++    float f[9];
++    unsigned int buttons, action, seed;
++    unsigned char raw[4];
++    CmSubject* box;
++
++    if (!mu_replay_abi_character(fp->player_idx, 0, f, &buttons, &action, &seed, raw) ||
++        buttons != MU_LAB_PLACE) {
++        return;
++    }
++    fp->cur_pos.x = f[5];
++    fp->cur_pos.y = f[6];
++    fp->cur_pos.z = 0.0f;
++    fp->prev_pos = fp->cur_pos;
++    fp->facing_dir = f[7] >= 0.0f ? 1.0f : -1.0f;
++    fp->self_vel.x = fp->self_vel.y = fp->self_vel.z = 0.0f;
++    fp->x8c_kb_vel.x = fp->x8c_kb_vel.y = fp->x8c_kb_vel.z = 0.0f;
++    fp->gr_vel = 0.0f;
++    fp->xF0_ground_kb_vel = 0.0f;
++    fp->coll_data.cur_pos = fp->cur_pos;
++    fp->coll_data.last_pos = fp->cur_pos;
++    if (f[8] - fp->dmg.x1830_percent != 0.0f) {
++        Fighter_TakeDamage_8006CC7C(fp, f[8] - fp->dmg.x1830_percent);
++    }
++    ftCommon_8007D5D4(fp);
++    ftCo_Fall_Enter(fp->gobj);
++    Player_80032828(fp->player_idx, fp->is_sub_fighter, &fp->cur_pos);
++    ftCamera_UpdateCameraBox(fp->gobj);
++    box = fp->x890_cameraBox;
++    box->ext.h.x = box->target_ext.h.x;
++    box->ext.h.y = box->target_ext.h.y;
++}
++
+ /* ---- RestoreGameFrame (8006b0dc, Fighter_procInput before Fighter_procInput_Inner1) ---- */
+ void mu_replay_input(Fighter* fp)
+ {
+@@ -644,6 +686,14 @@ void mu_replay_input(Fighter* fp)
          return;
      }
      follower = is_follower(fp);
 +    /* MIMIC env: the fighter keeps the input the game derived from its own pads. */
 +    if (mu_replay_abi_live()) {
++        if (!follower) {
++            mu_lab_place(fp);
++        }
 +        emit_pre_frame(fp);
 +        return;
 +    }

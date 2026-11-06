@@ -167,6 +167,17 @@ class MeleeSim:
     def recv(self):
         return self._recv()
 
+    def place(self, places, pads):
+        """Put fighters somewhere, then step with `pads` (coach lab). places: {port (0-3): (x, y,
+        facing (+1 right / -1 left), percent)}. Each placed fighter starts the next frame at that
+        spot, still and airborne (the game sets it down if it's on the ground), at that percent."""
+        body = bytearray(80)
+        for port, (x, y, facing, pct) in places.items():
+            body[20 * port] = 1
+            struct.pack_into("<ffff", body, 20 * port + 4, float(x), float(y), float(facing), float(pct))
+        self.send(b"\xff\xffPL" + bytes(body) + (pads if isinstance(pads, (bytes, bytearray)) else b"".join(p.pack() for p in pads)))
+        return self.recv()
+
     def _read(self, n):
         buf = bytearray()
         while len(buf) < n:
