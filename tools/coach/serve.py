@@ -46,17 +46,64 @@ HF_REPO = "erickfm/MIMIC"
 HF_DIR = {"FOX": "fox"}   # otherwise the local hf_eval/<name> folder's name
 
 
+# The coach's own models on Hugging Face (tools/coach/upload_coach.py): coach/manifest.json lists the
+# characters; coach/<char>/policy/ is the policy the coach uses and coach/<char>/value.pt its value model.
+COACH_HF = HOME / "models" / "coach"
+_MANIFEST = None
+
+
+def coach_manifest():
+    """The coach models on Hugging Face ({char: {...}}), {} when offline or not uploaded yet."""
+    global _MANIFEST
+    if _MANIFEST is None:
+        f = COACH_HF / "manifest.json"
+        try:   # the current one (models may have been updated), else the last one fetched
+            from huggingface_hub import hf_hub_download
+            hf_hub_download(HF_REPO, "coach/manifest.json", local_dir=str(COACH_HF.parent))
+        except Exception:
+            pass
+        try:
+            _MANIFEST = json.loads(f.read_text())
+        except Exception:
+            _MANIFEST = {}
+    return _MANIFEST
+
+
+def sync_coach_values():
+    """Fetch the value models this machine didn't train itself, or their updates (each is under 1 MB;
+    an unchanged one costs one request); run in the background."""
+    for char in coach_manifest():
+        local = ROOT / "data" / "coach_rank" / f"value_{char.lower()}.pt"
+        if not local.is_file():
+            try:
+                from huggingface_hub import hf_hub_download
+                hf_hub_download(HF_REPO, f"coach/{char.lower()}/value.pt", local_dir=str(COACH_HF.parent))
+            except Exception as e:
+                print(f"couldn't download the {char} value model: {e}", flush=True)
+
+
 def policy_dir(char):
     """The policy folder for a character; downloaded from the Hugging Face model repo the first
-    time it's needed when it isn't on this machine."""
+    time it's needed when it isn't on this machine (the coach's own copy when there is one)."""
     d = ROOT / POLICY[char]
     if (d / "model.pt").is_file():
         return str(d)
-    name = HF_DIR.get(char, Path(POLICY[char]).name)
-    cache = HOME / "models"
+    if char in _FETCHED:          # checked with Hugging Face once per run
+        return _FETCHED[char]
     from huggingface_hub import snapshot_download
-    snapshot_download(HF_REPO, allow_patterns=[f"{name}/*"], local_dir=str(cache))
-    return str(cache / name)
+    if char in coach_manifest():
+        sub = f"{char.lower()}/policy"
+        snapshot_download(HF_REPO, allow_patterns=[f"coach/{sub}/*"], local_dir=str(COACH_HF.parent))
+        out = str(COACH_HF / sub)
+    else:
+        name = HF_DIR.get(char, Path(POLICY[char]).name)
+        snapshot_download(HF_REPO, allow_patterns=[f"{name}/*"], local_dir=str(HOME / "models"))
+        out = str(HOME / "models" / name)
+    _FETCHED[char] = out
+    return out
+
+
+_FETCHED = {}
 
 
 # run-name character keys (tools/run.py CHARS), for finding a character's RL runs
@@ -364,9 +411,14 @@ def load_value(char, device):
     if not vp:
         return None
     v = Value(str(vp), device)
-    made_on = v.policy or (str(ROOT / LEGACY_V_POLICY[char]) if char in LEGACY_V_POLICY else None)
     now = policy_dir(char)
-    if not made_on or Path(made_on).resolve() != Path(now).resolve():
+    if v.policy_sha1:          # by content: the same policy on any machine
+        if v.policy_sha1 == policy_sha1(now):
+            return v
+        made_on = f"{v.policy} (sha1 {v.policy_sha1[:10]})"
+    else:
+        made_on = v.policy or (str(ROOT / LEGACY_V_POLICY[char]) if char in LEGACY_V_POLICY else None)
+    if not made_on or v.policy_sha1 or Path(made_on).resolve() != Path(now).resolve():
         print(f"value model for {char} was trained on {made_on}, the coach now uses {now}: not used "
               f"(retrain it: tools/coach/value.py extract --char {char} --policy {now} ...)", flush=True)
         return None
@@ -374,8 +426,22 @@ def load_value(char, device):
 
 
 def value_path(char):
-    p = ROOT / "data" / "coach_rank" / f"value_{char.lower()}.pt"
-    return p if p.is_file() else None
+    for p in (ROOT / "data" / "coach_rank" / f"value_{char.lower()}.pt", COACH_HF / char.lower() / "value.pt"):
+        if p.is_file():
+            return p
+    return None
+
+
+_SHA = {}
+
+
+def policy_sha1(pdir):
+    from value import file_sha1
+    f = Path(pdir) / "model.pt"
+    k = (str(f.resolve()), f.stat().st_mtime_ns)
+    if k not in _SHA:
+        _SHA[k] = file_sha1(f)
+    return _SHA[k]
 
 
 WATCH = 180   # frames a try runs after the decision, for watching (3 s)
@@ -976,6 +1042,7 @@ class App:
         self.live, self.cpu, self.cpu_values = {}, None, {}   # live play: sessions, CPU models
         self.jobs.iso_path = self.iso_path if self.iso else None
         self.lib.rescan(self.cfg["replay_dir"])
+        threading.Thread(target=sync_coach_values, daemon=True).start()
 
     def cpu_models(self):
         """Models on the CPU for live play (the GPU may be training)."""

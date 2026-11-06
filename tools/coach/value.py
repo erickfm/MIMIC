@@ -133,6 +133,14 @@ def candidates(replays, char):
     return out
 
 
+def file_sha1(path):
+    h = hashlib.sha1()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
 def is_val(slp):
     return int(hashlib.sha1(os.path.basename(slp).encode()).hexdigest(), 16) % 10 == 0
 
@@ -176,7 +184,8 @@ def extract(a):
             out["game"].append(np.full(len(ts), gid)); out["val"].append(np.full(len(ts), is_val(r["slp"])))
             if (gi + 1) % 25 == 0:
                 print(f"  {gi + 1}/{len(cands)} games, {sum(len(y) for y in out['y'])} samples, {time.time() - t0:.0f}s", flush=True)
-    np.savez(a.out, **{k: np.concatenate(v) for k, v in out.items()}, games=np.array(games), policy=np.array(pdir))
+    np.savez(a.out, **{k: np.concatenate(v) for k, v in out.items()}, games=np.array(games), policy=np.array(pdir),
+             policy_sha1=np.array(file_sha1(Path(pdir) / "model.pt")))
     print("saved", a.out, flush=True)
 
 
@@ -217,7 +226,9 @@ def train(a):
     head.load_state_dict(best_state)
     # the policy whose trunk made the features: V only means anything on that model's features
     pol = str(z["policy"]) if "policy" in z.files else None
-    torch.save(dict(state=best_state, d=x.shape[1], scale=scale.tolist(), heldout_r2=best, policy=pol), a.out)
+    sha = str(z["policy_sha1"]) if "policy_sha1" in z.files else None   # the policy's identity on any machine
+    torch.save(dict(state=best_state, d=x.shape[1], scale=scale.tolist(), heldout_r2=best, policy=pol,
+                    policy_sha1=sha), a.out)
     print("saved", a.out, "best held-out R^2", round(best, 3))
 
 
@@ -243,6 +254,7 @@ class Value:
         self.scale = np.asarray(ck["scale"], np.float32)
         self.r2 = ck.get("heldout_r2")
         self.policy = ck.get("policy")   # the policy dir whose features it was trained on (None: before this was kept)
+        self.policy_sha1 = ck.get("policy_sha1")   # that policy's model.pt, by content (None: before this was kept)
 
     def __call__(self, h):
         import torch

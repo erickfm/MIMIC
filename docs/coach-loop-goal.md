@@ -63,6 +63,11 @@ moment themselves against the bot, live, from the exact game state.
    `python3 tools/coach/player_model.py finetune --parent falco-M-bc3-hf28k-s1 --data data/stuckey/falco_train
    --name stuckey-falco-M-ft1 --steps 2000` and `player_model.py eval --data data/stuckey/falco_test
    --policies <BC> <RL> runs/stuckey-falco-M-ft1/policy`. Both paths were smoke-tested on the CPU.
+3. `python3 tools/coach/upload_coach.py` lists what would go to `erickfm/MIMIC/coach/` (each character's
+   policy + value model, only pairs that belong together); **ask the owner**, then `--push`. The coach
+   fetches the value models at start and a policy the first time it needs it (tested: a value model is
+   used only with the policy it was trained on, matched by content; the download itself is untested
+   until something is uploaded).
 
 ## 4. Backlog, in order (after 1–3, or alongside them when they're waiting)
 
