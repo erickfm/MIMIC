@@ -1,0 +1,21 @@
+{
+ "a": "puff-S-bc2-hf14k-s1.rl2-s1",
+ "b": "puff-S-bc2-hf14k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 164,
+ "b_wins": 28,
+ "draws": 0,
+ "a_win_rate": 0.8542,
+ "wilson95": [
+  0.7973,
+  0.8971
+ ],
+ "p_two_sided": 1.3569164145748467e-24,
+ "stock_margin_a": 1.339,
+ "seconds": 513,
+ "commit": "2f71728-dirty",
+ "finished": "2026-11-06T17:51:28+00:00"
+}
