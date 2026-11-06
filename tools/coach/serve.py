@@ -37,6 +37,11 @@ POLICY = {"FALCO": "hf_eval/falco", "FOX": "runs/fox-M-bc2-mlr01-s1/policy", "LU
           "DOC": "hf_eval/doc", "MARIO": "hf_eval/mario", "LINK": "hf_eval/link", "YLINK": "hf_eval/ylink",
           "ROY": "hf_eval/roy", "DK": "hf_eval/dk", "BOWSER": "hf_eval/bowser", "NESS": "hf_eval/ness",
           "MEWTWO": "hf_eval/mewtwo", "GAMEANDWATCH": "hf_eval/gameandwatch"}
+# tools/coach/policies.json, when present, overrides POLICY ({char: path under the repo}): written by
+# tools/coach/after_queue.py to switch the coach to RL policies once their value models are retrained
+_POLICY_FILE = ROOT / "tools" / "coach" / "policies.json"
+if _POLICY_FILE.is_file():
+    POLICY.update(json.loads(_POLICY_FILE.read_text()))
 HF_REPO = "erickfm/MIMIC"
 HF_DIR = {"FOX": "fox"}   # otherwise the local hf_eval/<name> folder's name
 
@@ -338,6 +343,28 @@ def real_outcome(an, frame, horizon):
 
 # ── branch jobs ──────────────────────────────────────────────────────────────────────────────
 
+# value models made before they recorded their policy: the BC policies they were trained on
+LEGACY_V_POLICY = {"FALCO": "hf_eval/falco", "FOX": "runs/fox-M-bc2-mlr01-s1/policy"}
+
+
+def load_value(char, device):
+    """The character's value model, only if it was trained on the features of the policy the coach
+    uses for that character now (a value model reads its policy's trunk; another trunk's features
+    would give numbers that look fine and mean nothing). None otherwise."""
+    from value import Value
+    vp = value_path(char)
+    if not vp:
+        return None
+    v = Value(str(vp), device)
+    made_on = v.policy or (str(ROOT / LEGACY_V_POLICY[char]) if char in LEGACY_V_POLICY else None)
+    now = policy_dir(char)
+    if not made_on or Path(made_on).resolve() != Path(now).resolve():
+        print(f"value model for {char} was trained on {made_on}, the coach now uses {now}: not used "
+              f"(retrain it: tools/coach/value.py extract --char {char} --policy {now} ...)", flush=True)
+        return None
+    return v
+
+
 def value_path(char):
     p = ROOT / "data" / "coach_rank" / f"value_{char.lower()}.pt"
     return p if p.is_file() else None
@@ -382,10 +409,8 @@ class Jobs:
         return self.jobs[jid]
 
     def value(self, char):
-        from value import Value
         if char not in self.values:
-            vp = value_path(char)
-            self.values[char] = Value(str(vp), self.device) if vp else None
+            self.values[char] = load_value(char, self.device)
         return self.values[char]
 
     def loop(self):
@@ -869,9 +894,7 @@ class App:
 
     def cpu_value(self, char):
         if char not in self.cpu_values:
-            from value import Value
-            vp = value_path(char)
-            self.cpu_values[char] = Value(str(vp), "cpu") if vp else None
+            self.cpu_values[char] = load_value(char, "cpu")
         return self.cpu_values[char]
 
     def start_live(self, g, an, frame, speed=1.0, lab=None):

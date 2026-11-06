@@ -126,7 +126,7 @@ def is_val(slp):
 def extract(a):
     import torch
     from inference_utils import load_mimic_model
-    pdir = policy_for(a.char)
+    pdir = str(Path(a.policy).resolve()) if a.policy else policy_for(a.char)
     model, cfg = load_mimic_model(str(Path(pdir) / "model.pt"), "cuda")
     model.eval()
     cands = candidates(os.path.expanduser(a.replays), a.char)
@@ -161,7 +161,7 @@ def extract(a):
             out["game"].append(np.full(len(ts), gid)); out["val"].append(np.full(len(ts), is_val(r["slp"])))
             if (gi + 1) % 25 == 0:
                 print(f"  {gi + 1}/{len(cands)} games, {sum(len(y) for y in out['y'])} samples, {time.time() - t0:.0f}s", flush=True)
-    np.savez(a.out, **{k: np.concatenate(v) for k, v in out.items()}, games=np.array(games))
+    np.savez(a.out, **{k: np.concatenate(v) for k, v in out.items()}, games=np.array(games), policy=np.array(pdir))
     print("saved", a.out, flush=True)
 
 
@@ -198,7 +198,9 @@ def train(a):
         print(f"ep {ep}: held-out R^2 score {r2['score']:.3f}  dealt {r2['dealt']:.3f}  taken {r2['taken']:.3f}  "
               f"stocks+ {r2['stk_t']:.3f}  stocks- {r2['stk_l']:.3f}", flush=True)
     head.load_state_dict(best_state)
-    torch.save(dict(state=best_state, d=x.shape[1], scale=scale.tolist(), heldout_r2=best), a.out)
+    # the policy whose trunk made the features: V only means anything on that model's features
+    pol = str(z["policy"]) if "policy" in z.files else None
+    torch.save(dict(state=best_state, d=x.shape[1], scale=scale.tolist(), heldout_r2=best, policy=pol), a.out)
     print("saved", a.out, "best held-out R^2", round(best, 3))
 
 
@@ -223,6 +225,7 @@ class Value:
         self.head.eval()
         self.scale = np.asarray(ck["scale"], np.float32)
         self.r2 = ck.get("heldout_r2")
+        self.policy = ck.get("policy")   # the policy dir whose features it was trained on (None: before this was kept)
 
     def __call__(self, h):
         import torch
@@ -241,6 +244,7 @@ def main():
     e.add_argument("--batch", type=int, default=128)
     e.add_argument("--jobs", type=int, default=12)
     e.add_argument("--max-games", type=int, default=0)
+    e.add_argument("--policy", help="policy dir whose trunk gives the features (default: the coach's policy for --char)")
     t = sub.add_parser("train")
     t.add_argument("--data", required=True)
     t.add_argument("--out", required=True)
