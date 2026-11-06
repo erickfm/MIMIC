@@ -194,10 +194,10 @@ async function game(id, st, startAt = null) {
     const m = e.data || {};
     if (m.type === "frame") {
       cur = m.frame; running = m.running; tick();
-      if (!liveOn && loop && running && cur >= loop[1]) { seek(loop[0]); send({ type: "play" }); }
-      if (liveOn) liveTick();
+      if (!live.on() && loop && running && cur >= loop[1]) { seek(loop[0]); send({ type: "play" }); }
+      live.frame();
     }
-    else if (m.type === "loaded") { ready = true; $("#over").hidden = true; send({ type: "ghostAlpha", alpha: GHOST_ALPHA }); if (onLoaded) { const f = onLoaded; onLoaded = null; f(); } }
+    else if (m.type === "loaded") { ready = true; $("#over").hidden = true; send({ type: "ghostAlpha", alpha: GHOST_ALPHA }); live.loaded(); }
     else if (m.type === "renderer") {
       const bad = m.renderer === "3d" && m.reason;
       $("#over").hidden = !bad;
@@ -423,148 +423,26 @@ async function game(id, st, startAt = null) {
     drawBack();
   }
 
-  // ── Try it yourself: play the moment live against the bot (server: live.py, CPU) ──
-  let liveOn = false, liveSess = null, liveSrc = null, onLoaded = null, liveAgain = null, liveArgs = null, liveSpeed = 1;
-  const pad = new PadReader();
-  function livePanel(html) { $("#opts").innerHTML = `<div class="live">${html}</div>`; }
-  const controllerLine = () => `<div class="ctl"><span class="dot2"></span>Controller: <b id="ctlName">${esc(pad.source())}</b>
-      ${navigator.usb && !pad.adapter ? `<button class="btn tiny" id="gcAdapter">Use a GameCube adapter</button>` : ""}</div>
-      <div class="faint keys" id="keyHelp" ${pad.source() === "keyboard" ? "" : "hidden"}>${KEYS.map(([k, v]) => `<span><kbd>${k}</kbd> ${v}</span>`).join("")}</div>`;
-  function wireController() {
-    const b = $("#gcAdapter");
-    if (b) b.onclick = async () => { try { await pad.connectAdapter(); toast("GameCube adapter connected"); } catch (e) { if (e?.name !== "NotFoundError") toast(e.message || String(e), 6000); } };
-  }
-  async function tryIt(args) {
-    if (liveOn) return;
-    const p = nearestPoint(cur);
-    args = args || { frame: p && cur - p.frame < p.wait + 30 ? p.frame : cur };
-    liveArgs = args; liveAgain = null;
-    send({ type: "pause" }); loop = null;
-    liveOn = true; pad.start();
-    $("#tryIt").disabled = true; $("#ask").disabled = true;
-    livePanel(`<h3>Try it yourself</h3><div class="dim">Getting the moment ready…</div>${controllerLine()}`);
-    wireController();
-    try {
-      let j = await api("/api/live", { game: id, frame: args.frame });
-      liveSess = j;
-      while (j.state === "preparing") { await new Promise((r) => setTimeout(r, 200)); j = await api(`/api/live/${liveSess.id}`); }
-      if (j.state === "error") throw new Error(j.error);
-      liveSess = j;
-      const speeds = [[1, "Full speed"], [0.5, "Half"], [0.25, "Quarter"]].filter(([v]) => v <= j.max_speed + 1e-6);
-      if (!speeds.length) speeds.push([j.max_speed, `${Math.round(j.max_speed * 100)}%`]);
-      if (!speeds.some(([v]) => v === liveSpeed)) liveSpeed = speeds[0][0];
-      livePanel(`<h3>Try it yourself</h3>
-        <div class="lead2">You take over at <b>${fmtTimeFine(args.frame)}</b>, after a 1-second run-up of what really happened.${args.ghost ? ` The <b style="color:${ME_COL}">blue ghost</b> is the master's try (${esc(args.label)}) to follow.` : ""}</div>
-        <div class="faint">Your opponent: a model of a master ${esc(s.opp.char_name)}${j.bot_kind === "S RL" ? "" : `, running on this computer's processor${j.max_speed < 1 ? `: the game runs at up to ${Math.round(j.max_speed * 100)}% speed until this character's faster model is trained` : ""}`}.</div>
-        ${controllerLine()}
-        <div class="speeds">${speeds.map(([v, n]) => `<button class="btn tiny ${v === liveSpeed ? "on" : ""}" data-sp="${v}">${n}</button>`).join("")}</div>
-        <button class="btn primary big" id="liveGo">Start <kbd style="color:#06222c;border-color:#0a5b73">Enter</kbd></button>
-        <button class="btn" id="liveCancel">Cancel</button>`);
-      wireController();
-      $("#opts").querySelectorAll("[data-sp]").forEach((b) => (b.onclick = () => { liveSpeed = +b.dataset.sp; $("#opts").querySelectorAll("[data-sp]").forEach((x) => x.classList.toggle("on", x === b)); }));
-      $("#liveCancel").onclick = () => endLive(true);
-      await new Promise((res) => {
-        // Start: the button, Enter (even a quick tap), or Start on the controller
-        const enter = (e) => { if (e.key === "Enter") { e.preventDefault(); done(); } };
-        const done = () => { window.removeEventListener("keydown", enter, true); res(); };
-        window.addEventListener("keydown", enter, true);
-        $("#liveGo").onclick = done;
-        const wait = () => { if (!liveOn) return done(); const r = pad.read(); if (r.buttons.includes("start")) done(); else requestAnimationFrame(wait); };
-        requestAnimationFrame(wait);
-      });
-      if (!liveOn) return;
-      await liveStart();
-    } catch (e) { toast(e.message || String(e), 6000); endLive(true); }
-  }
-  async function liveStart() {
-    const j = liveSess;
-    livePanel(`<div class="bigmsg" id="liveMsg">Run-up…</div><div class="bar thin"><i id="liveBar"></i></div>${controllerLine()}`);
-    // the replay up to the run-up's start, then the frames as they're played
-    await new Promise((res) => { onLoaded = res; send({ type: "load", url: `/api/live/${j.id}/prefix.slp`, name: "attempt.slp", frame: j.start - 1 }); });
-    send({ type: "live", sizes: j.sizes });
-    send({ type: "range", start: null });
-    send({ type: "speed", fps: 60 });
-    send({ type: "ghosts", ghosts: liveArgs.ghost ? [{ url: `${liveArgs.ghost}?only=${s.me.port}`, label: "@", color: ME_COL }] : [] });
-    iframe.blur(); iframe.style.pointerEvents = "none"; window.focus();
-    liveSrc = new EventSource(`/api/live/${j.id}/stream`);
-    liveSrc.addEventListener("f", (e) => {
-      const bin = atob(e.data), u = new Uint8Array(bin.length);
-      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
-      iframe.contentWindow?.postMessage({ type: "append", bytes: u.buffer }, "*", [u.buffer]);
-    });
-    liveSrc.addEventListener("s", (e) => {
-      const st = JSON.parse(e.data);
-      if (st.state === "done") liveDone(st);
-      else if (st.state === "error") { toast(st.error || "Something went wrong", 6000); endLive(true); }
-    });
-    await api(`/api/live/${j.id}/go`, { speed: liveSpeed });
-    // the controller, sent whenever it changes (and every 100 ms anyway)
-    // (a button pressed while a send is under way goes with the next send, so a quick tap still counts)
-    let last = null, lastT = 0, inflight = false, held = new Set();
-    const loopPad = () => {
-      if (!liveOn || !liveSess) return;
-      const p = pad.read(), t = performance.now();
-      p.buttons.forEach((b) => held.add(b));
-      const n = $("#ctlName"); if (n) n.textContent = pad.source();
-      if (!inflight && (!samePad(p, last) || held.size > p.buttons.length || t - lastT > 100)) {
-        const out = { ...p, buttons: [...new Set([...p.buttons, ...held])] };
-        held = new Set();
-        inflight = true; last = p; lastT = t;
-        fetch(`/api/live/${j.id}/pad`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(out) })
-          .catch(() => {}).finally(() => { inflight = false; });
-      }
-      requestAnimationFrame(loopPad);
-    };
-    requestAnimationFrame(loopPad);
-  }
-  function liveTick() {
-    const j = liveSess, m = $("#liveMsg"), b = $("#liveBar");
-    if (!j || !m) return;
-    m.textContent = cur < j.moment ? "Run-up…" : "Your turn!";
-    m.classList.toggle("go", cur >= j.moment);
-    if (b) b.style.width = `${Math.max(0, Math.min(100, ((cur - j.start) / (j.end - j.start)) * 100))}%`;
-  }
-  function liveDone(st) {
-    liveSrc?.close(); liveSrc = null;
-    pad.stop(); liveOn = false;
-    iframe.style.pointerEvents = "";
-    $("#tryIt").disabled = false; $("#ask").disabled = false;
-    const r = st.result || {}, a = liveArgs;
-    const you = branch?.frame === a.frame && valued() ? net(branch.you) : null;
-    const line = (name, v, cls = "") => v == null ? "" : `<div class="cmp ${cls}"><span>${name}</span><b>${sgn(v)}</b></div>`;
-    livePanel(`<h3>Your attempt</h3>
-      ${line("You, just now", r.expected ?? r.realized, "me")}
-      ${a.master != null ? line(`The master (${esc(a.label)})`, a.master) : ""}
-      ${line("You, in the game", you)}
-      <div class="faint" style="margin:6px 0 10px">Expected damage dealt − taken over the next 5 s after the choice (a stock = 40). This attempt: dealt ${r.dealt}%, took ${r.taken}%. One attempt has luck in it; try a few times.</div>
-      <div class="row2"><button class="btn primary" id="liveAgain">Again <kbd style="color:#06222c;border-color:#0a5b73">R</kbd></button>
-      <button class="btn" id="liveWatch">Watch it</button>
-      <a class="btn" href="/api/live/${st.id}/attempt.slp" download="attempt_${a.frame}.slp">Save .slp</a>
-      <button class="btn" id="liveDone">Done</button></div>`);
-    liveAgain = () => { liveAgain = null; tryIt(a); };
-    $("#liveAgain").onclick = liveAgain;
-    $("#liveWatch").onclick = () => {
-      onLoaded = () => {
-        send({ type: "ghosts", ghosts: a.ghost ? [{ url: `${a.ghost}?only=${s.me.port}`, label: "@", color: ME_COL }] : [] });
-        loop = [Math.max(frame0, a.frame - 20), Math.min(last, st.end)];
-        send({ type: "range", start: loop[0], end: loop[1] }); setSpeed(15); seek(loop[0]); send({ type: "play" });
-      };
-      send({ type: "load", url: `/api/live/${st.id}/attempt.slp`, name: "attempt.slp", frame: a.frame - 20 });
-    };
-    $("#liveDone").onclick = () => endLive(false);
-  }
-  function endLive(stopServer) {
-    if (stopServer && liveSess && liveOn) fetch(`/api/live/${liveSess.id}/stop`, { method: "POST" }).catch(() => {});
-    liveSrc?.close(); liveSrc = null;
-    pad.stop(); liveOn = false; liveAgain = null; onLoaded = null;
-    if (!alive) return;
-    iframe.style.pointerEvents = "";
-    $("#tryIt").disabled = false; $("#ask").disabled = false;
-    // back to the real game
-    const f = liveArgs?.frame ?? cur;
-    send({ type: "load", url: replayUrl, name: s.file, frame: f });
-    if (branch) { showOptions(); } else $("#opts").innerHTML = `<div class="dim" style="padding:6px 4px">Pause on a moment, or pick one from Biggest swings below, then ask what a master would do, or try it yourself.</div>`;
-  }
+  // ── Try it yourself (makeLive, below) ──
+  const live = makeLive({
+    id, s, send, iframe, panel: () => $("#opts"), cur: () => cur,
+    busy: (b) => { $("#tryIt").disabled = b; $("#ask").disabled = b; if (b) loop = null; },
+    youScore: (a) => (branch?.frame === a.frame && valued() ? net(branch.you) : null),
+    watch: (st) => {
+      loop = [Math.max(frame0, st.moment - 20), Math.min(last, st.end)];
+      send({ type: "range", start: loop[0], end: loop[1] }); setSpeed(15); seek(loop[0]); send({ type: "play" });
+    },
+    back: (a) => {
+      if (!alive) return;
+      send({ type: "load", url: replayUrl, name: s.file, frame: a?.frame ?? cur });
+      if (branch) showOptions();
+      else $("#opts").innerHTML = `<div class="dim" style="padding:6px 4px">Pause on a moment, or pick one from Biggest swings below, then ask what a master would do, or try it yourself.</div>`;
+    },
+  });
+  const tryIt = (args) => {
+    if (!args) { const p = nearestPoint(cur); args = { frame: p && cur - p.frame < p.wait + 30 ? p.frame : cur }; }
+    live.start(args);
+  };
   $("#tryIt").onclick = () => tryIt();
 
   // Test one move against many opponents: your side presses exactly that move, the opponent is
@@ -712,9 +590,9 @@ async function game(id, st, startAt = null) {
 
   const onKey = (e) => {
     if (e.target.closest("input,select,textarea")) return;
-    if (liveOn) return;
+    if (live.on()) return;
     if ((e.key === "t" || e.key === "T") && !$("#tryIt").disabled) { e.preventDefault(); tryIt(); return; }
-    if ((e.key === "r" || e.key === "R") && liveAgain) { e.preventDefault(); liveAgain(); return; }
+    if ((e.key === "r" || e.key === "R") && live.again()) { e.preventDefault(); return; }
     if (e.code === "Space") { e.preventDefault(); send({ type: "toggle" }); }
     else if (e.key === "ArrowLeft") { e.preventDefault(); step(e.shiftKey ? -10 : -1); }
     else if (e.key === "ArrowRight") { e.preventDefault(); step(e.shiftKey ? 10 : 1); }
@@ -723,8 +601,162 @@ async function game(id, st, startAt = null) {
     else if (e.key === "m" || e.key === "M") !$("#ask").disabled && ask();
   };
   window.addEventListener("keydown", onKey);
-  cleanup = () => { alive = false; endLive(true); window.removeEventListener("message", onMsg); window.removeEventListener("keydown", onKey); ro.disconnect(); };
+  cleanup = () => { alive = false; live.end(true); window.removeEventListener("message", onMsg); window.removeEventListener("keydown", onKey); ro.disconnect(); };
   tick();
+}
+
+// ── Try it yourself: play a moment live against the bot (server: live.py, on the CPU) ──
+// c: {id, s, send, iframe, panel(), cur(), busy(on), youScore(args), watch(status), back(args)}.
+// args: {frame, ghost?, label?, master?} for a moment of the game, or {lab: {at, place, states}}.
+function makeLive(c) {
+  let on = false, sess = null, src = null, onLoaded = null, again = null, args = null, speed = 1;
+  const pad = new PadReader();
+  const panel = (html) => { c.panel().innerHTML = `<div class="live">${html}</div>`; };
+  const q = (sel) => c.panel().querySelector(sel);
+  const controllerLine = () => `<div class="ctl"><span class="dot2"></span>Controller: <b class="ctlName">${esc(pad.source())}</b>
+      ${navigator.usb && !pad.adapter ? `<button class="btn tiny gcAdapter">Use a GameCube adapter</button>` : ""}</div>
+      <div class="faint keys" ${pad.source() === "keyboard" ? "" : "hidden"}>${KEYS.map(([k, v]) => `<span><kbd>${k}</kbd> ${v}</span>`).join("")}</div>`;
+  const wireController = () => {
+    const b = q(".gcAdapter");
+    if (b) b.onclick = async () => { try { await pad.connectAdapter(); toast("GameCube adapter connected"); } catch (e) { if (e?.name !== "NotFoundError") toast(e.message || String(e), 6000); } };
+  };
+  const ghosts = () => (args.ghost ? [{ url: `${args.ghost}?only=${c.s.me.port}`, label: "@", color: ME_COL }] : []);
+
+  async function start(a) {
+    if (on) return;
+    args = a; again = null;
+    c.send({ type: "pause" });
+    on = true; pad.start(); c.busy(true);
+    panel(`<h3>Try it yourself</h3><div class="dim">Getting the moment ready…</div>${controllerLine()}`);
+    wireController();
+    try {
+      let j = await api("/api/live", a.lab ? { game: c.id, lab: a.lab } : { game: c.id, frame: a.frame });
+      sess = j;
+      while (j.state === "preparing") { await new Promise((r) => setTimeout(r, 200)); j = await api(`/api/live/${sess.id}`); }
+      if (j.state === "error") throw new Error(j.error);
+      sess = j;
+      const speeds = [[1, "Full speed"], [0.5, "Half"], [0.25, "Quarter"]].filter(([v]) => v <= j.max_speed + 1e-6);
+      if (!speeds.length) speeds.push([j.max_speed, `${Math.round(j.max_speed * 100)}%`]);
+      if (!speeds.some(([v]) => v === speed)) speed = speeds[0][0];
+      panel(`<h3>Try it yourself</h3>
+        <div class="lead2">${a.lab ? "Your setup, played live: you control your character from the first frame." : `You take over at <b>${fmtTimeFine(j.moment)}</b>, after a 1-second run-up of what really happened.`}${a.ghost ? ` The <b style="color:${ME_COL}">blue ghost</b> is the master's try (${esc(a.label)}) to follow.` : ""}</div>
+        <div class="faint">Your opponent: a model of a master ${esc(c.s.opp.char_name)}${j.bot_kind === "S RL" ? "" : `, running on this computer's processor${j.max_speed < 1 ? `: the game runs at up to ${Math.round(j.max_speed * 100)}% speed until this character's faster model is trained` : ""}`}.</div>
+        ${controllerLine()}
+        <div class="speeds">${speeds.map(([v, n]) => `<button class="btn tiny ${v === speed ? "on" : ""}" data-sp="${v}">${n}</button>`).join("")}</div>
+        <button class="btn primary big liveGo">Start <kbd style="color:#06222c;border-color:#0a5b73">Enter</kbd></button>
+        <button class="btn liveCancel">Cancel</button>`);
+      wireController();
+      c.panel().querySelectorAll("[data-sp]").forEach((b) => (b.onclick = () => { speed = +b.dataset.sp; c.panel().querySelectorAll("[data-sp]").forEach((x) => x.classList.toggle("on", x === b)); }));
+      q(".liveCancel").onclick = () => end(true);
+      await new Promise((res) => {
+        // Start: the button, Enter (even a quick tap), or Start on the controller
+        const enter = (e) => { if (e.key === "Enter") { e.preventDefault(); done(); } };
+        const done = () => { window.removeEventListener("keydown", enter, true); res(); };
+        window.addEventListener("keydown", enter, true);
+        q(".liveGo").onclick = done;
+        const wait = () => { if (!on) return done(); if (pad.read().buttons.includes("start")) done(); else requestAnimationFrame(wait); };
+        requestAnimationFrame(wait);
+      });
+      if (!on) return;
+      await play();
+    } catch (e) { toast(e.message || String(e), 6000); end(true); }
+  }
+
+  async function play() {
+    const j = sess;
+    panel(`<div class="bigmsg liveMsg">${j.start < j.moment ? "Run-up…" : "Your turn!"}</div><div class="bar thin"><i class="liveBar"></i></div>${controllerLine()}`);
+    // the replay up to the start, then the frames as they're played
+    await new Promise((res) => { onLoaded = res; c.send({ type: "load", url: `/api/live/${j.id}/prefix.slp`, name: "attempt.slp", frame: j.start - 1 }); });
+    c.send({ type: "live", sizes: j.sizes });
+    c.send({ type: "range", start: null });
+    c.send({ type: "speed", fps: 60 });
+    c.send({ type: "ghosts", ghosts: ghosts() });
+    c.iframe.blur(); c.iframe.style.pointerEvents = "none"; window.focus();
+    src = new EventSource(`/api/live/${j.id}/stream`);
+    src.addEventListener("f", (e) => {
+      const bin = atob(e.data), u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      c.iframe.contentWindow?.postMessage({ type: "append", bytes: u.buffer }, "*", [u.buffer]);
+    });
+    src.addEventListener("s", (e) => {
+      const st = JSON.parse(e.data);
+      if (st.state === "done") done(st);
+      else if (st.state === "error") { toast(st.error || "Something went wrong", 6000); end(true); }
+    });
+    await api(`/api/live/${j.id}/go`, { speed });
+    // the controller, sent whenever it changes (and every 100 ms anyway); a button pressed while a
+    // send is under way goes with the next send, so a quick tap still counts
+    let last = null, lastT = 0, inflight = false, held = new Set();
+    const loop = () => {
+      if (!on || sess !== j) return;
+      const p = pad.read(), t = performance.now();
+      p.buttons.forEach((b) => held.add(b));
+      const n = q(".ctlName"); if (n) n.textContent = pad.source();
+      if (!inflight && (!samePad(p, last) || held.size > p.buttons.length || t - lastT > 100)) {
+        const out = { ...p, buttons: [...new Set([...p.buttons, ...held])] };
+        held = new Set();
+        inflight = true; last = p; lastT = t;
+        fetch(`/api/live/${j.id}/pad`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(out) })
+          .catch(() => {}).finally(() => { inflight = false; });
+      }
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
+  }
+
+  function frame() {
+    if (!on || !sess) return;
+    const j = sess, m = q(".liveMsg"), b = q(".liveBar"), cur = c.cur();
+    if (!m) return;
+    m.textContent = cur < j.moment ? "Run-up…" : "Your turn!";
+    m.classList.toggle("go", cur >= j.moment);
+    if (b) b.style.width = `${Math.max(0, Math.min(100, ((cur - j.start) / (j.end - j.start)) * 100))}%`;
+  }
+
+  function done(st) {
+    src?.close(); src = null;
+    pad.stop(); on = false;
+    c.iframe.style.pointerEvents = "";
+    c.busy(false);
+    const r = st.result || {}, a = args;
+    const you = a.lab ? null : c.youScore(a);
+    const sg = (v) => { const x = Math.round(v); return x > 0 ? `+${x}` : `${x === 0 ? 0 : x}`; };
+    const line = (name, v, cls = "") => v == null ? "" : `<div class="cmp ${cls}"><span>${name}</span><b>${sg(v)}</b></div>`;
+    panel(`<h3>Your attempt</h3>
+      ${line("You, just now", r.expected ?? r.realized, "me")}
+      ${a.master != null ? line(`The master (${esc(a.label)})`, a.master) : ""}
+      ${line("You, in the game", you)}
+      ${st.unsettled?.length ? `<div class="warnline">${st.unsettled.map((q) => (q === c.s.me.port ? "You" : esc(c.s.opp.char_name))).join(" and ")} couldn't get into the position you picked, so this started from where the game put ${st.unsettled.length > 1 ? "them" : "it"}.</div>` : ""}
+      <div class="faint" style="margin:6px 0 10px">${r.expected != null ? "Expected damage dealt − taken over the next 5 s after the choice (a stock = 40)." : "Damage dealt − taken over the decision (a stock = 40); this character has no review model yet."} This attempt: dealt ${r.dealt}%, took ${r.taken}%. One attempt has luck in it; try a few times.</div>
+      <div class="row2"><button class="btn primary liveAgain">Again <kbd style="color:#06222c;border-color:#0a5b73">R</kbd></button>
+      <button class="btn liveWatch">Watch it</button>
+      <a class="btn" href="/api/live/${st.id}/attempt.slp" download="attempt_${st.moment}.slp">Save .slp</a>
+      <button class="btn liveDone">Done</button></div>`);
+    again = () => { again = null; start(a); };
+    q(".liveAgain").onclick = again;
+    q(".liveWatch").onclick = () => {
+      onLoaded = () => { c.send({ type: "ghosts", ghosts: ghosts() }); c.watch(st); };
+      c.send({ type: "load", url: `/api/live/${st.id}/attempt.slp`, name: "attempt.slp", frame: st.moment - 20 });
+    };
+    q(".liveDone").onclick = () => end(false);
+  }
+
+  function end(stopServer) {
+    if (stopServer && sess && on) fetch(`/api/live/${sess.id}/stop`, { method: "POST" }).catch(() => {});
+    src?.close(); src = null;
+    const was = args;
+    pad.stop(); on = false; again = null; onLoaded = null; sess = null;
+    c.iframe.style.pointerEvents = "";
+    c.busy(false);
+    c.back(was);
+  }
+
+  return {
+    start, end, frame,
+    on: () => on,
+    again: () => { if (!again) return false; again(); return true; },
+    loaded: () => { if (onLoaded) { const f = onLoaded; onLoaded = null; f(); } },
+  };
 }
 
 // ── patterns ─────────────────────────────────────────────────────────────────────────────
@@ -788,17 +820,20 @@ async function lab(id, f0) {
   const at = st.frame;
   crumbs(`<a href="#/">Your games</a> › <a href="#/game/${id}">${esc(s.me.char_name)} vs ${esc(s.opp.char_name)}</a> › <b>Lab</b> <span class="faint">· ${esc(st.stage)} · from ${fmtTime(at)}</span>`);
   const geo = STAGE_GEO[st.stage] || STAGE_GEO["Final Destination"];
-  const players = st.players.map((p) => ({ ...p, x: +p.x.toFixed(1), y: +p.y.toFixed(1), percent: Math.round(p.percent) }));
+  const floors = [[geo.top[0], geo.top[1], 0], ...geo.plats];
+  const floorAt = (x, y, below = 3, above = 6) => floors.find(([a, b, fy]) => x >= a && x <= b && y >= fy - below && y <= fy + above);
+  const players = st.players.map((p) => ({ ...p, x: +p.x.toFixed(1), y: +p.y.toFixed(1), percent: Math.round(p.percent),
+                                           state: floorAt(p.x, p.y, 1, 3) ? "stand" : "air" }));
   const start = JSON.parse(JSON.stringify(players));
   view.innerHTML = `
   <div class="labview">
     <div class="labcol">
       <div class="labcard">
         <h3>Set up the moment</h3>
-        <p class="dim" style="margin:0 0 10px">Drag the characters. Click one to turn it around. It starts from ${fmtTime(at)} of your game.</p>
+        <p class="dim" style="margin:0 0 10px">Drag the characters. Click one to turn it around. Pick what each one is doing. It starts from ${fmtTime(at)} of your game.</p>
         <svg id="ed" class="editor"></svg>
         <div class="pcts" id="pcts"></div>
-        <div class="row" style="margin-top:12px"><button class="btn" id="reset">Back to the game</button><div class="grow"></div><button class="btn primary" id="go">Play it out</button></div>
+        <div class="row" style="margin-top:12px"><button class="btn" id="reset">Back to the game</button><div class="grow"></div><button class="btn" id="tryLab" title="Play your setup yourself against the bot">Try it yourself</button><button class="btn primary" id="go">Play it out</button></div>
         <div class="progress" id="prog" hidden><div class="dim" id="progMsg"></div><div class="bar"><i></i></div></div>
       </div>
       <div class="opts" id="opts" style="padding:0"></div>
@@ -826,10 +861,14 @@ async function lab(id, f0) {
       <rect x="${vx0}" y="${-vy1}" width="${vx1 - vx0}" height="${vy1 - vy0}" fill="#0b0e15"/>
       <path d="${pathOf(geo.under)}" fill="#1c2230" stroke="#39415a" stroke-width=".6"/>
       ${geo.plats.map(([a, b, y]) => `<line x1="${a}" x2="${b}" y1="${-y}" y2="${-y}" stroke="#8b93a7" stroke-width="1.6" stroke-linecap="round"/>`).join("")}
-      ${players.map((p, i) => `<g class="fighter" data-i="${i}" transform="translate(${p.x} ${-p.y})">
-        <ellipse cx="0" cy="-7" rx="4.6" ry="7" fill="${COL(p)}" fill-opacity=".85" stroke="#fff" stroke-width=".5"/>
-        <path d="M ${p.facing * 3} -9 L ${p.facing * 9} -7 L ${p.facing * 3} -5 Z" fill="#fff"/>
-        <text x="0" y="-17" text-anchor="middle" font-size="5.5" fill="#e8ebf2">${esc(p.me ? "You" : p.char_name)}</text></g>`).join("")}`;
+      ${players.map((p, i) => {
+        const h = p.state === "crouch" ? 4.2 : 7, cy = -h;
+        return `<g class="fighter" data-i="${i}" transform="translate(${p.x} ${-p.y})">
+        <ellipse cx="0" cy="${cy}" rx="${p.state === "crouch" ? 5.4 : 4.6}" ry="${h}" fill="${COL(p)}" fill-opacity=".85" stroke="#fff" stroke-width=".5"/>
+        ${p.state === "shield" ? `<circle cx="0" cy="${cy}" r="9" fill="${COL(p)}" fill-opacity=".18" stroke="${COL(p)}" stroke-width=".8"/>` : ""}
+        <path d="M ${p.facing * 3} ${cy - 2} L ${p.facing * 9} ${cy} L ${p.facing * 3} ${cy + 2} Z" fill="#fff"/>
+        <text x="0" y="${cy - h - 3}" text-anchor="middle" font-size="5.5" fill="#e8ebf2">${esc(p.me ? "You" : p.char_name)}</text></g>`;
+      }).join("")}`;
     svg.querySelectorAll(".fighter").forEach((el) => {
       el.onpointerdown = (e) => {
         const i = +el.dataset.i, p = players[i];
@@ -847,30 +886,64 @@ async function lab(id, f0) {
         };
         el.onpointerup = () => {
           el.onpointermove = null;
-          if (!moved) p.facing = -p.facing;
-          else snap(p);
-          drawEd();
+          if (!moved && p.state !== "ledge") p.facing = -p.facing;
+          else if (moved) placeAfterDrag(p);
+          drawEd(); drawPcts();
         };
       };
     });
   }
   function snap(p) {   // dropped just above a floor: stand on it
-    const floors = [[geo.top[0], geo.top[1], 0], ...geo.plats];
-    for (const [a, b, y] of floors) if (p.x >= a && p.x <= b && p.y >= y - 3 && p.y <= y + 6) { p.y = y + 0.5; return; }
+    const f = floorAt(p.x, p.y);
+    if (f) { p.y = f[2] + 0.5; return true; }
+    return false;
   }
+  // hanging on a ledge: just past the nearer edge of the main stage and below it, facing in (the sim
+  // falls past the ledge and catches it: measured to work 4-8 out and 8-12 below)
+  function toLedge(p) {
+    // one fighter per ledge: the other side's when this one is taken
+    const taken = (sd) => players.some((o) => o !== p && o.state === "ledge" && Math.sign(o.x) === sd);
+    let side = p.x >= 0 ? 1 : -1;
+    if (taken(side)) side = -side;
+    p.x = side * (Math.abs(geo.top[side > 0 ? 1 : 0]) + 6); p.y = -10; p.facing = -side;
+  }
+  const nearLedge = (p) => { const e = Math.abs(geo.top[p.x >= 0 ? 1 : 0]); return Math.abs(p.x) > e - 4 && Math.abs(p.x) < e + 18 && p.y > -30 && p.y < 6; };
+  function placeAfterDrag(p) {
+    if (p.state === "ledge" && nearLedge(p)) { toLedge(p); return; }
+    if (snap(p)) { if (p.state === "air" || p.state === "ledge") p.state = "stand"; }
+    else p.state = "air";
+  }
+  // a ground state while in the air drops the fighter to the floor under it
+  function setState(p, state) {
+    if (state === "ledge") { toLedge(p); p.state = state; return true; }
+    if (state === "air") { if (floorAt(p.x, p.y, 1, 3)) p.y += 20; p.state = state; return true; }
+    const under = floors.filter(([a, b, fy]) => p.x >= a && p.x <= b && fy <= p.y + 6).sort((u, v) => v[2] - u[2])[0];
+    if (!under) { toast("Put it over the stage first."); return false; }
+    p.y = under[2] + 0.5; p.state = state; return true;
+  }
+  const STATES = [["stand", "Standing"], ["crouch", "Crouching"], ["shield", "Shielding"], ["air", "In the air"], ["ledge", "On the ledge"]];
   function drawPcts() {
     $("#pcts").innerHTML = players.map((p, i) => `<label class="pct"><span style="color:${COL(p)}">${esc(p.me ? `You (${p.char_name})` : p.char_name)}</span>
-      <input type="range" min="0" max="200" value="${p.percent}" data-i="${i}"><b class="mono">${p.percent}%</b></label>`).join("");
+      <input type="range" min="0" max="200" value="${p.percent}" data-i="${i}"><b class="mono">${p.percent}%</b></label>
+      <div class="states">${STATES.map(([k, n]) => `<button class="btn tiny ${p.state === k ? "on" : ""}" data-p="${i}" data-st="${k}">${n}</button>`).join("")}</div>`).join("");
+    $("#pcts").querySelectorAll("[data-st]").forEach((b) => (b.onclick = () => { if (setState(players[+b.dataset.p], b.dataset.st)) { drawEd(); drawPcts(); } }));
     $("#pcts").querySelectorAll("input").forEach((inp) => (inp.oninput = () => { players[+inp.dataset.i].percent = +inp.value; inp.nextElementSibling.textContent = `${inp.value}%`; }));
   }
   drawEd(); drawPcts();
   $("#reset").onclick = () => { players.splice(0, players.length, ...JSON.parse(JSON.stringify(start))); drawEd(); drawPcts(); };
+  const setup = () => ({ place: Object.fromEntries(players.map((p) => [p.port, [p.x, p.y, p.facing, p.percent]])),
+                         states: Object.fromEntries(players.map((p) => [p.port, p.state])) });
 
   // viewer
   const iframe = $("#player");
   const send = (m) => iframe.contentWindow?.postMessage(m, "*");
   let cur = at, running = false, result = null, focus = 0;
-  const onMsg = (e) => { if (e.source !== iframe.contentWindow) return; const m = e.data || {}; if (m.type === "frame") { cur = m.frame; running = m.running; tickLab(); } };
+  const onMsg = (e) => {
+    if (e.source !== iframe.contentWindow) return;
+    const m = e.data || {};
+    if (m.type === "frame") { cur = m.frame; running = m.running; tickLab(); live.frame(); }
+    else if (m.type === "loaded") { send({ type: "ghostAlpha", alpha: GHOST_ALPHA }); live.loaded(); }
+  };
   window.addEventListener("message", onMsg);
   iframe.addEventListener("load", () => feedViewer(iframe, send, `/api/game/${id}/replay.slp`, s.file, at));
   function tickLab() {
@@ -885,7 +958,7 @@ async function lab(id, f0) {
   async function playOut(from) {
     $("#go").disabled = true; $("#cont").disabled = true; $("#prog").hidden = false; $("#progMsg").textContent = "Starting…";
     try {
-      const body = { game: id, at, k: 6, horizon: 300, place: Object.fromEntries(players.map((p) => [p.port, [p.x, p.y, p.facing, p.percent]])) };
+      const body = { game: id, at, k: 6, horizon: 300, ...setup() };
       if (from) Object.assign(body, from);
       let j = await api("/api/lab", body);
       while (j.state !== "done" && j.state !== "error") {
@@ -904,11 +977,11 @@ async function lab(id, f0) {
     const r = result, o = r.options[focus];
     send({ type: "load", url: o.url, name: `try ${focus + 1}`, frame: r.frame - 1 });
     setTimeout(() => {
-      send({ type: "ghosts", ghosts: r.options.filter((x) => x.i !== focus).map((x) => ({ url: `${x.url}?only=${s.me.port}`, label: x.label, color: x.color })) });
+      send({ type: "ghosts", ghosts: [] });
       send({ type: "range", start: r.frame - 1, end: r.frame + 300 }); send({ type: "play" });
     }, 400);
     const raw = (x) => x.dealt - x.taken + 40 * (x.stocks_taken - x.stocks_lost);
-    $("#opts").innerHTML = `<div class="summary">${r.options.length} ways it plays out from your setup (5 seconds each). Models of master players play both sides. The one you picked is shown solid; the other tries are ghosts of your ${esc(s.me.char_name)}. Click one to watch it up close; pause anywhere and "Continue from here" to play out that moment again.</div>` +
+    $("#opts").innerHTML = `${r.unsettled?.length ? `<div class="warnline">${r.unsettled.map((q) => (q === s.me.port ? "You" : esc(s.opp.char_name))).join(" and ")} couldn't get into the position you picked, so these start from where the game put ${r.unsettled.length > 1 ? "them" : "it"}.</div>` : ""}<div class="summary">${r.options.length} ways it plays out from your setup (5 seconds each). Models of master players play both sides. Click one to watch it up close; pause anywhere and "Continue from here" to play out that moment again.</div>` +
       r.options.map((x) => `<div class="opt ${x.i === focus ? "focus" : ""}" data-i="${x.i}"><div class="dot" style="background:${x.color}"></div>
         <div><div class="lbl">You: ${esc(x.label)}</div><div class="res">Opponent: ${esc(x.opp_label)}<br>dealt ${x.dealt.toFixed(0)}% · took ${x.taken.toFixed(0)}%${x.stocks_taken ? ` · took a stock` : ""}${x.stocks_lost ? ` · lost a stock` : ""}</div></div>
         <div style="text-align:right"><span class="net ${raw(x) > 2 ? "pos" : raw(x) < -2 ? "neg" : "zero"}">${raw(x) > 0 ? "+" : ""}${raw(x).toFixed(0)}</span><div><a class="dl" href="${x.url}" download="lab_${x.i}.slp">.slp</a></div></div></div>`).join("");
@@ -917,9 +990,27 @@ async function lab(id, f0) {
   }
   $("#go").onclick = () => playOut(null);
   $("#cont").onclick = () => { send({ type: "pause" }); playOut({ from_job: result.id, from_try: focus, frame: cur }); };
-  const onKey = (e) => { if (e.target.closest("input")) return; if (e.code === "Space") { e.preventDefault(); send({ type: "toggle" }); } };
+  // Try it yourself: the setup, played live (makeLive)
+  let labAlive = true;
+  const live = makeLive({
+    id, s, send, iframe, panel: () => $("#opts"), cur: () => cur,
+    busy: (b) => { $("#go").disabled = b; $("#tryLab").disabled = b; },
+    youScore: () => null,
+    watch: (st) => { send({ type: "range", start: st.moment - 20, end: st.end }); send({ type: "speed", fps: 15 }); send({ type: "seek", frame: st.moment - 20 }); send({ type: "play" }); },
+    back: () => {
+      if (!labAlive) return;
+      send({ type: "speed", fps: 60 });
+      if (result) showTry(); else { send({ type: "load", url: `/api/game/${id}/replay.slp`, name: s.file, frame: at }); $("#opts").innerHTML = ""; }
+    },
+  });
+  $("#tryLab").onclick = () => live.start({ lab: { at, ...setup() } });
+  const onKey = (e) => {
+    if (e.target.closest("input") || live.on()) return;
+    if ((e.key === "r" || e.key === "R") && live.again()) { e.preventDefault(); return; }
+    if (e.code === "Space") { e.preventDefault(); send({ type: "toggle" }); }
+  };
   window.addEventListener("keydown", onKey);
-  cleanup = () => { window.removeEventListener("message", onMsg); window.removeEventListener("keydown", onKey); };
+  cleanup = () => { labAlive = false; live.end(true); window.removeEventListener("message", onMsg); window.removeEventListener("keydown", onKey); };
   tickLab();
 }
 

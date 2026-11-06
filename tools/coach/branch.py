@@ -22,7 +22,34 @@ for p in (ROOT, ROOT / "tools", ROOT / "tools" / "coach"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-CTRL_SEGMENTS = ((0, 37), (37, 46), (53, 56), (46, 53))   # main, c, shoulder, button -> last_idx order
+CTRL_SEGMENTS = ((0, 37), (37, 46), (53, 56), (46, 53))
+# the lab's fighter states: the action states that count as being in them (libmelee values)
+SETTLE = {"stand": {14}, "crouch": {40}, "shield": {179}, "ledge": {253}}
+SETTLE_MAX = 45
+
+
+def settle_wire(fr, settle):
+    """The lab's settle step: neutral pads, except what gets each fighter into its state (hold down
+    to crouch; R to shield, once grounded: R in the air is an air dodge; the ledge is caught by
+    falling past it facing the stage). fr: the frame now (None: the placement frame)."""
+    from rlvr.sim.melee_sim import Pad
+    out = []
+    for q in range(4):
+        p = Pad()
+        st = settle.get(q)
+        post = fr.post.get((q, 0)) if fr is not None else None
+        grounded = post is not None and len(post) > 0x2E and post[0x2E] == 0
+        if st == "crouch":
+            p.stick_y = -80
+        elif st == "shield" and grounded:
+            p.trigger_r, p.button = 255, 0x0020
+        out.append(p)
+    return b"".join(p.pack() for p in out)
+
+
+def is_settled(fr, settle):
+    return all((q, 0) in fr.post and struct.unpack_from(">H", fr.post[(q, 0)], 7)[0] in SETTLE[st]
+               for q, st in settle.items() if st in SETTLE)   # main, c, shoulder, button -> last_idx order
 
 
 def ctrl_indices(onehot):
@@ -125,8 +152,11 @@ class Brancher:
              pads_slp=None, force=None):
         """value_at: (port, [steps]): after each listed step, keep that side's model features at its
         newest frame (the input to tools/coach/value.Value), per rollout.
-        place: (PF, {port: (x, y, facing, percent)}): the lab. After frame PF the fighters are put
-        there (MeleeSim.place); the models' history starts over after it. Needs F > PF.
+        place: (PF, {port: (x, y, facing, percent)}[, {port: state}]): the lab. After frame PF the fighters
+        are put there (MeleeSim.place); the models' history starts over after it. Needs F > PF. With
+        states ("stand", "crouch", "shield", "ledge"; "air" = as placed) the fighters then press what
+        gets them there (SETTLE) until all are in it, at most 45 frames, and the run starts from that
+        frame (F is then that frame, not the one asked for).
         pads_slp: take the inputs up to F from this .slp instead (a branch written earlier: the real
         game, the placement, then that try), so a branch can continue from any frame of a try.
         force: (port, slp, n): for the first n live frames, that side presses exactly what it pressed
@@ -176,20 +206,38 @@ class Brancher:
         cur = [None] * k
         parser0 = SlippiParser(slp)
 
+        settle = {int(q): st for q, st in (place[2] if place and len(place) > 2 and not pads_slp else {}).items()
+                  if st in SETTLE}
+
+        unsettled = []      # fighters the settle couldn't get into their states
+        settle_pads = lambda fr: settle_wire(fr, settle)
+        settled = lambda fr: is_settled(fr, settle)
+
+        def keep(i, fr):
+            if i == 0:
+                if writer:
+                    writer.add(fr)
+                if fr.index > (place[0] if place else F - T - 1):
+                    gs = parser0.parse(fr)
+                    for s in sides:
+                        prev = prev_from_controller(gs.players[s["port"] + 1].controller_state)
+                        hist[s["port"]].append(s["build"](gs, prev, s["ctx"]))
+
         def prefix(i):
             fr = sims[i].reset(initial_pads=[pad_from_pre(pre[(-123, q, 0)]) if (-123, q, 0) in pre else Pad()
                                              for q in range(4)])
             while fr is not None and fr.index < F:
-                if i == 0:
-                    if writer:
-                        writer.add(fr)
-                    if fr.index > max(F - T - 1, place[0] if place else -10 ** 9):
-                        gs = parser0.parse(fr)
-                        for s in sides:
-                            prev = prev_from_controller(gs.players[s["port"] + 1].controller_state)
-                            hist[s["port"]].append(s["build"](gs, prev, s["ctx"]))
+                keep(i, fr)
                 if place and fr.index == place[0]:
-                    fr = sims[i].place(place[1], rec_pads(fr.index + 1))
+                    fr = sims[i].place(place[1], settle_pads(None) if settle else rec_pads(fr.index + 1))
+                    if settle:
+                        # into the asked-for states; the run starts once all are in them
+                        n = 0
+                        while fr is not None and not settled(fr) and n < SETTLE_MAX:
+                            keep(i, fr)
+                            fr = sims[i].step(settle_pads(fr))
+                            n += 1
+                        break
                 else:
                     fr = sims[i].step(rec_pads(fr.index + 1))
             cur[i] = fr
@@ -197,6 +245,11 @@ class Brancher:
         ths = [threading.Thread(target=prefix, args=(i,)) for i in range(k)]
         [t.start() for t in ths]
         [t.join() for t in ths]
+        if settle and all(c is not None for c in cur):
+            if len({c.index for c in cur}) != 1:
+                raise RuntimeError("the sims settled on different frames")
+            F = cur[0].index
+            unsettled = [q for q, st in settle.items() if not is_settled(cur[0], {q: st})]
         if any(c is None or c.index != F for c in cur):
             raise RuntimeError("The simulator lost sync with this replay before this moment, so it can't play it out from here.")
         exact = (all(not physics_diff(post[(F, s, 0)], c.post[(s, 0)]) for c in cur for s, _ in players)
@@ -308,7 +361,7 @@ class Brancher:
                 st = [f[p][6] for f in r["frames"]]
                 r["outcome"][p] = dict(damage_taken=round(float(sum(max(0.0, b - a) for a, b in zip(pct, pct[1:]))), 2),
                                        stocks_lost=int(sum(max(0, a - b) for a, b in zip(st, st[1:]))))
-        return dict(slp=slp, frame=F, exact=exact, value_feats=feats_v, players=[[p, c] for p, c in players],
+        return dict(slp=slp, frame=F, exact=exact, unsettled=unsettled, value_feats=feats_v, players=[[p, c] for p, c in players],
                     policies={str(p): d for p, d in policies.items()}, rollouts=roll,
                     seconds=dict(prefix=round(t_prefix, 2), total=round(time.time() - t0, 2)))
 

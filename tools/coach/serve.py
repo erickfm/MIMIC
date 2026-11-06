@@ -534,9 +534,11 @@ def _lab(self, jid, job, game, an):
         F = max(at + 1, int(job["frame"]))
     out_dir = HOME / "branches" / jid
     pol = {me["port"]: policy_dir(me["char"]), opp["port"]: policy_dir(opp["char"])}
+    states = {int(p): st for p, st in (job.get("states") or {}).items()}
     r = self.brancher.run(game["path"], F, job["k"], job["horizon"], pol, out_dir=out_dir,
                           progress=lambda f: job.__setitem__("progress", round(f, 3)),
-                          place=(at, places), pads_slp=pads_slp)
+                          place=(at, places, states), pads_slp=pads_slp)
+    F = r["frame"]   # after the settle into the asked-for states
     mp, op = me["port"], opp["port"]
     options = []
     for i, ro in enumerate(r["rollouts"]):
@@ -547,7 +549,8 @@ def _lab(self, jid, job, game, an):
                             opp_label=describe(opp["char"], [f[op][3] for f in fr], [f[op][0] for f in fr], [f[mp][0] for f in fr]),
                             dealt=oc[op]["damage_taken"], taken=oc[mp]["damage_taken"],
                             stocks_taken=oc[op]["stocks_lost"], stocks_lost=oc[mp]["stocks_lost"]))
-    job.update(state="done", progress=1.0, frame=F, exact=r["exact"], options=options, seconds=r["seconds"])
+    job.update(state="done", progress=1.0, frame=F, exact=r["exact"], options=options, seconds=r["seconds"],
+               unsettled=r.get("unsettled", []))
 
 
 Jobs.do_lab = _lab
@@ -871,7 +874,7 @@ class App:
             self.cpu_values[char] = Value(str(vp), "cpu") if vp else None
         return self.cpu_values[char]
 
-    def start_live(self, g, an, frame, speed=1.0):
+    def start_live(self, g, an, frame, speed=1.0, lab=None):
         from live import LiveSession
         for old in list(self.live.values()):          # one at a time
             old.stop()
@@ -881,9 +884,11 @@ class App:
         bot, kind = live_policy(opp["char"])
         sid = uuid.uuid4().hex[:12]
         sess = LiveSession(self.cpu_models(), g["path"], (me["port"], me["char"]), (opp["port"], opp["char"]),
-                           frame, stretch_of(pt["wait"] if pt else 40), bot, policy_dir(me["char"]),
+                           frame, stretch_of(pt["wait"] if pt and not lab else 40), bot, policy_dir(me["char"]),
                            self.cpu_value(me["char"]), iso=self.iso_path if self.iso else None, lead=60, after=WATCH,
-                           out_dir=HOME / "live" / sid)
+                           out_dir=HOME / "live" / sid,
+                           place=(int(lab["at"]), {int(q): tuple(map(float, x)) for q, x in lab["place"].items()},
+                                  lab.get("states") or {}) if lab else None)
         sess.id, sess.bot_kind, sess.game = sid, kind, g["id"]
         self.live[sid] = sess
 
@@ -1164,8 +1169,9 @@ class Handler(BaseHTTPRequestHandler):
             if why:
                 return self.send_json(dict(error=why), 400)
             an = analyse(g, a.me())
-            frame = max(60 - 123, min(int(b["frame"]), an["last"] - 2))
-            sess = a.start_live(g, an, frame)
+            lab = b.get("lab")
+            frame = max(60 - 123, min(int(lab["at"]) + 1 if lab else int(b["frame"]), an["last"] - 2))
+            sess = a.start_live(g, an, frame, lab=lab)
             return self.send_json(dict(sess.status(), id=sess.id, bot_kind=sess.bot_kind))
         m = re.fullmatch(r"/api/live/(\w+)/(pad|go|stop)", p)
         if m:
@@ -1217,7 +1223,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(dict(error=why), 400)
             an = analyse(g, a.me())
             at = max(0, min(int(b["at"]), an["last"] - 2))
-            job = a.jobs.submit("lab", g, an, at=at, place=b["place"], k=int(b.get("k", 6)),
+            job = a.jobs.submit("lab", g, an, at=at, place=b["place"], states=b.get("states"), k=int(b.get("k", 6)),
                                 horizon=int(b.get("horizon", 300)), from_job=b.get("from_job"),
                                 from_try=b.get("from_try"), frame=b.get("frame"))
             return self.send_json(job)

@@ -43,11 +43,13 @@ class LiveSession:
     """One attempt. prepare() replays to the lead-in's start; run() plays it live."""
 
     def __init__(self, cpu, slp, me, opp, moment, stretch, bot_dir, me_dir, value, iso=None, lead=60,
-                 after=180, out_dir=None, ghost=None, script=None):
+                 after=180, out_dir=None, ghost=None, script=None, place=None):
         """cpu: a branch.Brancher on the CPU (models). me/opp: (port, libmelee char). moment: the game
         frame the player takes over at; the attempt runs `after` frames past the stretch.
         value: tools/coach/value.Value or None. script: {port: slp} feed these recorded inputs
-        instead of the player/bot (tests)."""
+        instead of the player/bot (tests). place: (at, {port: (x, y, facing, percent)}, {port: state})
+        the lab: after frame `at` the fighters are put there and settle into their states
+        (branch.settle_wire); the attempt starts there, with no run-up."""
         self.cpu, self.slp, self.iso = cpu, str(slp), iso
         self.me, self.opp = me, opp
         self.moment, self.stretch, self.lead, self.after = int(moment), int(stretch), int(lead), int(after)
@@ -55,7 +57,9 @@ class LiveSession:
         self.end = self.moment + self.stretch + self.after
         self.bot_dir, self.me_dir, self.value = bot_dir, me_dir, value
         self.out_dir = Path(out_dir) if out_dir else None
-        self.ghost, self.script = ghost, script or {}
+        self.ghost, self.script, self.place = ghost, script or {}, place
+        if place:
+            self.start = int(place[0])
         self.state, self.error, self.result = "preparing", None, None
         self.pad = None              # the player's latest pad (pad_from_json), None = neutral
         self.latch = 0               # buttons pressed since the last frame took the pad (a quick tap still counts)
@@ -81,7 +85,7 @@ class LiveSession:
         return dict(state=self.state, error=self.error, result=self.result, start=self.start,
                     moment=self.moment, end=self.end, speed=self.speed, sizes=getattr(self, "sizes", None),
                     bot=Path(self.bot_dir).name if self.bot_dir else None, bot_policy=str(self.bot_dir),
-                    max_speed=getattr(self, "max_speed", 1.0))
+                    max_speed=getattr(self, "max_speed", 1.0), unsettled=getattr(self, "unsettled", []))
 
     def _set(self, state, **kw):
         self.state = state
@@ -152,11 +156,31 @@ class LiveSession:
                                               for q in range(4)])
             while fr is not None and fr.index < self.start:
                 self.writer.add(fr)
-                if fr.index > self.start - T - 1:
+                if fr.index > self.start - T - 1 and not self.place:
                     self._push(self.parser.parse(fr))
                 fr = self.sim.step(rec(fr.index + 1))
             if fr is None or fr.index != self.start:
                 raise RuntimeError("The simulator lost sync with this replay before this moment.")
+            if self.place:
+                # the lab: put the fighters there; the models' history starts over after it
+                from branch import SETTLE_MAX, is_settled, settle_wire
+                at, places, states = self.place
+                settle = {int(q): st for q, st in (states or {}).items()}
+                for sd in self.sides.values():
+                    sd["pol"].reset([0])
+                self.writer.add(fr)
+                fr = self.sim.place({int(q): v for q, v in places.items()}, settle_wire(None, settle))
+                n = 0
+                while fr is not None and not is_settled(fr, settle) and n < SETTLE_MAX:
+                    self.writer.add(fr)
+                    self._push(self.parser.parse(fr))
+                    fr = self.sim.step(settle_wire(fr, settle))
+                    n += 1
+                if fr is None:
+                    raise RuntimeError("The simulator stopped while setting up the moment.")
+                self.unsettled = [q for q, st in settle.items() if not is_settled(fr, {q: st})]
+                self.start = self.moment = fr.index
+                self.end = self.moment + self.stretch + self.after
             self.cur = fr
             self.prefix = self._slp_bytes()
             self._set("ready")
