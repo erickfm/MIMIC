@@ -8,7 +8,7 @@ leave the browser). This server reads the replay folder, finds decision points, 
 native sim + models to branch from a game (tools/coach/branch.py). Nothing here sends game
 files anywhere.
 """
-import argparse, collections, hashlib, json, mimetypes, os, queue, re, sys, threading, time, traceback, uuid
+import argparse, collections, hashlib, json, mimetypes, os, queue, re, subprocess, sys, threading, time, traceback, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -865,6 +865,15 @@ def _patterns(self, jid, job, games, me_code):
     """Across many games: review each, group decisions by situation, find the situations that
     cost you most consistently, and run master tries at example moments of each."""
     import random as _r
+    pkey = _patterns_key(games, me_code)
+    pfile = HOME / "patterns" / (hashlib.sha1(json.dumps(pkey, sort_keys=True).encode()).hexdigest()[:16] + ".json")
+    try:
+        saved = json.loads(pfile.read_text())
+        if saved.pop("key") == pkey:
+            job.update(state="done", progress=1.0, **saved)
+            return
+    except Exception:
+        pass
     rows = []
     for gi, g in enumerate(games):
         job.update(progress=round(0.7 * gi / len(games), 3), message=f"Reviewing game {gi + 1} of {len(games)}…")
@@ -930,7 +939,21 @@ def _patterns(self, jid, job, games, me_code):
         f["examples"] = [dict(game=r["game"], frame=r["frame"], did=r["did"], cost=r["cost"], start=start_of.get(r["game"]))
                          for r in examples[:6]]
         del f["rows"]
-    job.update(state="done", progress=1.0, patterns=worst, decisions=len(rows), games=len(games), base=round(base, 2))
+    res = dict(patterns=worst, decisions=len(rows), games=len(games), base=round(base, 2))
+    pfile.parent.mkdir(parents=True, exist_ok=True)
+    tmp = pfile.with_suffix(".tmp")
+    tmp.write_text(json.dumps(dict(res, key=pkey)))
+    tmp.replace(pfile)
+    job.update(state="done", progress=1.0, **res)
+
+
+def _patterns_key(games, me_code):
+    """A saved patterns result is valid while the games, the player, the value model and the
+    policies (both sides' masters) are the same."""
+    char = next(pl["char"] for pl in games[0]["players"] if pl.get("code") == me_code)
+    vp = value_path(char)
+    return dict(me=me_code, char=char, games=[g["id"] for g in games], value=str(vp),
+                value_mtime=vp.stat().st_mtime if vp else None, policies={k: str(v) for k, v in sorted(POLICY.items())})
 
 
 Jobs.do_patterns = _patterns
@@ -1369,14 +1392,25 @@ class Handler(BaseHTTPRequestHandler):
         return self.send_json(dict(error="not found"), 404)
 
 
+def gpu_in_use():
+    """True when another program (training, a game) has the GPU: the coach then stays on the CPU."""
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return False
+    return any(l.strip() and int(l.strip()) != os.getpid() for l in out.splitlines() if l.strip().isdigit())
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--device", default=None, help="cuda or cpu (default: cuda if available)")
+    ap.add_argument("--device", default=None,
+                    help="cuda or cpu (default: cuda if available and no other program is using it, else cpu)")
     a = ap.parse_args()
     import torch
-    dev = a.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    dev = a.device or ("cuda" if torch.cuda.is_available() and not gpu_in_use() else "cpu")
     Handler.app = App(dev)
     srv = ThreadingHTTPServer((a.host, a.port), Handler)
     print(f"Coach is running: open http://localhost:{a.port}  (models on {dev})", flush=True)

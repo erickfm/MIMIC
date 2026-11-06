@@ -37,7 +37,8 @@ A web app: the player's browser draws everything; a server runs the game simulat
   melee-3d-viewer's GX page, ~120k fps per core batched natively). Its repository has **no
   license**, so it can't be redistributed, and its exactness on our replays is unmeasured. It is
   the route to a browser-only version later.
-- **Windows:** melee-unlocked ships a win64 build (mingw/MSVC); **Mac:** no port.
+- **Windows:** melee-unlocked ships a win64 build (mingw/MSVC); **Mac:** no port. What our sim would
+  need on Windows: see "Windows (feasibility)" below.
 - **Model on CPU** (fox M RL policy, 8 threads, while the CPU also ran 8 sims): 24 ms per decision
   (batch 1); batching does not help (batch 16: 27 ms per item). One rollout of 300 frames with
   both sides played by models = 600 decisions ≈ 15 s; 8 rollouts ≈ 2 min.
@@ -64,6 +65,37 @@ A web app: the player's browser draws everything; a server runs the game simulat
   real ones (the real outcome sits about 1 point above the tries' mean, ~2 SE; 0.62 mean rank on the 23
   decisions whose tries spread by more than 2 points), so the coach's numbers may lean slightly
   pessimistic there. Nothing in the app was changed on this basis. Single run, 60 decisions each.
+
+## Windows (feasibility, 2026-11-05; read from the code, nothing built)
+
+melee-unlocked is a Windows project first (its release is win64). The parts:
+
+- **The game library** builds on Windows already: upstream compiles it with MinGW-w64 GCC 14
+  (`sourceport/cmake/mingw-w64-x86_64.cmake`; GCC because of `scalar_storage_order`). Our two small
+  game-side changes (`sourceport/game/shim/mu_replay*.c`, 68 lines) are plain C and come along.
+- **The host is the work.** Our sim runs the Linux host (`port/linux`) plus our replay/env host (404
+  lines, `replay_host.cpp`). It is Linux-only in a few places: `dlopen`/`dlsym` for the game library,
+  `mmap` of console RAM at the fixed address 0x80000000, and reads/writes on pipe file descriptors
+  it inherits. Two ways: port those calls (LoadLibrary/GetProcAddress, VirtualAlloc at that address,
+  pipe HANDLEs), or move our replay/env mode into upstream's Windows host (`port/app/main.cpp`, MSVC,
+  which already has `--headless --fast --frames`).
+- **Python side:** `rlvr/sim/melee_sim.py` talks to the sim over `os.pipe` + `pass_fds` + `select`,
+  none of which work with pipes on Windows; it would use the child's stdin/stdout with a reader
+  thread instead.
+- **Exactness must be re-measured:** a different compiler build (MinGW, Windows CRT math) could
+  change float results; `tools/sim_replay_check.py` on the same replay set (465/466 exact on Linux)
+  decides it.
+- **Nothing can be shipped built:** like on Linux, the sim holds decompiled game code, so each player
+  builds it on their machine against their own ISO. Upstream's `build.bat` does that with winget
+  (Python, CMake, VS 2022 Build Tools; their notes say 5–40 minutes the first time).
+
+**Smallest route: WSL2.** The Linux server and sim run unchanged inside WSL2 (CUDA works there with
+NVIDIA's Windows driver), and the Windows browser opens `http://localhost:8765` (WSL2 forwards
+localhost). The one code change: from WSL, find Slippi Launcher's settings, replays and ISO under
+`/mnt/c/Users/<name>/` (`slippi_launcher_settings`, `default_replay_dir` in `serve.py`) and convert
+its Windows paths. Cost for the player: `wsl --install` (a reboot) and our setup script, so
+not simple enough for an average player. A native build is the real answer for them; the hosted
+server avoids the question entirely.
 
 ## Open (owner)
 

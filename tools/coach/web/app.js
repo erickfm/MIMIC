@@ -802,7 +802,7 @@ async function patterns(st) {
   };
   const bars = (list) => list.map(([k, v]) => `<div class="pbar"><span>${esc(k)}</span><i style="width:${Math.round(v * 100)}%"></i><b>${Math.round(v * 100)}%</b></div>`).join("") || `<div class="faint">—</div>`;
   async function run() {
-    draw(`<div class="labcard"><div id="pmsg" class="dim">Starting…</div><div class="bar" style="margin-top:8px"><i id="pbar"></i></div><div class="faint" style="margin-top:8px;font-size:12px">This looks through your 40 most recent games and asks the master about the situations that stand out. It takes a few minutes the first time.</div></div>`);
+    draw(`<div class="labcard"><div id="pmsg" class="dim">Starting…</div><div class="bar" style="margin-top:8px"><i id="pbar"></i></div><div class="faint" style="margin-top:8px;font-size:12px">This looks through your 40 most recent games and asks the master about the situations that stand out. The first time, each game gets reviewed, which takes a while (it keeps going if you leave this page); reviewed games are instant after that.</div></div>`);
     let key = `pat:${char}`, j;
     try {
       j = await api("/api/patterns", { char, n: 40 }); const left = timer();
@@ -951,7 +951,8 @@ async function lab(id, f0) {
   }
   const STATES = [["stand", "Standing"], ["crouch", "Crouching"], ["shield", "Shielding"], ["air", "In the air"], ["ledge", "On the ledge"]];
   function drawPcts() {
-    $("#pcts").innerHTML = players.map((p, i) => `<label class="pct"><span style="color:${COL(p)}">${esc(p.me ? `You (${p.char_name})` : p.char_name)}</span>
+    const order = players.map((p, i) => [p, i]).sort((a, b) => b[0].me - a[0].me);   // you first
+    $("#pcts").innerHTML = order.map(([p, i]) => `<label class="pct"><span style="color:${COL(p)}">${esc(p.me ? `You (${p.char_name})` : `Opponent (${p.char_name})`)}</span>
       <input type="range" min="0" max="200" value="${p.percent}" data-i="${i}"><b class="mono">${p.percent}%</b></label>
       <div class="states">${STATES.map(([k, n]) => `<button class="btn tiny ${p.state === k ? "on" : ""}" data-p="${i}" data-st="${k}">${n}</button>`).join("")}</div>`).join("");
     $("#pcts").querySelectorAll("[data-st]").forEach((b) => (b.onclick = () => { if (setState(players[+b.dataset.p], b.dataset.st)) { drawEd(); drawPcts(); } }));
