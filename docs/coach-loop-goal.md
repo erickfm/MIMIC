@@ -26,6 +26,7 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 |---|---|---|---|
 | falco-M-bc3-hf28k-s1.rl2-s1 | 181–11 (94.3%) | +1.91 | Thu 11/5 11:24 PM |
 | falco-S-bc2-hf28k-s1.rl2-s1 | 157–35 (81.8%) | +1.32 | Fri 11/6 2:22 AM |
+| marth-S-bc2-hf21k-s1.rl2-s1 | 169–23 (88.0%) | +1.48 | Fri 11/6 4:59 AM |
 
 The BC parent is also the opponent RL trained against, so this measures the gain against that one
 opponent.

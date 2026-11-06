@@ -1,0 +1,21 @@
+{
+ "a": "marth-S-bc2-hf21k-s1.rl2-s1",
+ "b": "marth-S-bc2-hf21k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 169,
+ "b_wins": 23,
+ "draws": 0,
+ "a_win_rate": 0.8802,
+ "wilson95": [
+  0.8267,
+  0.9188
+ ],
+ "p_two_sided": 1.1838256997576382e-28,
+ "stock_margin_a": 1.484,
+ "seconds": 418,
+ "commit": "8b84a04-dirty",
+ "finished": "2026-11-06T12:59:32+00:00"
+}
