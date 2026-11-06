@@ -46,6 +46,15 @@ moment themselves against the bot, live, from the exact game state.
 - Upload the value models to Hugging Face so a fresh machine gets them, and make the coach download
   them (as it does policies). Confirm before pushing anything to HF.
 
+### Ready to run when the GPU is free (prepared 2026-11-05)
+
+1. `python3 tools/coach/after_queue.py` (RL policies + value models, item 3 above).
+2. Stuckey's Falco model (backlog 4): shards are built (`data/stuckey/falco_train`: 365 games + 40
+   for picking the checkpoint; `data/stuckey/falco_test`: 46 games no choice is made on). Then
+   `python3 tools/coach/player_model.py finetune --parent falco-M-bc3-hf28k-s1 --data data/stuckey/falco_train
+   --name stuckey-falco-M-ft1 --steps 2000` and `player_model.py eval --data data/stuckey/falco_test
+   --policies <BC> <RL> runs/stuckey-falco-M-ft1/policy`. Both paths were smoke-tested on the CPU.
+
 ## 4. Backlog, in order (after 1–3, or alongside them when they're waiting)
 
 1. Test the whole app as a first-time user on Stuckey's Fox replays (STUC#911) as well as the
