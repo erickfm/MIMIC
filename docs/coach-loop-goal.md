@@ -25,6 +25,7 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 | run | RL vs BC | stock margin | finished |
 |---|---|---|---|
 | falco-M-bc3-hf28k-s1.rl2-s1 | 181–11 (94.3%) | +1.91 | Thu 11/5 11:24 PM |
+| falco-S-bc2-hf28k-s1.rl2-s1 | 157–35 (81.8%) | +1.32 | Fri 11/6 2:22 AM |
 
 The BC parent is also the opponent RL trained against, so this measures the gain against that one
 opponent.
