@@ -16,3 +16,7 @@ mastfox-c9-half:
   note: 5% of the c9 master-Fox build; the fast proxy's data (tools/fast_proxy.sh).
   manifest_sha1: 91f5c2c2caea4ccd19e78bb94b634928cb5aa850
   paths: [data/mastfox_c9_half]
+falco-hf:
+  note: All of erickfm/mimic-shards-v2 falco/ (28,379 train / 3,158 val games, 270M train frames).
+  manifest_sha1: 5001b1e40598413f3114119cbe075a2a9b369647
+  paths: [data/falco_hf/falco]
