@@ -174,3 +174,22 @@ input[type=text], select { background: var(--bg); border: 1px solid var(--line);
 .range b{position:absolute;top:-3px;width:2px;height:12px;margin-left:-1px;background:#e8ebf2;border-radius:1px}
 .best{font-size:10.5px;text-transform:uppercase;letter-spacing:.6px;color:#06222c;background:#57d68d;border-radius:5px;padding:1px 6px;margin-left:4px;vertical-align:middle}
 .btn.tiny.testbtn{margin-top:6px;color:var(--accent,#4cc9f0);border-color:rgba(76,201,240,.4)}
+
+.btn.tryit{width:100%;margin-top:8px}
+.live{display:flex;flex-direction:column;gap:10px;padding:2px 2px 10px}
+.live h3{margin:0}
+.live .lead2{font-size:14px;line-height:1.5}
+.live .ctl{font-size:13px;color:var(--dim);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.live .dot2{width:8px;height:8px;border-radius:50%;background:#57d68d;display:inline-block}
+.live .keys{display:flex;flex-wrap:wrap;gap:4px 12px;font-size:12px}
+.live .speeds{display:flex;gap:6px}
+.live .speeds .on{background:rgba(76,201,240,.18);border-color:rgba(76,201,240,.6);color:#e8ebf2}
+.live .big{font-size:16px;padding:12px}
+.live .bigmsg{font-size:28px;font-weight:750;letter-spacing:.3px;color:var(--dim);text-align:center;padding:18px 0 6px}
+.live .bigmsg.go{color:#4cc9f0}
+.live .bar.thin{height:4px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden}
+.live .bar.thin i{display:block;height:100%;width:0;background:#4cc9f0}
+.live .cmp{display:flex;justify-content:space-between;padding:8px 12px;border:1px solid var(--line);border-radius:10px;font-size:14px}
+.live .cmp.me{border-color:rgba(76,201,240,.55);background:rgba(76,201,240,.07)}
+.live .cmp b{font-size:16px}
+.live .row2{display:flex;flex-wrap:wrap;gap:8px}

@@ -54,6 +54,31 @@ def policy_dir(char):
     return str(cache / name)
 
 
+# run-name character keys (tools/run.py CHARS), for finding a character's RL runs
+RUN_CHAR = {"FOX": "fox", "FALCO": "falco", "MARTH": "marth", "SHEIK": "sheik", "ZELDA": "zelda",
+            "CPTFALCON": "cptfalcon", "JIGGLYPUFF": "puff", "PEACH": "peach", "LUIGI": "luigi",
+            "PIKACHU": "pikachu", "SAMUS": "samus", "YOSHI": "yoshi", "GANONDORF": "ganondorf", "DOC": "doc",
+            "MARIO": "mario", "LINK": "link", "YLINK": "ylink", "ROY": "roy", "DK": "dk", "BOWSER": "bowser",
+            "NESS": "ness", "MEWTWO": "mewtwo", "GAMEANDWATCH": "gameandwatch"}
+
+
+def live_policy(char):
+    """The bot for live play, on the CPU: the character's S RL model (fast enough for 60 fps:
+    6.2 ms per frame on 4 threads, measured), else its usual policy (M: ~16 ms, the game then runs
+    slower). Returns (dir, kind)."""
+    key = RUN_CHAR.get(char)
+    runs = ROOT / "runs"
+    if key:
+        cands = sorted(runs.glob(f"{key}-S-*.rl*-s*/policy/model.pt"), key=lambda q: q.stat().st_mtime)
+        if key == "fox" and (runs / "fox-S-bc1-s1.rl1-s0/policy/model.pt").exists():
+            cands.append(runs / "fox-S-bc1-s1.rl1-s0/policy/model.pt")   # SF7u100: beat fox-master
+        cands = [c for c in cands if (c.parent.parent / "run.json").exists()
+                 and json.loads((c.parent.parent / "run.json").read_text()).get("status") in ("done", "legacy")]
+        if cands:
+            return str(cands[-1].parent), "S RL"
+    return policy_dir(char), "default"
+
+
 COLORS = ["#4cc9f0", "#f72585", "#b5e48c", "#ffb703", "#9d4edd", "#ff6b35", "#06d6a0", "#e0e0e0"]
 
 
@@ -826,8 +851,52 @@ class App:
         self.jobs = Jobs(device)
         self.pattern_cache = {}
         self.iso, self.iso_from, self.iso_path = find_iso(self.cfg)
+        self.live, self.cpu, self.cpu_values = {}, None, {}   # live play: sessions, CPU models
         self.jobs.iso_path = self.iso_path if self.iso else None
         threading.Thread(target=self.lib.scan, args=(self.cfg["replay_dir"],), daemon=True).start()
+
+    def cpu_models(self):
+        """Models on the CPU for live play (the GPU may be training)."""
+        if self.cpu is None:
+            import torch
+            from branch import Brancher
+            torch.set_num_threads(4)
+            self.cpu = Brancher("cpu", iso=self.iso_path if self.iso else None)
+        return self.cpu
+
+    def cpu_value(self, char):
+        if char not in self.cpu_values:
+            from value import Value
+            vp = value_path(char)
+            self.cpu_values[char] = Value(str(vp), "cpu") if vp else None
+        return self.cpu_values[char]
+
+    def start_live(self, g, an, frame, speed=1.0):
+        from live import LiveSession
+        for old in list(self.live.values()):          # one at a time
+            old.stop()
+        self.live.clear()
+        me, opp = an["me"], an["opp"]
+        pt = next((p for p in an["points"] if p["frame"] <= frame < p["frame"] + p["wait"] + 30), None)
+        bot, kind = live_policy(opp["char"])
+        sid = uuid.uuid4().hex[:12]
+        sess = LiveSession(self.cpu_models(), g["path"], (me["port"], me["char"]), (opp["port"], opp["char"]),
+                           frame, stretch_of(pt["wait"] if pt else 40), bot, policy_dir(me["char"]),
+                           self.cpu_value(me["char"]), iso=self.iso_path if self.iso else None, lead=60, after=WATCH,
+                           out_dir=HOME / "live" / sid)
+        sess.id, sess.bot_kind, sess.game = sid, kind, g["id"]
+        self.live[sid] = sess
+
+        def work():
+            import torch
+            torch.set_num_threads(4)    # per thread: the bot's forward on 4 cores (more only adds contention)
+            try:
+                sess.prepare()
+                sess.run()
+            except Exception:
+                traceback.print_exc()
+        threading.Thread(target=work, daemon=True).start()
+        return sess
 
     def me(self):
         if self.cfg.get("me"):
@@ -894,6 +963,44 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b)
 
+    def send_bytes(self, b, ctype="application/octet-stream"):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(b)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(b)
+
+    def stream_live(self, sess):
+        """Server-sent events: "f" = one frame's Slippi events (base64), "s" = the session's status."""
+        import base64
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        q = sess.listen()
+        try:
+            while True:
+                try:
+                    kind, data = q.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": keep-alive\n\n")
+                    self.wfile.flush()
+                    continue
+                if kind == "f":
+                    msg = b"event: f\ndata: " + base64.b64encode(data) + b"\n\n"
+                else:
+                    msg = b"event: s\ndata: " + json.dumps(dict(data, id=sess.id, bot_kind=sess.bot_kind)).encode() + b"\n\n"
+                self.wfile.write(msg)
+                self.wfile.flush()
+                if kind == "s" and data.get("state") in ("done", "error", "stopped"):
+                    break
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            if q in sess.listeners:
+                sess.listeners.remove(q)
+
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
         return json.loads(self.rfile.read(n) or b"{}")
@@ -930,6 +1037,21 @@ class Handler(BaseHTTPRequestHandler):
                                        me=a.me(), codes=a.lib.codes(), games=len(a.lib.games), scanning=a.lib.scanning,
                                        gpu=torch.cuda.is_available() and a.jobs.device != "cpu",
                                        iso=dict(ok=a.iso is not None, source=a.iso_from, path=a.iso_path)))
+        m = re.fullmatch(r"/api/live/(\w+)(/prefix\.slp|/stream|/attempt\.slp)?", p)
+        if m:
+            sess = a.live.get(m.group(1))
+            if sess is None:
+                return self.send_json(dict(error="That attempt is over; start again."), 404)
+            what = m.group(2)
+            if what is None:
+                return self.send_json(dict(sess.status(), id=sess.id, bot_kind=sess.bot_kind))
+            if what == "/prefix.slp":
+                if sess.prefix is None:
+                    return self.send_json(dict(error="not ready"), 409)
+                return self.send_bytes(sess.prefix)
+            if what == "/attempt.slp":
+                return self.send_file((sess.result or {}).get("slp") or "/nonexistent", "application/octet-stream")
+            return self.stream_live(sess)
         if p == "/api/games":
             me = a.me()
             return self.send_json(dict(me=me, scanning=a.lib.scanning,
@@ -1033,6 +1155,32 @@ class Handler(BaseHTTPRequestHandler):
             frame = max(0, min(frame, an["last"] - 2))
             job = a.jobs.submit("branch", g, an, frame=frame, k=min(32, int(b.get("k", 16))), horizon=int(b.get("horizon", 0)))
             return self.send_json(job)
+        if p == "/api/live":
+            b = self.body()
+            g = a.lib.by_id.get(b.get("game"))
+            if not g:
+                return self.send_json(dict(error="unknown game"), 404)
+            why = support(g, a.me())
+            if why:
+                return self.send_json(dict(error=why), 400)
+            an = analyse(g, a.me())
+            frame = max(60 - 123, min(int(b["frame"]), an["last"] - 2))
+            sess = a.start_live(g, an, frame)
+            return self.send_json(dict(sess.status(), id=sess.id, bot_kind=sess.bot_kind))
+        m = re.fullmatch(r"/api/live/(\w+)/(pad|go|stop)", p)
+        if m:
+            sess = a.live.get(m.group(1))
+            if sess is None:
+                return self.send_json(dict(error="That attempt is over; start again."), 404)
+            b = self.body()
+            if m.group(2) == "pad":
+                from live import pad_from_json
+                sess.pad = pad_from_json(b)
+            elif m.group(2) == "go":
+                sess.go(float(b.get("speed", 1.0)))
+            else:
+                sess.stop()
+            return self.send_json(dict(ok=True))
         if p == "/api/test":
             b = self.body()
             g = a.lib.by_id.get(b.get("game"))
