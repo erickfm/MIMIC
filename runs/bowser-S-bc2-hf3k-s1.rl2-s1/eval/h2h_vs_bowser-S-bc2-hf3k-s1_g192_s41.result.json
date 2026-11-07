@@ -1,0 +1,21 @@
+{
+ "a": "bowser-S-bc2-hf3k-s1.rl2-s1",
+ "b": "bowser-S-bc2-hf3k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 108,
+ "b_wins": 83,
+ "draws": 1,
+ "a_win_rate": 0.5654,
+ "wilson95": [
+  0.4945,
+  0.6338
+ ],
+ "p_two_sided": 0.08219129693943304,
+ "stock_margin_a": 0.198,
+ "seconds": 481,
+ "commit": "9c1a8fb-dirty",
+ "finished": "2026-11-07T16:39:00+00:00"
+}
