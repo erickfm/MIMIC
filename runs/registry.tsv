@@ -29,7 +29,9 @@ fox-S-bc1-s1	bc	bc-S-v1		1	legacy
 fox-S-bc1-s1.rl1-s0	rl	rl-v1	fox-S-bc1-s1	0	legacy						vs fox-M-bc1-legacy: 95-97 (49.5%); vs fox-M-bc1-legacy: 97-95 (50.5%); vs fox-M-bc1-legacy: 74-118 (38.5%)
 fox-XS-bc1-s1	bc	bc-XS-v1		1	done	2026-10-27 11:41 PM	77.5	aurora	b25c988		vs fox-M-bc2-s1: 18-174 (9.4%); vs fox-M-bc2-s1: 12-180 (6.2%); vs fox-M-bc2-s1: 24-168 (12.5%); vs fox-S-bc1-s1: 45-147 (23.4%); vs fox-S-bc1-s1: 46-146 (24.0%); vs fox-S-bc1-s1: 35-157 (18.2%)
 fox-XS-bc1-s1.rl2-s1	rl	rl-v2	fox-XS-bc1-s1	1	done	2026-10-28 04:37 AM	78.2	aurora	b25c988-dirty		vs fox-S-bc1-s1: 72-120 (37.5%); vs fox-S-bc1-s1: 80-112 (41.7%); vs fox-S-bc1-s1: 65-127 (33.9%); vs fox-XS-bc1-s1: 143-49 (74.5%)
-ganondorf-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 02:38 AM		aurora	69d579d-dirty		
+ganondorf-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 02:38 AM	10.1	aurora	69d579d-dirty		
+ganondorf-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	ganondorf-S-bc2-hf3k-s1	1	done	2026-11-07 02:48 AM	104.7	aurora	e2163ab-dirty		vs ganondorf-S-bc2-hf3k-s1: 133-59 (69.3%)
+link-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 04:39 AM		aurora	e2163ab-dirty		
 luigi-S-bc2-hf4k-s1	bc	bc-S-v2		1	done	2026-11-06 04:40 PM	12.7	aurora	391e010-dirty		
 luigi-S-bc2-hf4k-s1.rl2-s1	rl	rl-v2	luigi-S-bc2-hf4k-s1	1	done	2026-11-06 04:53 PM	99.3	aurora	ce596bf-dirty		vs luigi-S-bc2-hf4k-s1: 146-46 (76.0%)
 marth-S-bc2-hf21k-s1	bc	bc-S-v2		1	done	2026-11-06 02:22 AM	49.6	aurora	62ddfde-dirty		
