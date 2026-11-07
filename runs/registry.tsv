@@ -25,11 +25,14 @@ fox-S-bc1-s1	bc	bc-S-v1		1	legacy
 fox-S-bc1-s1.rl1-s0	rl	rl-v1	fox-S-bc1-s1	0	legacy						vs fox-M-bc1-legacy: 95-97 (49.5%); vs fox-M-bc1-legacy: 97-95 (50.5%); vs fox-M-bc1-legacy: 74-118 (38.5%)
 fox-XS-bc1-s1	bc	bc-XS-v1		1	done	2026-10-27 11:41 PM	77.5	aurora	b25c988		vs fox-M-bc2-s1: 18-174 (9.4%); vs fox-M-bc2-s1: 12-180 (6.2%); vs fox-M-bc2-s1: 24-168 (12.5%); vs fox-S-bc1-s1: 45-147 (23.4%); vs fox-S-bc1-s1: 46-146 (24.0%); vs fox-S-bc1-s1: 35-157 (18.2%)
 fox-XS-bc1-s1.rl2-s1	rl	rl-v2	fox-XS-bc1-s1	1	done	2026-10-28 04:37 AM	78.2	aurora	b25c988-dirty		vs fox-S-bc1-s1: 72-120 (37.5%); vs fox-S-bc1-s1: 80-112 (41.7%); vs fox-S-bc1-s1: 65-127 (33.9%); vs fox-XS-bc1-s1: 143-49 (74.5%)
+luigi-S-bc2-hf4k-s1	bc	bc-S-v2		1	running	2026-11-06 04:40 PM		aurora	391e010-dirty		
 marth-S-bc2-hf21k-s1	bc	bc-S-v2		1	done	2026-11-06 02:22 AM	49.6	aurora	62ddfde-dirty		
 marth-S-bc2-hf21k-s1.rl2-s1	rl	rl-v2	marth-S-bc2-hf21k-s1	1	done	2026-11-06 03:12 AM	100.6	aurora	8b84a04-dirty		vs marth-S-bc2-hf21k-s1: 169-23 (88.0%)
 peach-S-bc2-hf11k-s1	bc	bc-S-v2		1	done	2026-11-06 12:08 PM	28.7	aurora	468ab89-dirty		
 peach-S-bc2-hf11k-s1.rl2-s1	rl	rl-v2	peach-S-bc2-hf11k-s1	1	done	2026-11-06 12:37 PM	102.7	aurora	ae7bd35-dirty		vs peach-S-bc2-hf11k-s1: 129-63 (67.2%)
 puff-S-bc2-hf14k-s1	bc	bc-S-v2		1	done	2026-11-06 07:28 AM	34.8	aurora	d15224a-dirty		
 puff-S-bc2-hf14k-s1.rl2-s1	rl	rl-v2	puff-S-bc2-hf14k-s1	1	done	2026-11-06 08:03 AM	99.6	aurora	2f71728-dirty		vs puff-S-bc2-hf14k-s1: 164-28 (85.4%)
+samus-S-bc2-hf9k-s1	bc	bc-S-v2		1	done	2026-11-06 02:27 PM	24.8	aurora	ae7bd35-dirty		
+samus-S-bc2-hf9k-s1.rl2-s1	rl	rl-v2	samus-S-bc2-hf9k-s1	1	done	2026-11-06 02:51 PM	100.7	aurora	391e010-dirty		vs samus-S-bc2-hf9k-s1: 135-57 (70.3%)
 sheik-S-bc2-hf17k-s1	bc	bc-S-v2		1	done	2026-11-06 04:59 AM	41.6	aurora	8b84a04-dirty		
 sheik-S-bc2-hf17k-s1.rl2-s1	rl	rl-v2	sheik-S-bc2-hf17k-s1	1	done	2026-11-06 05:41 AM	100.2	aurora	d15224a-dirty		vs sheik-S-bc2-hf17k-s1: 155-37 (80.7%)
