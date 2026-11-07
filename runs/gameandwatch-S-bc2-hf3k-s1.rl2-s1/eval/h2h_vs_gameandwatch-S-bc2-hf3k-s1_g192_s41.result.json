@@ -1,0 +1,21 @@
+{
+ "a": "gameandwatch-S-bc2-hf3k-s1.rl2-s1",
+ "b": "gameandwatch-S-bc2-hf3k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 142,
+ "b_wins": 49,
+ "draws": 1,
+ "a_win_rate": 0.7435,
+ "wilson95": [
+  0.6771,
+  0.8002
+ ],
+ "p_two_sided": 1.085567748493916e-11,
+ "stock_margin_a": 0.943,
+ "seconds": 352,
+ "commit": "c51a8f1-dirty",
+ "finished": "2026-11-07T18:36:35+00:00"
+}
