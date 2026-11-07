@@ -3,7 +3,8 @@ cptfalcon-S-bc2-hf12k-s1	bc	bc-S-v2		1	done	2026-11-06 09:51 AM	30.9	aurora	2f71
 cptfalcon-S-bc2-hf12k-s1.rl2-s1	rl	rl-v2	cptfalcon-S-bc2-hf12k-s1	1	done	2026-11-06 10:22 AM	101.0	aurora	468ab89-dirty		vs cptfalcon-S-bc2-hf12k-s1: 160-32 (83.3%)
 dk-S-bc2-hf4k-s1	bc	bc-S-v2		1	done	2026-11-06 08:37 PM	12.4	aurora	08f5bcd-dirty		
 dk-S-bc2-hf4k-s1.rl2-s1	rl	rl-v2	dk-S-bc2-hf4k-s1	1	done	2026-11-06 08:50 PM	99.6	aurora	b89a5c8-dirty		vs dk-S-bc2-hf4k-s1: 153-39 (79.7%)
-doc-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-06 10:36 PM		aurora	25b70c9-dirty		
+doc-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-06 10:36 PM	10.2	aurora	25b70c9-dirty		
+doc-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	doc-S-bc2-hf3k-s1	1	done	2026-11-06 10:46 PM	104.0	aurora	79b160e-dirty		vs doc-S-bc2-hf3k-s1: 160-32 (83.3%)
 falco-M-bc3-hf28k-s1	bc	bc-M-v3		1	done	2026-11-05 05:13 PM	136.5	aurora	f6030d7		
 falco-M-bc3-hf28k-s1.rl2-s1	rl	rl-v2	falco-M-bc3-hf28k-s1	1	done	2026-11-05 07:30 PM	223.1	aurora	2a4dfec-dirty		vs falco-M-bc3-hf28k-s1: 181-11 (94.3%)
 falco-S-bc2-hf28k-s1	bc	bc-S-v2		1	done	2026-11-05 11:24 PM	65.1	aurora	5d241f5-dirty		
@@ -42,3 +43,4 @@ samus-S-bc2-hf9k-s1	bc	bc-S-v2		1	done	2026-11-06 02:27 PM	24.8	aurora	ae7bd35-d
 samus-S-bc2-hf9k-s1.rl2-s1	rl	rl-v2	samus-S-bc2-hf9k-s1	1	done	2026-11-06 02:51 PM	100.7	aurora	391e010-dirty		vs samus-S-bc2-hf9k-s1: 135-57 (70.3%)
 sheik-S-bc2-hf17k-s1	bc	bc-S-v2		1	done	2026-11-06 04:59 AM	41.6	aurora	8b84a04-dirty		
 sheik-S-bc2-hf17k-s1.rl2-s1	rl	rl-v2	sheik-S-bc2-hf17k-s1	1	done	2026-11-06 05:41 AM	100.2	aurora	d15224a-dirty		vs sheik-S-bc2-hf17k-s1: 155-37 (80.7%)
+yoshi-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 12:37 AM		aurora	79b160e-dirty		

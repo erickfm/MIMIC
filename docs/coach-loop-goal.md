@@ -35,6 +35,7 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 | luigi-S-bc2-hf4k-s1.rl2-s1 | 146–46 (76.0%) | +0.92 | Fri 11/6 6:39 PM |
 | pikachu-S-bc2-hf4k-s1.rl2-s1 | 137–55 (71.4%) | +1.03 | Fri 11/6 8:37 PM |
 | dk-S-bc2-hf4k-s1.rl2-s1 | 153–39 (79.7%) | +1.22 | Fri 11/6 10:36 PM |
+| doc-S-bc2-hf3k-s1.rl2-s1 | 160–32 (83.3%) | +1.38 | Sat 11/7 12:37 AM |
 
 The BC parent is also the opponent RL trained against, so this measures the gain against that one
 opponent.
