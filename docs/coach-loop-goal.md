@@ -38,6 +38,7 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 | doc-S-bc2-hf3k-s1.rl2-s1 | 160–32 (83.3%) | +1.38 | Sat 11/7 12:37 AM |
 | yoshi-S-bc2-hf3k-s1.rl2-s1 | 159–33 (82.8%) | +1.23 | Sat 11/7 2:38 AM |
 | ganondorf-S-bc2-hf3k-s1.rl2-s1 | 133–59 (69.3%) | +0.85 | Sat 11/7 4:39 AM |
+| link-S-bc2-hf3k-s1.rl2-s1 | 132–60 (68.8%) | +0.80 | Sat 11/7 6:39 AM |
 
 The BC parent is also the opponent RL trained against, so this measures the gain against that one
 opponent.

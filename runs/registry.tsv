@@ -1,4 +1,5 @@
 name	stage	recipe	parent	seed	status	started_pt	wall_min	host	commit	val_fixed	h2h
+bowser-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 06:39 AM		aurora	84f0c14-dirty		
 cptfalcon-S-bc2-hf12k-s1	bc	bc-S-v2		1	done	2026-11-06 09:51 AM	30.9	aurora	2f71728-dirty		
 cptfalcon-S-bc2-hf12k-s1.rl2-s1	rl	rl-v2	cptfalcon-S-bc2-hf12k-s1	1	done	2026-11-06 10:22 AM	101.0	aurora	468ab89-dirty		vs cptfalcon-S-bc2-hf12k-s1: 160-32 (83.3%)
 dk-S-bc2-hf4k-s1	bc	bc-S-v2		1	done	2026-11-06 08:37 PM	12.4	aurora	08f5bcd-dirty		
@@ -31,7 +32,8 @@ fox-XS-bc1-s1	bc	bc-XS-v1		1	done	2026-10-27 11:41 PM	77.5	aurora	b25c988		vs fo
 fox-XS-bc1-s1.rl2-s1	rl	rl-v2	fox-XS-bc1-s1	1	done	2026-10-28 04:37 AM	78.2	aurora	b25c988-dirty		vs fox-S-bc1-s1: 72-120 (37.5%); vs fox-S-bc1-s1: 80-112 (41.7%); vs fox-S-bc1-s1: 65-127 (33.9%); vs fox-XS-bc1-s1: 143-49 (74.5%)
 ganondorf-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 02:38 AM	10.1	aurora	69d579d-dirty		
 ganondorf-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	ganondorf-S-bc2-hf3k-s1	1	done	2026-11-07 02:48 AM	104.7	aurora	e2163ab-dirty		vs ganondorf-S-bc2-hf3k-s1: 133-59 (69.3%)
-link-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 04:39 AM		aurora	e2163ab-dirty		
+link-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 04:39 AM	8.3	aurora	e2163ab-dirty		
+link-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	link-S-bc2-hf3k-s1	1	done	2026-11-07 04:48 AM	104.2	aurora	84f0c14-dirty		vs link-S-bc2-hf3k-s1: 132-60 (68.8%)
 luigi-S-bc2-hf4k-s1	bc	bc-S-v2		1	done	2026-11-06 04:40 PM	12.7	aurora	391e010-dirty		
 luigi-S-bc2-hf4k-s1.rl2-s1	rl	rl-v2	luigi-S-bc2-hf4k-s1	1	done	2026-11-06 04:53 PM	99.3	aurora	ce596bf-dirty		vs luigi-S-bc2-hf4k-s1: 146-46 (76.0%)
 marth-S-bc2-hf21k-s1	bc	bc-S-v2		1	done	2026-11-06 02:22 AM	49.6	aurora	62ddfde-dirty		
