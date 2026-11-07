@@ -43,13 +43,15 @@ mario-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 10:36 AM	7.5	aurora	c51a8f1-di
 mario-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	mario-S-bc2-hf3k-s1	1	done	2026-11-07 10:44 AM	103.7	aurora	573e047-dirty		vs mario-S-bc2-hf3k-s1: 133-59 (69.3%)
 marth-S-bc2-hf21k-s1	bc	bc-S-v2		1	done	2026-11-06 02:22 AM	49.6	aurora	62ddfde-dirty		
 marth-S-bc2-hf21k-s1.rl2-s1	rl	rl-v2	marth-S-bc2-hf21k-s1	1	done	2026-11-06 03:12 AM	100.6	aurora	8b84a04-dirty		vs marth-S-bc2-hf21k-s1: 169-23 (88.0%)
+ness-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 02:32 PM		aurora	8c6d328-dirty		
 peach-S-bc2-hf11k-s1	bc	bc-S-v2		1	done	2026-11-06 12:08 PM	28.7	aurora	468ab89-dirty		
 peach-S-bc2-hf11k-s1.rl2-s1	rl	rl-v2	peach-S-bc2-hf11k-s1	1	done	2026-11-06 12:37 PM	102.7	aurora	ae7bd35-dirty		vs peach-S-bc2-hf11k-s1: 129-63 (67.2%)
 pikachu-S-bc2-hf4k-s1	bc	bc-S-v2		1	done	2026-11-06 06:39 PM	12.7	aurora	ce596bf-dirty		
 pikachu-S-bc2-hf4k-s1.rl2-s1	rl	rl-v2	pikachu-S-bc2-hf4k-s1	1	done	2026-11-06 06:52 PM	99.5	aurora	08f5bcd-dirty		vs pikachu-S-bc2-hf4k-s1: 137-55 (71.4%)
 puff-S-bc2-hf14k-s1	bc	bc-S-v2		1	done	2026-11-06 07:28 AM	34.8	aurora	d15224a-dirty		
 puff-S-bc2-hf14k-s1.rl2-s1	rl	rl-v2	puff-S-bc2-hf14k-s1	1	done	2026-11-06 08:03 AM	99.6	aurora	2f71728-dirty		vs puff-S-bc2-hf14k-s1: 164-28 (85.4%)
-roy-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 12:34 PM		aurora	573e047-dirty		
+roy-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 12:34 PM	7.6	aurora	573e047-dirty		
+roy-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	roy-S-bc2-hf3k-s1	1	done	2026-11-07 12:42 PM	104.6	aurora	8c6d328-dirty		vs roy-S-bc2-hf3k-s1: 147-45 (76.6%)
 samus-S-bc2-hf9k-s1	bc	bc-S-v2		1	done	2026-11-06 02:27 PM	24.8	aurora	ae7bd35-dirty		
 samus-S-bc2-hf9k-s1.rl2-s1	rl	rl-v2	samus-S-bc2-hf9k-s1	1	done	2026-11-06 02:51 PM	100.7	aurora	391e010-dirty		vs samus-S-bc2-hf9k-s1: 135-57 (70.3%)
 sheik-S-bc2-hf17k-s1	bc	bc-S-v2		1	done	2026-11-06 04:59 AM	41.6	aurora	8b84a04-dirty		
