@@ -1,0 +1,21 @@
+{
+ "a": "pikachu-S-bc2-hf4k-s1.rl2-s1",
+ "b": "pikachu-S-bc2-hf4k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 137,
+ "b_wins": 55,
+ "draws": 0,
+ "a_win_rate": 0.7135,
+ "wilson95": [
+  0.6459,
+  0.7728
+ ],
+ "p_two_sided": 2.924256039228829e-09,
+ "stock_margin_a": 1.026,
+ "seconds": 354,
+ "commit": "08f5bcd-dirty",
+ "finished": "2026-11-07T04:37:41+00:00"
+}
