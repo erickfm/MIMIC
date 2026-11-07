@@ -1,0 +1,21 @@
+{
+ "a": "luigi-S-bc2-hf4k-s1.rl2-s1",
+ "b": "luigi-S-bc2-hf4k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 146,
+ "b_wins": 46,
+ "draws": 0,
+ "a_win_rate": 0.7604,
+ "wilson95": [
+  0.6953,
+  0.8153
+ ],
+ "p_two_sided": 2.5318659177733565e-13,
+ "stock_margin_a": 0.917,
+ "seconds": 416,
+ "commit": "ce596bf-dirty",
+ "finished": "2026-11-07T02:39:36+00:00"
+}

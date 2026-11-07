@@ -32,6 +32,7 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 | cptfalcon-S-bc2-hf12k-s1.rl2-s1 | 160–32 (83.3%) | +1.48 | Fri 11/6 12:08 PM |
 | peach-S-bc2-hf11k-s1.rl2-s1 | 129–63 (67.2%) | +0.62 | Fri 11/6 2:27 PM |
 | samus-S-bc2-hf9k-s1.rl2-s1 | 135–57 (70.3%) | +0.87 | Fri 11/6 4:40 PM |
+| luigi-S-bc2-hf4k-s1.rl2-s1 | 146–46 (76.0%) | +0.92 | Fri 11/6 6:39 PM |
 
 The BC parent is also the opponent RL trained against, so this measures the gain against that one
 opponent.
