@@ -51,6 +51,7 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 | ness-S-bc2-hf3k-s1.rl2-s1 | 147–45 (76.6%) | +0.96 | Sat 11/7 4:34 PM |
 | ylink-S-bc2-hf3k-s1.rl2-s1 | 153–39 (79.7%) | +1.17 | Sat 11/7 6:34 PM |
 | mewtwo-S-bc2-hf3k-s1.rl2-s1 | 120–72 (62.5%) | +0.51 | Sat 11/7 8:34 PM |
+| fox-S-bc2-hf51k-s1.rl2-s1 | 150–42 (78.1%) | +1.22 | Sun 11/8 12:21 AM |
 
 The BC parent is also the opponent RL trained against, so this measures the gain against that one
 opponent.
