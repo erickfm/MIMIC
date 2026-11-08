@@ -106,6 +106,25 @@ def policy_dir(char):
 _FETCHED = {}
 
 
+# models of specific players ({connect code: {char: policy dir}}, tools/coach/player_models.json): an
+# opponent with one is played by it instead of the generic model when the coach tries alternatives.
+# Only models that predict that player's real inputs clearly better than the generic one go in
+# (tools/coach/player_model.py eval on held-out games).
+_PLAYER_FILE = ROOT / "tools" / "coach" / "player_models.json"
+PLAYER_MODELS = json.loads(_PLAYER_FILE.read_text()) if _PLAYER_FILE.is_file() else {}
+
+
+def own_model(player):
+    """That player's own model for the character they're playing, or None."""
+    d = PLAYER_MODELS.get(player.get("code") or "", {}).get(player["char"])
+    return str(ROOT / d) if d and (ROOT / d / "model.pt").is_file() else None
+
+
+def opp_policy(opp):
+    """The policy that plays the opponent: their own model if there is one for this character."""
+    return own_model(opp) or policy_dir(opp["char"])
+
+
 # run-name character keys (tools/run.py CHARS), for finding a character's RL runs
 RUN_CHAR = {"FOX": "fox", "FALCO": "falco", "MARTH": "marth", "SHEIK": "sheik", "ZELDA": "zelda",
             "CPTFALCON": "cptfalcon", "JIGGLYPUFF": "puff", "PEACH": "peach", "LUIGI": "luigi",
@@ -340,6 +359,7 @@ def summary(game, me_code):
     return dict(id=game["id"], start=game.get("start"), frames=game.get("frames"), stage=game["stage"],
                 me=me, opp=opp, result=res, players=pl, unsupported=support(game, me_code),
                 reviewable=bool(me and value_path(me["char"])),
+                opp_own_model=bool(opp and own_model(opp)),
                 file=os.path.basename(game["path"]))
 
 
@@ -539,7 +559,8 @@ class Jobs:
         char = an["me"]["char"]
         vp = value_path(char)
         return dict(me=an["me"].get("code"), value=str(vp), value_mtime=vp.stat().st_mtime if vp else None,
-                    policy=str(Path(policy_dir(char)).resolve()))
+                    policy=str(Path(policy_dir(char)).resolve()),
+                    opp_policy=str(Path(opp_policy(an["opp"])).resolve()))
 
     def have_review(self, game, an):
         if game["id"] in self.reviews:
@@ -632,7 +653,7 @@ class Jobs:
         me, opp = an["me"], an["opp"]
         out_dir = HOME / "branches" / jid
         out_dir.mkdir(parents=True, exist_ok=True)
-        pol = {me["port"]: policy_dir(me["char"]), opp["port"]: policy_dir(opp["char"])}
+        pol = {me["port"]: policy_dir(me["char"]), opp["port"]: opp_policy(opp)}
         V = self.value(me["char"])
         pt = next((p for p in an["points"] if p["frame"] <= frame < p["frame"] + p["wait"] + 30), None)
         s_ = stretch_of(pt["wait"] if pt else 40)
@@ -695,7 +716,7 @@ def _lab(self, jid, job, game, an):
         pads_slp = prev["options"][int(job["from_try"])]["path"]
         F = max(at + 1, int(job["frame"]))
     out_dir = HOME / "branches" / jid
-    pol = {me["port"]: policy_dir(me["char"]), opp["port"]: policy_dir(opp["char"])}
+    pol = {me["port"]: policy_dir(me["char"]), opp["port"]: opp_policy(opp)}
     states = {int(p): st for p, st in (job.get("states") or {}).items()}
     r = self.brancher.run(game["path"], F, job["k"], job["horizon"], pol, out_dir=out_dir,
                           progress=lambda f: job.__setitem__("progress", round(f, 3)),
@@ -755,7 +776,7 @@ def _earlier(self, jid, job, game, an):
         st = lambda v: float(np.clip(-np.diff(v[i:j + 1]), 0, None).sum())
         return d(a["opct"]) - d(a["pct"]) + 40 * (st(a["ostk"]) - st(a["stk"]))
     v_T_real = _v_near(rv["eval_full"], T)
-    pol = {mp: policy_dir(me["char"]), op: policy_dir(opp["char"])}
+    pol = {mp: policy_dir(me["char"]), op: opp_policy(opp)}
     rows = []
     for n, p in enumerate(picks):
         E = int(p["frame"])
@@ -839,7 +860,7 @@ def _test(self, jid, job, game, an):
     n = min(60, starts[0] + 10) if starts else s_
     out_dir = HOME / "branches" / jid
     out_dir.mkdir(parents=True, exist_ok=True)
-    pol = {mp: policy_dir(me["char"]), op: policy_dir(opp["char"])}
+    pol = {mp: policy_dir(me["char"]), op: opp_policy(opp)}
     horizon = s_ + WATCH
     r = self.brancher.run(game["path"], F, job["k"], horizon, pol, out_dir=out_dir,
                           progress=lambda f: job.__setitem__("progress", round(f, 3)),

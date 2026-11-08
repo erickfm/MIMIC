@@ -425,7 +425,7 @@ async function game(id, st, startAt = null) {
       <div class="summary">What the master does from ${fmtTimeFine(b.frame)}, most likely first (${k} tries). ${valued()
         ? `Numbers: expected damage dealt − taken over the next 5 s after the choice (a stock = 40). Gaps under 8 are luck.`
         : `The number is damage dealt − taken over the try (a stock counts 40).`}${b.exact ? "" : " <span style='color:var(--warn)'>The simulator didn't match the replay exactly here, so treat these as approximate.</span>"}</div>
-      <div class="faint" style="font-size:12.5px;line-height:1.5"><b style="color:#4cc9f0">Blue ghost</b>: the master playing your ${esc(s.me.char_name)}. <b style="color:#f25f5c">Red ghost</b>: your opponent, played by a master model so they react. Solid: your real game.</div>
+      <div class="faint" style="font-size:12.5px;line-height:1.5"><b style="color:#4cc9f0">Blue ghost</b>: the master playing your ${esc(s.me.char_name)}. <b style="color:#f25f5c">Red ghost</b>: your opponent, ${s.opp_own_model ? "played by a model of their own play, so they react the way they do" : "played by a master model so they react"}. Solid: your real game.</div>
       <div id="tests"></div>
       <div class="opt you ${sel === -1 && testRow == null && backRow == null ? "focus" : ""}" data-you="1"><div class="dot" style="background:transparent;border:2px solid #e8ebf2"></div>
         <div><div class="lbl">You: ${esc(you.label)}</div><div class="res">what you actually did · <button class="btn tiny testbtn" data-testyou="1" ${testing ? "disabled" : ""} title="Play what you did 32 times against fresh opponents">Test ×32</button></div></div><div>${`<span class="net zero">${sgn(yv)}</span>`}</div></div>

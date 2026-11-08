@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--s", type=int, default=60, help="frames before V takes over")
     ap.add_argument("--out", default=None)
     ap.add_argument("--device", default="cuda", help="cuda or cpu (smoke tests)")
+    ap.add_argument("--spots-per-game", type=int, default=1,
+                    help="random frames per held-out game (more spots when there are few held-out games)")
     ap.add_argument("--all-held-out", action="store_true",
                     help="every game in --replays is held out (V was trained on other replays, e.g. ranked "
                          "archives the sim can't replay exactly): don't filter by value.is_val, and take "
@@ -70,6 +72,8 @@ def main():
                 games.append((p, port, n, pl))
     rng.shuffle(games)
     print(f"{len(games)} held-out {a.char} perspectives; using {min(a.n, len(games))}", flush=True)
+    if a.spots_per_game > 1:                            # each copy gets its own random frame below
+        games = [g for g in games for _ in range(a.spots_per_game)]
     if a.all_held_out and games and len(games) < a.n:  # several spots per game (a new random frame each)
         games = (games * (a.n // len(games) + 1))[:a.n]
     br = Brancher(a.device)

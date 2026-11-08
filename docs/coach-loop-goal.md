@@ -103,6 +103,11 @@ Zelda 0.32 (4 spots), and **Fox 0.08 (21 spots)**: to re-check with more spots o
    `python3 tools/coach/player_model.py finetune --parent falco-S-bc2-hf28k-s1 --data data/stuckey/falco_train
    --name stuckey-falco-S-ft1 --steps 2000` and `player_model.py eval --data data/stuckey/falco_test
    --policies <S BC> <S RL> runs/stuckey-falco-S-ft1/policy` (S, like everything else in the coach). Both paths were smoke-tested on the CPU.
+   **Done Sun 11/8 5:13 AM** (fine-tune 5 min). On the 46 held-out games: Stuckey's model loss 0.603, main-stick
+   F1 61.1%, buttons 93.3%; generic Falco S BC 0.744 / 58.6% / 91.5%; S RL 0.778 / 58.1% / 90.6%. Clearly better,
+   so the coach uses it for the opponent when it's STUC#911 on Falco (`tools/coach/player_models.json`;
+   `serve.opp_policy`; the branch view says so). The owner's ~/Slippi has 437 games vs STUC#911's Falco; the
+   training games are among them, so tries on those games use a model that saw them.
 3. `python3 tools/coach/upload_coach.py` lists what would go to `erickfm/MIMIC/coach/` (each character's
    policy + value model, only pairs that belong together); **ask the owner**, then `--push`. The coach
    fetches the value models at start and a policy the first time it needs it (tested: a value model is
