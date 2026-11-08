@@ -88,7 +88,8 @@ moment themselves against the bot, live, from the exact game state.
 value_check (8 tries per spot, ~/Slippi held-out games; few spots for characters the owner rarely faces):
 within-spot r (Q vs the try's real 5-s outcome, the number the coach's ranking relies on) is 0.33–0.51 for
 most characters (old BC-based Falco 0.39, Fox 0.38), lower for Puff 0.23, Mewtwo 0.22, Yoshi 0.29,
-Zelda 0.32 (4 spots), and **Fox 0.08 (21 spots)**: to re-check with more spots once the GPU is free.
+Zelda 0.32 (4 spots), and Fox 0.08 (21 spots). Re-checked with 4 spots per held-out game
+(`--spots-per-game 4`): **Fox 0.43 over 90 spots, Falco 0.39 over 131**, so Fox's 0.08 was small-sample noise.
 
 ### Ready to run when the GPU is free (prepared 2026-11-05)
 
