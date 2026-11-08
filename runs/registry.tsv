@@ -29,6 +29,7 @@ fox-S-bc1-28k-s1	bc	bc-S-v1		1	done	2026-10-28 03:08 AM	67.4	aurora	b25c988-dirt
 fox-S-bc1-mlr01-s1	bc	bc-S-v1		1	done	2026-10-28 08:13 PM	191.4	aurora	b12a159		vs fox-S-bc1-s1: 94-98 (49.0%); vs fox-S-bc1-s1: 99-93 (51.6%); vs fox-S-bc1-s1: 108-84 (56.2%)
 fox-S-bc1-s1	bc	bc-S-v1		1	legacy						
 fox-S-bc1-s1.rl1-s0	rl	rl-v1	fox-S-bc1-s1	0	legacy						vs fox-M-bc1-legacy: 95-97 (49.5%); vs fox-M-bc1-legacy: 97-95 (50.5%); vs fox-M-bc1-legacy: 74-118 (38.5%)
+fox-S-bc2-hf51k-s1	bc	bc-S-v2		1	running	2026-11-07 08:34 PM		aurora	da9a3d6-dirty		
 fox-XS-bc1-s1	bc	bc-XS-v1		1	done	2026-10-27 11:41 PM	77.5	aurora	b25c988		vs fox-M-bc2-s1: 18-174 (9.4%); vs fox-M-bc2-s1: 12-180 (6.2%); vs fox-M-bc2-s1: 24-168 (12.5%); vs fox-S-bc1-s1: 45-147 (23.4%); vs fox-S-bc1-s1: 46-146 (24.0%); vs fox-S-bc1-s1: 35-157 (18.2%)
 fox-XS-bc1-s1.rl2-s1	rl	rl-v2	fox-XS-bc1-s1	1	done	2026-10-28 04:37 AM	78.2	aurora	b25c988-dirty		vs fox-S-bc1-s1: 72-120 (37.5%); vs fox-S-bc1-s1: 80-112 (41.7%); vs fox-S-bc1-s1: 65-127 (33.9%); vs fox-XS-bc1-s1: 143-49 (74.5%)
 gameandwatch-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 08:39 AM	7.7	aurora	9c1a8fb-dirty		
@@ -43,7 +44,8 @@ mario-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 10:36 AM	7.5	aurora	c51a8f1-di
 mario-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	mario-S-bc2-hf3k-s1	1	done	2026-11-07 10:44 AM	103.7	aurora	573e047-dirty		vs mario-S-bc2-hf3k-s1: 133-59 (69.3%)
 marth-S-bc2-hf21k-s1	bc	bc-S-v2		1	done	2026-11-06 02:22 AM	49.6	aurora	62ddfde-dirty		
 marth-S-bc2-hf21k-s1.rl2-s1	rl	rl-v2	marth-S-bc2-hf21k-s1	1	done	2026-11-06 03:12 AM	100.6	aurora	8b84a04-dirty		vs marth-S-bc2-hf21k-s1: 169-23 (88.0%)
-mewtwo-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 06:34 PM		aurora	f35c289-dirty		
+mewtwo-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 06:34 PM	7.5	aurora	f35c289-dirty		
+mewtwo-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	mewtwo-S-bc2-hf3k-s1	1	done	2026-11-07 06:42 PM	103.5	aurora	9c5aab7-dirty		vs mewtwo-S-bc2-hf3k-s1: 120-72 (62.5%)
 ness-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 02:32 PM	8.0	aurora	8c6d328-dirty		
 ness-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	ness-S-bc2-hf3k-s1	1	done	2026-11-07 02:40 PM	103.5	aurora	075c8f0-dirty		vs ness-S-bc2-hf3k-s1: 147-45 (76.6%)
 peach-S-bc2-hf11k-s1	bc	bc-S-v2		1	done	2026-11-06 12:08 PM	28.7	aurora	468ab89-dirty		
