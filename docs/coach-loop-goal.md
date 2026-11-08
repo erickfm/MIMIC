@@ -43,6 +43,7 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 | gameandwatch-S-bc2-hf3k-s1.rl2-s1 | 142–49, 1 draw (74.3%) | +0.94 | Sat 11/7 10:36 AM |
 | mario-S-bc2-hf3k-s1.rl2-s1 | 133–59 (69.3%) | +0.81 | Sat 11/7 12:34 PM |
 | roy-S-bc2-hf3k-s1.rl2-s1 | 147–45 (76.6%) | +1.08 | Sat 11/7 2:32 PM |
+| ness-S-bc2-hf3k-s1.rl2-s1 | 147–45 (76.6%) | +0.96 | Sat 11/7 4:34 PM |
 
 The BC parent is also the opponent RL trained against, so this measures the gain against that one
 opponent.
