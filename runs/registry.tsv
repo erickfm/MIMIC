@@ -43,6 +43,7 @@ mario-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 10:36 AM	7.5	aurora	c51a8f1-di
 mario-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	mario-S-bc2-hf3k-s1	1	done	2026-11-07 10:44 AM	103.7	aurora	573e047-dirty		vs mario-S-bc2-hf3k-s1: 133-59 (69.3%)
 marth-S-bc2-hf21k-s1	bc	bc-S-v2		1	done	2026-11-06 02:22 AM	49.6	aurora	62ddfde-dirty		
 marth-S-bc2-hf21k-s1.rl2-s1	rl	rl-v2	marth-S-bc2-hf21k-s1	1	done	2026-11-06 03:12 AM	100.6	aurora	8b84a04-dirty		vs marth-S-bc2-hf21k-s1: 169-23 (88.0%)
+mewtwo-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 06:34 PM		aurora	f35c289-dirty		
 ness-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 02:32 PM	8.0	aurora	8c6d328-dirty		
 ness-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	ness-S-bc2-hf3k-s1	1	done	2026-11-07 02:40 PM	103.5	aurora	075c8f0-dirty		vs ness-S-bc2-hf3k-s1: 147-45 (76.6%)
 peach-S-bc2-hf11k-s1	bc	bc-S-v2		1	done	2026-11-06 12:08 PM	28.7	aurora	468ab89-dirty		
@@ -57,6 +58,7 @@ samus-S-bc2-hf9k-s1	bc	bc-S-v2		1	done	2026-11-06 02:27 PM	24.8	aurora	ae7bd35-d
 samus-S-bc2-hf9k-s1.rl2-s1	rl	rl-v2	samus-S-bc2-hf9k-s1	1	done	2026-11-06 02:51 PM	100.7	aurora	391e010-dirty		vs samus-S-bc2-hf9k-s1: 135-57 (70.3%)
 sheik-S-bc2-hf17k-s1	bc	bc-S-v2		1	done	2026-11-06 04:59 AM	41.6	aurora	8b84a04-dirty		
 sheik-S-bc2-hf17k-s1.rl2-s1	rl	rl-v2	sheik-S-bc2-hf17k-s1	1	done	2026-11-06 05:41 AM	100.2	aurora	d15224a-dirty		vs sheik-S-bc2-hf17k-s1: 155-37 (80.7%)
-ylink-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-07 04:34 PM		aurora	075c8f0-dirty		
+ylink-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 04:34 PM	7.4	aurora	075c8f0-dirty		
+ylink-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	ylink-S-bc2-hf3k-s1	1	done	2026-11-07 04:41 PM	104.1	aurora	f35c289-dirty		vs ylink-S-bc2-hf3k-s1: 153-39 (79.7%)
 yoshi-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 12:37 AM	10.1	aurora	79b160e-dirty		
 yoshi-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	yoshi-S-bc2-hf3k-s1	1	done	2026-11-07 12:47 AM	104.0	aurora	69d579d-dirty		vs yoshi-S-bc2-hf3k-s1: 159-33 (82.8%)
