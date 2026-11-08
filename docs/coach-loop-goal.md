@@ -19,6 +19,11 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
   jobs and retries failed ones only if you reset their entry). Don't change recipes or step budgets.
 - If the queue process died, restart it the same way. Never run a second copy.
 - Record each finished character's h2h result (RL vs its BC parent) in the report.
+- Fox S and Zelda S were appended after Mewtwo (owner, 2026-11-06); the running process holds the old
+  job list, so a watcher restarts the queue once when it exits. Fox's data dir `data/fox_hf/fox` is a
+  symlink to `data/fox_full_hf/fox` (the 647-shard fox-hf-647 set, same manifest SHA-1; downloading
+  all of HF fox/ would be ~630 GB); the queue's cleanup removes only the link. Zelda's shards were
+  built locally (no zelda/ on HF): 840 train / 94 val games, 3,000 steps.
 
 ### Results (RL vs its BC parent, 192 games, sim, bf16, seed 41)
 
