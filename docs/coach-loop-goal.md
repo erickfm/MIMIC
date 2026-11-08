@@ -112,8 +112,10 @@ Zelda 0.32 (4 spots), and Fox 0.08 (21 spots). Re-checked with 4 spots per held-
 3. `python3 tools/coach/upload_coach.py` lists what would go to `erickfm/MIMIC/coach/` (each character's
    policy + value model, only pairs that belong together); **ask the owner**, then `--push`. The coach
    fetches the value models at start and a policy the first time it needs it (tested: a value model is
-   used only with the policy it was trained on, matched by content; the download itself is untested
-   until something is uploaded).
+   used only with the policy it was trained on, matched by content). **Pushed Sun 11/8 11:29 AM** (owner OK):
+   23 characters, 162 files, ~1.6 GB. Download tested as a fresh machine (empty cache, no local Marth policy or
+   value model): both came down byte-identical and the coach accepted the pair. Stuckey's model was not uploaded
+   (the repo is public; the coach reads it only from runs/).
 
 ## 4. Backlog, in order (after 1–3, or alongside them when they're waiting)
 
