@@ -20,3 +20,91 @@ falco-hf:
   note: All of erickfm/mimic-shards-v2 falco/ (28,379 train / 3,158 val games, 270M train frames).
   manifest_sha1: 5001b1e40598413f3114119cbe075a2a9b369647
   paths: [data/falco_hf/falco]
+marth-hf:
+  note: All of erickfm/mimic-shards-v2 marth/ (21,233 train / 2,360 val games, 215M train frames).
+  manifest_sha1: cec4d6786c1a1d8e57c5fd61215d9ca6c10d015d
+  paths: [data/marth_hf/marth]
+sheik-hf:
+  note: All of erickfm/mimic-shards-v2 sheik/ (17,005 train / 1,888 val games, 178M train frames).
+  manifest_sha1: 35a0306dbe99a102b327382b231ded1e6c9b71fc
+  paths: [data/sheik_hf/sheik]
+puff-hf:
+  note: All of erickfm/mimic-shards-v2 puff/ (14,180 train / 1,567 val games, 149M train frames).
+  manifest_sha1: fae9a240cbed4ec3c4982449e254a8ca847da5d4
+  paths: [data/puff_hf/puff]
+cptfalcon-hf:
+  note: All of erickfm/mimic-shards-v2 cptfalcon/ (14,709 train / 1,634 val games, 134M train frames).
+  manifest_sha1: 9019bf7a7ae3d77583da63bc6c132432a0a6e5ae
+  paths: [data/cptfalcon_hf/cptfalcon]
+peach-hf:
+  note: All of erickfm/mimic-shards-v2 peach/ (10,978 train / 1,224 val games, 122M train frames).
+  manifest_sha1: de4766942b14d8f3cd42886ef780f2201d6876be
+  paths: [data/peach_hf/peach]
+samus-hf:
+  note: All of erickfm/mimic-shards-v2 samus/ (8,189 train / 915 val games, 100M train frames).
+  manifest_sha1: d7aea149846c193f4828de43e20bfa43677f0250
+  paths: [data/samus_hf/samus]
+luigi-hf:
+  note: All of erickfm/mimic-shards-v2 luigi/ (5,147 train / 572 val games, 57M train frames).
+  manifest_sha1: 61f58be3aaa44c487043465df8ae6e9c52df6822
+  paths: [data/luigi_hf/luigi]
+pikachu-hf:
+  note: All of erickfm/mimic-shards-v2 pikachu/ (5,362 train / 594 val games, 57M train frames).
+  manifest_sha1: b2005fcbcfbdfcc4aee623369dfe6ebd986b006b
+  paths: [data/pikachu_hf/pikachu]
+dk-hf:
+  note: All of erickfm/mimic-shards-v2 dk/ (4,847 train / 539 val games, 48M train frames).
+  manifest_sha1: 256c55808345129e40df8343f08612ee9b547fc2
+  paths: [data/dk_hf/dk]
+doc-hf:
+  note: All of erickfm/mimic-shards-v2 doc/ (4,127 train / 453 val games, 44M train frames).
+  manifest_sha1: 7c96883a372c90f2febaa96e88fd46dec261a56f
+  paths: [data/doc_hf/doc]
+yoshi-hf:
+  note: All of erickfm/mimic-shards-v2 yoshi/ (3,985 train / 445 val games, 42M train frames).
+  manifest_sha1: a2d3323a50536880495d1c2e581a74d9496d060f
+  paths: [data/yoshi_hf/yoshi]
+ganondorf-hf:
+  note: All of erickfm/mimic-shards-v2 ganondorf/ (4,027 train / 447 val games, 40M train frames).
+  manifest_sha1: 92cb440c889bf2e1b892eb3ba8014382be554235
+  paths: [data/ganondorf_hf/ganondorf]
+link-hf:
+  note: All of erickfm/mimic-shards-v2 link/ (1,669 train / 185 val games, 19M train frames).
+  manifest_sha1: d18eaff38013d9d30f40fe4e02f07177455f189b
+  paths: [data/link_hf/link]
+bowser-hf:
+  note: All of erickfm/mimic-shards-v2 bowser/ (910 train / 102 val games, 11M train frames).
+  manifest_sha1: 898377050a097d30007e172aeb36dd4ffccc998f
+  paths: [data/bowser_hf/bowser]
+gameandwatch-hf:
+  note: All of erickfm/mimic-shards-v2 gameandwatch/ (1,083 train / 122 val games, 10M train frames).
+  manifest_sha1: 4dfde083429e42232b34a09aab54e48d145786d8
+  paths: [data/gameandwatch_hf/gameandwatch]
+mario-hf:
+  note: All of erickfm/mimic-shards-v2 mario/ (802 train / 86 val games, 9M train frames).
+  manifest_sha1: 940553a438266ddef5a1f4e5b4a85b9055f8bda9
+  paths: [data/mario_hf/mario]
+roy-hf:
+  note: All of erickfm/mimic-shards-v2 roy/ (780 train / 86 val games, 9M train frames).
+  manifest_sha1: 15da070ae4104ba55330ac7abe6ebf8ea87498d3
+  paths: [data/roy_hf/roy]
+ness-hf:
+  note: All of erickfm/mimic-shards-v2 ness/ (668 train / 74 val games, 8M train frames).
+  manifest_sha1: 75aa5700335b33a324fa2328be7b88f5f49f7528
+  paths: [data/ness_hf/ness]
+ylink-hf:
+  note: All of erickfm/mimic-shards-v2 ylink/ (546 train / 61 val games, 7M train frames).
+  manifest_sha1: f1ea03e27cfc4d508111f91026575840f47f9941
+  paths: [data/ylink_hf/ylink]
+mewtwo-hf:
+  note: All of erickfm/mimic-shards-v2 mewtwo/ (493 train / 56 val games, 7M train frames).
+  manifest_sha1: 1b42253641be2dbfbc175b63be5c98bf070bfa45
+  paths: [data/mewtwo_hf/mewtwo]
+fox-hf:
+  note: Same shards as fox-hf-647 (647-shard prefix of erickfm/mimic-shards-v2 fox/; 46,277 train / 1,629 val games, 447M train frames); data/fox_hf/fox links to data/fox_full_hf/fox.
+  manifest_sha1: bcadf005144241cb8f179fd188e366d5d0ff6ea2
+  paths: [data/fox_hf/fox]
+zelda-hf:
+  note: Built locally (no zelda/ on erickfm/mimic-shards-v2) from the 18 master-* ranked ZELDA archives with slp_to_shards.py --character 19 --val-frac 0.1 --seed 42 (840 train / 94 val games, 10M train frames).
+  manifest_sha1: 81f2b1cdc809faad7067b3587102182856333a94
+  paths: [data/zelda_hf/zelda]

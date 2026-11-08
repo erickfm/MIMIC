@@ -1,0 +1,21 @@
+{
+ "a": "zelda-S-bc2-hf3k-s1.rl2-s1",
+ "b": "zelda-S-bc2-hf3k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 126,
+ "b_wins": 66,
+ "draws": 0,
+ "a_win_rate": 0.6562,
+ "wilson95": [
+  0.5866,
+  0.7198
+ ],
+ "p_two_sided": 1.7807035577043147e-05,
+ "stock_margin_a": 0.573,
+ "seconds": 477,
+ "commit": "79a6cd7-dirty",
+ "finished": "2026-11-08T10:21:41+00:00"
+}

@@ -9,6 +9,7 @@ doc-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-06 10:36 PM	10.2	aurora	25b70c9-dir
 doc-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	doc-S-bc2-hf3k-s1	1	done	2026-11-06 10:46 PM	104.0	aurora	79b160e-dirty		vs doc-S-bc2-hf3k-s1: 160-32 (83.3%)
 falco-M-bc3-hf28k-s1	bc	bc-M-v3		1	done	2026-11-05 05:13 PM	136.5	aurora	f6030d7		
 falco-M-bc3-hf28k-s1.rl2-s1	rl	rl-v2	falco-M-bc3-hf28k-s1	1	done	2026-11-05 07:30 PM	223.1	aurora	2a4dfec-dirty		vs falco-M-bc3-hf28k-s1: 181-11 (94.3%)
+falco-M-master-jul	bc				legacy						
 falco-S-bc2-hf28k-s1	bc	bc-S-v2		1	done	2026-11-05 11:24 PM	65.1	aurora	5d241f5-dirty		
 falco-S-bc2-hf28k-s1.rl2-s1	rl	rl-v2	falco-S-bc2-hf28k-s1	1	done	2026-11-06 12:29 AM	105.8	aurora	b1f5c73-dirty		vs falco-S-bc2-hf28k-s1: 157-35 (81.8%)
 fox-L-bc1-56k-s1	bc	bc-L-v1		1	done	2026-10-30 09:37 AM	514.8	aurora	32ffd19-dirty		
@@ -65,4 +66,5 @@ ylink-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 04:34 PM	7.4	aurora	075c8f0-di
 ylink-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	ylink-S-bc2-hf3k-s1	1	done	2026-11-07 04:41 PM	104.1	aurora	f35c289-dirty		vs ylink-S-bc2-hf3k-s1: 153-39 (79.7%)
 yoshi-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 12:37 AM	10.1	aurora	79b160e-dirty		
 yoshi-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	yoshi-S-bc2-hf3k-s1	1	done	2026-11-07 12:47 AM	104.0	aurora	69d579d-dirty		vs yoshi-S-bc2-hf3k-s1: 159-33 (82.8%)
-zelda-S-bc2-hf3k-s1	bc	bc-S-v2		1	running	2026-11-08 12:21 AM		aurora	508943b-dirty		
+zelda-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-08 12:21 AM	7.7	aurora	508943b-dirty		
+zelda-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	zelda-S-bc2-hf3k-s1	1	done	2026-11-08 12:29 AM	104.4	aurora	79a6cd7-dirty		vs zelda-S-bc2-hf3k-s1: 126-66 (65.6%)
