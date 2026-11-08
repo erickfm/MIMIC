@@ -66,6 +66,19 @@ A web app: the player's browser draws everything; a server runs the game simulat
   decisions whose tries spread by more than 2 points), so the coach's numbers may lean slightly
   pessimistic there. Nothing in the app was changed on this basis. Single run, 60 decisions each.
 
+  Re-run 2026-11-08 with the S RL opponents the coach now uses (same decisions' seed, k=16; the
+  opponent's generic model, not a player model):
+
+  | player (opponents) | mean rank | rank quintiles | KS (5% crit) | tries − real | real reaction among tries |
+  |---|---|---|---|---|---|
+  | WAVE#666 Falco, opp Falco S RL | 0.561 | 8 7 18 14 13 | 0.208 (0.176) | −1.0 ± 0.5 | 75%, 47% |
+  | STUC#911 Fox, opp S RL | 0.551 | 10 5 21 10 14 | 0.162 (0.176) | −2.5 ± 1.0 | 80%, 47% |
+
+  The RL opponents are a little tougher than the real ones in both (the real outcome sits 1.0 and 2.5
+  points above the tries' mean, ~2.0 and 2.5 SE; a stock = 40), and the Falco ranks now reject
+  uniformity at 5% (KS 0.208). So the coach's numbers lean slightly pessimistic against S RL
+  opponents, about as much as before for Falco and more for Fox. Nothing in the app was changed.
+
 ## Windows (feasibility, 2026-11-05; read from the code, nothing built)
 
 melee-unlocked is a Windows project first (its release is win64). The parts:
