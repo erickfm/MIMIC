@@ -57,6 +57,10 @@ verified, what's next, anything blocked. Measure before claiming; say when a res
 The BC parent is also the opponent RL trained against, so this measures the gain against that one
 opponent.
 
+New Fox S RL vs SF7u100 (`fox-S-bc1-s1.rl1-s0`, the previous coach Fox; owner asked Sun 11/8): **83–109
+(43.2%, 95% CI 36–50%, p 0.07), stock margin −0.21**, sim, 192 games, seed 41, bf16. Leans to SF7u100, not
+significant at 5%. The coach still uses the new Fox (after_queue picks a Fox S rl2 run when there is one).
+
 ## 2. "Try it yourself" (build now, on CPU)
 
 From any coach suggestion (a master try, a tested move, or the paused moment), the player plays that
