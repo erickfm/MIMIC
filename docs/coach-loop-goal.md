@@ -88,7 +88,8 @@ moment themselves against the bot, live, from the exact game state.
 0. Falco S RL vs the July Falco (owner, 2026-11-06: "run the falco h2h after the queue"):
    `tools/run.py register falco-M-master-jul --policy hf_eval/falco --char falco --stage bc --note
    "falco-20260719-master-c9-s99 (HF falco, July)"`, then `tools/run.py h2h falco-S-bc2-hf28k-s1.rl2-s1
-   falco-M-master-jul` (192 games, seed 41, bf16). Record the result in the table above.
+   falco-M-master-jul` (192 games, seed 41, bf16). **Done Sun 11/8 2:30 AM: Falco S RL won 158–34 (82.3%,
+   95% CI 76–87%), stock margin +1.27** vs the July Falco (M, BC only, the coach's Falco until now). Sim only.
 1. `python3 tools/coach/after_queue.py` (RL policies + value models, item 3 above).
 2. Stuckey's Falco model (backlog 4): shards are built (`data/stuckey/falco_train`: 365 games + 40
    for picking the checkpoint; `data/stuckey/falco_test`: 46 games no choice is made on). Then
