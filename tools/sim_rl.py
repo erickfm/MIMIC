@@ -70,6 +70,10 @@ def main():
     ap.add_argument("--ppo-minibatch", type=int, default=0,
                     help="decisions per update forward (memory only; default: 64 at 180 frames, fewer for "
                          "longer contexts)")
+    ap.add_argument("--compile-learner", action=argparse.BooleanOptionalAction, default=False,
+                    help="torch.compile the learner's rollout forward like the frozen opponent's (S: 4.6 -> "
+                         "2.5 ms per 64-env step); it follows the in-place optimizer updates. Off = every "
+                         "recipe up to rl-v2")
     ap.add_argument("--ppo-amp", action=argparse.BooleanOptionalAction, default=False,
                     help="bf16 autocast for the update's forwards (old log-prob scoring, PPO epochs, "
                          "global anchor), like BC training; attention math stays fp32. Off = the "
@@ -168,7 +172,7 @@ def main():
     vr_scale = np.ones(len(vr_ids))          # running std of each VR's returns (--normalize)
     rate_ema = None                           # EMA of (learner, BC) per-frame rates, for the guards
     scale_seen = np.zeros(len(vr_ids), bool)
-    v = VecSim(templates, {"LEARN": dict(dir=a.policy_dir, model=learner, cfg=cfg, amp=True, compile=False),
+    v = VecSim(templates, {"LEARN": dict(dir=a.policy_dir, model=learner, cfg=cfg, amp=True, compile=a.compile_learner),
                            "OPP": dict(dir=a.policy_dir, amp=True, compile=True)},
                a.envs, a.workers, rng=a.rng, seed=a.seed, assign=assign, vr_ids=vr_ids)
 
