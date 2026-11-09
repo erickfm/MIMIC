@@ -60,6 +60,9 @@ opponent.
 New Fox S RL vs SF7u100 (`fox-S-bc1-s1.rl1-s0`, the previous coach Fox; owner asked Sun 11/8): **83–109
 (43.2%, 95% CI 36–50%, p 0.07), stock margin −0.21**, sim, 192 games, seed 41, bf16. Leans to SF7u100, not
 significant at 5%. The coach still uses the new Fox (after_queue picks a Fox S rl2 run when there is one).
+Their BC parents on one fixed val set (`tools/eval_last_frame.py`, 40,000 frames, 1,618 games, seed 0):
+SF7u100's parent `fox-S-bc1-s1` (56k, Muon 0.02) 0.6950, `fox-S-bc2-hf51k-s1` (51k, Muon 0.01) 0.6915,
+paired −0.0034 ± 0.0012. The new parent fits slightly better, so the h2h gap isn't a weaker BC start by loss.
 
 ## 2. "Try it yourself" (build now, on CPU)
 
