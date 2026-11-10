@@ -34,3 +34,11 @@ At M (2026-11-04) the same flag took the update 83 → 52 s.
 
 Both together would be roughly 59 → 46 s per update (estimated by adding the two measured savings).
 Before using either: one 100-update run with them, h2h vs `fox-S-bc2-hf51k-s1.rl2-s1`.
+
+## Test run: `fox-S-bc2-hf51k-s1.rl2-fast-s1` (rl-v2 + `--ppo-amp` + `--compile-learner`, same parent and seed)
+
+- Wall time: 82.0 min for 100 updates vs 104.2 min for `fox-S-bc2-hf51k-s1.rl2-s1` (−21%); ~49 s per update.
+- vs `fox-S-bc2-hf51k-s1.rl2-s1` (the same recipe without the two flags): **96–96 (50.0%, 95% CI 43–57%)**,
+  stock margin −0.01. vs its BC parent: 164–28 (85.4%; the original run: 150–42, 78.1%).
+- Anchor KL per update varies a lot: 0.016 vs 0.009 at update 64, 0.011 vs 0.023 at update 100.
+- One run, one 192-game match: no loss of strength detected, and it can't rule out a few points either way.
