@@ -93,3 +93,25 @@ vs rl2-fast-s1 (u100) at seeds 41 and 42, and vs rl2-s1 at 41 (576 games).
 - The seed-2 rerun scores 50.2%, so the reference set is calibrated. lr 2e-5 (+7) is the only other
   variant past ~3 points; ridge and sample-every 2 are within ~2 sd of noise; gamma 0.997 is worse.
 - lr 2e-5 at 100 updates may be doing the same thing as more updates (bigger total policy movement).
+
+## Follow-up queue (Tue 11/10, 6:22 AM – 2:13 PM)
+
+Second training seeds for the two results past noise, a stacking test, and u300. Same references and
+h2h seeds as above (192 games each).
+
+| run | opponent | result |
+|---|---|---|
+| rl-v3 seed 2, u200 | refs (u100 ×2 seeds, rl2-s1) | 331–245 (57.5%) |
+| rl-v3 seed 2, u200 | seed 1 u200 | 80–112 (41.7%) |
+| lr 2e-5 seed 2 (u100) | refs | 347–229 (60.2%) |
+| lr 2e-5 seed 1, u200 | seed 1 u200 (lr 1e-5), h2h seeds 41/42 | 246–138 (64.1%) |
+| lr 2e-5 seed 1, u200 | seed 1 u100 | 151–41 (78.6%) |
+| rl-v3 seed 1, u300 | seed 1 u200, h2h seeds 41/42 | 228–156 (59.4%) |
+
+- More updates replicates on seed 2, smaller: u100 → u200 moves seed 2 from 50.2% to 57.5% vs refs (seed 1: +16).
+- lr 2e-5 replicates: 57.3% (seed 1) and 60.2% (seed 2); pooled 677–475 (58.8%).
+- The two stack: lr 2e-5 at u200 beats lr 1e-5 at u200 64.1%.
+- u300 still beats u200 (59.4%, 126–66 and 102–90 at the two h2h seeds). No plateau yet at lr 1e-5.
+- Reading: at rl-v2/v3 settings the policy is undertrained; total step (lr × updates) is the lever.
+  rl-v3 at 100 updates is 82 min, so u200 is ~2.7 h and u300 ~4 h at Fox S.
+- Not yet tested: lr 2e-5 past u200, lr 4e-5, and whether the gain holds against fox-master / in Dolphin.
