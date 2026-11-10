@@ -42,3 +42,33 @@ Before using either: one 100-update run with them, h2h vs `fox-S-bc2-hf51k-s1.rl
   stock margin −0.01. vs its BC parent: 164–28 (85.4%; the original run: 150–42, 78.1%).
 - Anchor KL per update varies a lot: 0.016 vs 0.009 at update 64, 0.011 vs 0.023 at update 100.
 - One run, one 192-game match: no loss of strength detected, and it can't rule out a few points either way.
+
+## Is sim RL noisy or untuned? (analysis of existing runs, no new training)
+
+**Match noise vs training noise.** The 13 Oct 27 matches vs SF7u100 from recipes within noise of each other
+(1-epoch 4x lr excluded): mean 48.0%, sd 4.8 pts; a 192-game match alone gives 3.6. Excess sd 3.1 pts
+(chi2 21.1 on 12 df, p 0.049), and that excess also holds the real recipe differences. The same checkpoint at
+h2h seeds 41 vs 42 moved −3.1, +6.2, −2.6, +3.1 (expected sd of a difference 5.1). Today: same parent and seed,
+two numerics, 96–96. So most of the spread in single results is the 192-game measurement; run-to-run training
+variation is at most ~3 pts sd.
+
+**Training curves, all 29 rl2 runs** (rollout win rate vs the frozen BC opponent, 20-update bins, ~180–360
+games per bin per run):
+
+| updates | 1–20 | 21–40 | 41–60 | 61–80 | 81–100 |
+|---|---|---|---|---|---|
+| mean over runs | 56.0% | 63.9% | 68.9% | 72.5% | 74.8% |
+
+Gains per bin shrink (+7.9, +5.0, +3.6, +2.3) but have not stopped: 20 of 29 runs were higher in 81–100 than
+61–80. Anchor KL keeps growing (median ~0.01 at u20, ~0.02 at u50, ~0.03 at u100). SF7 (rl-v1) plateaued
+by ~u70–100 (u150 94–98, u200 96–96 vs u100), but rl-v2 policies move ~2x further from BC, so that may not carry
+over.
+
+**Clip fraction** averages 0–0.0003 per run (max 0.008): PPO's ±0.2 ratio clip essentially never binds; the
+step size is set by lr alone.
+
+**Tested so far:** decisions per update (4k–64k at 30 updates), number of updates (30–200, rl-v1), critic, KL
+terms, 1 epoch at 4x lr (worse), 50 updates at 2x lr (probably worse), lr 3e-5 with weak KL (drifts worse).
+**Never tested:** discount (γ 0.99 per frame = 1.15 s half-life; Phillip uses ~8 s), return horizon (5 s),
+--sample-every (8), lr at 100 updates or an lr schedule, more than 4 epochs, a per-state baseline other than the
+online critic, opponents other than the frozen BC.
