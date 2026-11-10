@@ -338,7 +338,7 @@ New runs go through `tools/run.py`, not hand-written queue scripts.
   dataset by id (`recipes/datasets.yaml` pins each by manifest SHA-1 and lists where it lives on each
   machine) and the step budget. Never edit one in place: a change is a new version. `bc-S-v1`
   (`base_full56k`), `bc-S-proxy-v1` (the 5-minute proxy), `bc-M-v1` (cond-heads M), `bc-M-v2` (`bc-S-v1` at M), `bc-M-v3` (`bc-M-v2` at Muon LR 0.01, the current M recipe), `bc-S-v2` (`bc-S-v1` at Muon LR 0.01, the current S recipe), `bc-L-v1` (`bc-M-v3` at L, 24k steps; `--set steps=56000` for the matched budget), `rl-v1` (SF7; runs
-  only at `c2df04b`, the critic is gone after it), `rl-v2` (today's sim RL default). `bc-XS-v1` (`bc-S-v1` at
+  only at `c2df04b`, the critic is gone after it), `rl-v2` (sim RL default until 2026-11-09), `rl-v3` (`rl-v2` + bf16 update + compiled learner forward: same math, ~21% faster; 96–96 vs `rl-v2` at Fox S, the current default). `bc-XS-v1` (`bc-S-v1` at
   d_model 128, 1.66M params) is **deprecated (owner, 2026-10-28)**: XS loses 21.9% to S and 9.4% to M at the
   same recipe, trains only 1.6× faster than S on the 4090, and XS BC + RL (156 min) is weaker than S BC alone
   (125 min; `docs/research-notes-2026-10-28.md`). Don't launch it or build on XS.
