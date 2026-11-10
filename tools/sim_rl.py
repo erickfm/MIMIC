@@ -102,6 +102,13 @@ def main():
     ap.add_argument("--guard-lr", type=float, default=0.2, help="guard weight step per unit relative gap")
     ap.add_argument("--guard-init", type=float, default=0.1)
     ap.add_argument("--guard-max", type=float, default=2.0)
+    ap.add_argument("--baseline", choices=["mean", "ridge"], default="mean",
+                    help="dense mode: what each decision's return is compared with. mean = the batch mean (every "
+                         "recipe up to rl-v3); ridge = a per-state value from a ridge regression of the returns on "
+                         "the frozen BC's final-norm features, fit on the previous --baseline-replay updates only "
+                         "(never on the batch it is applied to), then the batch z-score as before")
+    ap.add_argument("--baseline-replay", type=int, default=3)
+    ap.add_argument("--baseline-ridge", type=float, default=1e-3, help="ridge strength, relative to mean diag(X'X)")
     ap.add_argument("--normalize", action="store_true",
                     help="dense mode: scale each VR's returns by its running std, so weights compare across VRs")
     a = ap.parse_args()
@@ -170,6 +177,7 @@ def main():
     import numpy as np
     vr_w = np.asarray(vr_w, np.float64)
     vr_scale = np.ones(len(vr_ids))          # running std of each VR's returns (--normalize)
+    base_replay = []                          # --baseline ridge: [(features + 1, raw per-VR returns)] per update
     rate_ema = None                           # EMA of (learner, BC) per-frame rates, for the guards
     scale_seen = np.zeros(len(vr_ids), bool)
     v = VecSim(templates, {"LEARN": dict(dir=a.policy_dir, model=learner, cfg=cfg, amp=True, compile=a.compile_learner),
@@ -376,6 +384,26 @@ def main():
                     _logprob_at_indices(head_logits(ref, None, None, idx, h=feats_of(ref, i, j, pk)), idx).cpu()
                 for fr, x, y in zip(chunk, lp, lr_):   # the reference never changes: score it once
                     fr.logprob_old, fr.logprob_ref = x, y
+        bstats = {}
+        raw_return_mean = float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None
+        if a.baseline == "ridge" and dense and episodes:
+            with torch.no_grad(), amp_ctx():
+                F_ = torch.cat([feats_of(ref, i, j, pk).float().reshape(j - i, -1) for i, j, pk in spans])
+            X = torch.cat([F_, torch.ones(len(F_), 1, device=F_.device)], 1)
+            Gt = torch.tensor(Gm, dtype=torch.float32, device=X.device)            # (N, n_vr) raw returns
+            wv = torch.tensor(vr_w / vr_scale, dtype=torch.float32, device=X.device)
+            R = Gt @ wv                                                            # = terminal_reward
+            if base_replay:   # fit on earlier updates only: the baseline never sees this batch's returns
+                XX = torch.cat([x for x, _ in base_replay]); YY = torch.cat([y for _, y in base_replay])
+                A = XX.T @ XX
+                A = A + a.baseline_ridge * A.diagonal().mean() * torch.eye(len(A), device=A.device)
+                # 257 x 257: solved on the CPU (CUBLAS_WORKSPACE_CONFIG=:0:0 leaves cuBLAS no workspace for trsm)
+                Wb = torch.linalg.solve(A.double().cpu(), (XX.T @ YY).double().cpu()).float().to(X.device)
+                resid = R - (X @ Wb) @ wv
+                bstats = dict(baseline_ev=round(float(1 - resid.var() / R.var().clamp_min(1e-12)), 4))
+                for ep, x in zip(episodes, resid.tolist()):
+                    ep.terminal_reward = x
+            base_replay = (base_replay + [(X, Gt)])[-a.baseline_replay:]
         extra = None
         if a.global_kl_beta > 0 and anchor:
             # KL(policy || BC) summed over the 4 heads at each anchor frame: exact for independent
@@ -428,7 +456,7 @@ def main():
                        vr={i: dict(learn=round(float(x) / n * 3600, 4), opp=round(float(y) / n * 3600, 4))
                            for i, x, y in zip(vr_ids, dstats["vr_learn"], dstats["vr_opp"])},
                        games=dict(win=dstats["win"], loss=dstats["loss"], draw=dstats["draw"]),
-                       return_mean=float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None,
+                       return_mean=raw_return_mean, **bstats,
                        guards=guard_stats or None, vr_scale=[round(float(x), 4) for x in vr_scale])
         print(json.dumps(rec), flush=True)
         log.write(json.dumps(rec) + "\n")
