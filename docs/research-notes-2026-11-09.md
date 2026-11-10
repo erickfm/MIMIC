@@ -72,3 +72,24 @@ terms, 1 epoch at 4x lr (worse), 50 updates at 2x lr (probably worse), lr 3e-5 w
 **Never tested:** discount (γ 0.99 per frame = 1.15 s half-life; Phillip uses ~8 s), return horizon (5 s),
 --sample-every (8), lr at 100 updates or an lr schedule, more than 4 epochs, a per-state baseline other than the
 online critic, opponents other than the frozen BC.
+
+## Research queue results (finished Tue 11/10 4:22 AM)
+
+Fox S, parent fox-S-bc2-hf51k-s1, training seed 1 unless noted. "vs refs" pools three 192-game h2h:
+vs rl2-fast-s1 (u100) at seeds 41 and 42, and vs rl2-s1 at 41 (576 games).
+
+| variant | vs refs | vs BC parent |
+|---|---|---|
+| rl2-fast continued to u200 | 381–195 (66.1%) | — |
+| rl2-fast u150 (vs u100, seed 41 only) | 115–77 (59.9%) | — |
+| lr 2e-5 | 330–246 (57.3%) | 161–31 |
+| ridge baseline | 313–263 (54.3%) | 155–37 |
+| sample-every 2 | 307–269 (53.3%) | 150–42 |
+| plain rl-v3, training seed 2 | 289–287 (50.2%) | 143–49 |
+| gamma 0.997, horizon 600 | 258–318 (44.8%) | 133–59 |
+
+- More updates is the clear result: u200 beats u100 by ~16 points on every reference; u150 sits between.
+  This differs from SF7 (rl-v1), where u150/u200 tied u100.
+- The seed-2 rerun scores 50.2%, so the reference set is calibrated. lr 2e-5 (+7) is the only other
+  variant past ~3 points; ridge and sample-every 2 are within ~2 sd of noise; gamma 0.997 is worse.
+- lr 2e-5 at 100 updates may be doing the same thing as more updates (bigger total policy movement).
