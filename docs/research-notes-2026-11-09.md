@@ -150,3 +150,25 @@ Reading:
   and slightly better head-to-head, at half the updates: lr and updates mostly trade off.
 - Inferred, not tested: lr 2e-5's anchor KL levels off at ~0.08 after u200, so the β 0.01 anchor may be what
   slows the gains. Testing that needs a smaller β.
+
+## Assessment of queue 3 (own review + an independent review of the raw results, Wed 11/11)
+
+Corrections to the readings above:
+- "lr 2e-5 at u400 ties fox-master" is not established. 193–191 has a 95% CI of 45–55%, and it is the best of
+  9 checkpoints played against fox-master, so it is likely inflated a few points. The four u300/u400 checkpoints
+  pool to 46.7% vs fox-master. It also isn't a size comparison: fox-master had 100 RL updates at lr 1e-5; this
+  S model had 400 at 2e-5, and more total compute (S BC 116 min + ~360 min RL vs M 189 + 219 min).
+- "lr and updates trade off" is weak. It holds at 2e-5×200 vs 1e-5×400 (54.9% direct, both ~45% vs fox-master)
+  and fails at 4e-5×100 (31.8% vs fox-master, against 44.5% for 2e-5×200). Anchor KL rises with lr
+  (~0.04 / 0.08 / 0.11), so β 0.01 is a different constraint at each lr.
+- "Gains slowing" holds for lr 2e-5 only (u400 vs u200 56.8%, no more than u300 vs u200; training return flat
+  over u301–400). lr 1e-5 is still rising vs fox-master (32 → 39 → 46%). Win rate vs u100 is near its ceiling (~80%).
+
+What holds: more updates help up to u200 (both seeds); lr 2e-5 beats 1e-5 at u100 (both seeds, 55.7% and 60.2%
+vs u100 vs 50.2% for 1e-5 seed 2); lr 4e-5 = 2e-5 at u200.
+
+Measurement: across 48 checkpoint pairs played at both h2h seeds, the 41−42 difference has sd 4.2 pts (binomial
+expects 5.1), so h2h seed noise is binomial and the excess spread is training seed: lr 1e-5 seed 1 vs seed 2 at u100
+beat BC 85.4% vs 74.5%. Everything past u200 is seed 1 only. All references share one lineage (the u100 reference
+is a seed-1 lr 1e-5 checkpoint); fox-master is the only outside opponent. Most of the reward gain is damage
+(learner damage 0.6 → 3.1–3.6 per update); stocks change hands more in both directions.
