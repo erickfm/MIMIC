@@ -115,3 +115,38 @@ h2h seeds as above (192 games each).
 - Reading: at rl-v2/v3 settings the policy is undertrained; total step (lr × updates) is the lever.
   rl-v3 at 100 updates is 82 min, so u200 is ~2.7 h and u300 ~4 h at Fox S.
 - Not yet tested: lr 2e-5 past u200, lr 4e-5, and whether the gain holds against fox-master / in Dolphin.
+
+## Queue 3: where do gains stop? (Tue 11/10 2:50 PM – Wed 11/11 3:39 AM)
+
+Fox S, seed 1, rl-v3 except lr and updates. Each endpoint vs fixed opponents: u100 = rl2-fast-s1 (lr 1e-5, u100)
+at h2h seeds 41+42 (384 games), fox-master (fox-M-bc2-mlr01-s1.rl2-s1, M, 20M params) at 41+42, BC parent at 41.
+
+| lr | updates | vs u100 | vs fox-master | vs BC |
+|---|---|---|---|---|
+| 1e-5 | 200 | 253–131 (65.9%) | 124–260 (32.3%) | 170–22 |
+| 1e-5 | 300 | 276–108 (71.9%) | 151–233 (39.3%) | 168–24 |
+| 1e-5 | 400 | 315–69 (82.0%) | 175–209 (45.6%) | 180–12 |
+| 2e-5 | 100 | 214–170 (55.7%) | 109–275 (28.4%) | 161–31 |
+| 2e-5 | 200 | 291–93 (75.8%) | 171–213 (44.5%) | 173–19 |
+| 2e-5 | 300 | 302–82 (78.6%) | 175–209 (45.6%) | 177–15 |
+| 2e-5 | 400 | 307–77 (79.9%) | 193–191 (50.3%) | 177–15 |
+| 4e-5 | 100 | 245–139 (63.8%) | 122–262 (31.8%) | 157–35 |
+| 4e-5 | 200 | 290–94 (75.5%) | 175–209 (45.6%) | 175–17 |
+
+Direct matches:
+- lr 2e-5: u300 vs u200 114–78 (59.4%); u400 vs u200 218–166 (56.8%, 2 seeds).
+- Equal total step: lr 1e-5 u400 vs lr 2e-5 u200 173–211 (45.1%, 2 seeds); lr 1e-5 u400 vs u300 106–86.
+- lr 4e-5 vs 2e-5: at u200 195–189 (50.8%); at u100 170–214 (44.3%).
+
+Anchor KL to BC (per learner frame, logged each update):
+lr 1e-5 0.011 (u100) → 0.025 (u200) → 0.024 (u300) → 0.041 (u400);
+lr 2e-5 0.042 → 0.078 → 0.090 → 0.072; lr 4e-5 0.087 (u100) → 0.116 (u200). Clip fraction stays ≤ 0.003.
+
+Reading:
+- Gains slow but haven't stopped. At lr 2e-5, u200 → u400 adds ~6 points vs fox-master and wins 56.8% directly;
+  vs u100 it has nearly saturated (75.8 → 79.9%).
+- lr 2e-5 at u400 ties fox-master (193–191): an S model (5.4M) + 400 updates matching the M production model.
+- lr 4e-5 buys nothing over 2e-5 at 200 updates. lr 2e-5 at u200 ≈ lr 1e-5 at u400 vs fixed opponents
+  and slightly better head-to-head, at half the updates: lr and updates mostly trade off.
+- Inferred, not tested: lr 2e-5's anchor KL levels off at ~0.08 after u200, so the β 0.01 anchor may be what
+  slows the gains. Testing that needs a smaller β.

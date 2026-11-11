@@ -1,0 +1,21 @@
+{
+ "a": "fox-S-bc2-hf51k-s1.rl3-lr2e5-s1",
+ "b": "fox-M-bc2-mlr01-s1.rl2-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 51,
+ "b_wins": 141,
+ "draws": 0,
+ "a_win_rate": 0.2656,
+ "wilson95": [
+  0.2082,
+  0.3323
+ ],
+ "p_two_sided": 5.947693119558102e-11,
+ "stock_margin_a": -0.891,
+ "seconds": 473,
+ "commit": "a10939b-dirty",
+ "finished": "2026-11-11T11:30:53+00:00"
+}
