@@ -172,3 +172,42 @@ expects 5.1), so h2h seed noise is binomial and the excess spread is training se
 beat BC 85.4% vs 74.5%. Everything past u200 is seed 1 only. All references share one lineage (the u100 reference
 is a seed-1 lr 1e-5 checkpoint); fox-master is the only outside opponent. Most of the reward gain is damage
 (learner damage 0.6 → 3.1–3.6 per update); stocks change hands more in both directions.
+
+## Queue 4: second seeds, round-robin, M at lr 2e-5 (Wed 11/11 3:43 PM – Thu 11/12 9:12 AM)
+
+Round-robin: 13 models, every pair 96 games at h2h seed 43 (78 matches, 7,488 games), fitted with Bradley-Terry
+(`tools/rl_ratings.py rr`). Rating = log-odds vs fox-master (fox-M-bc2-mlr01-s1.rl2-s1: M, lr 1e-5, u100).
+Fit chi2 71.1 on 66 df: the results are consistent with one transitive scale. Using all matches between these
+models (122 matches, 15,936 games; `tools/rl_ratings.py all`) gives the same order (± ≈ 0.05).
+
+| model | rating (rr) | ≈ win % vs fox-master |
+|---|---|---|
+| M, lr 2e-5, u200 | +1.09 ± 0.09 | 75 |
+| S, lr 2e-5, seed 2, u400 | +0.05 ± 0.08 | 51 |
+| fox-master | 0 | 50 |
+| S, lr 2e-5, seed 1, u400 | −0.03 | 49 |
+| S, lr 4e-5, seed 1, u200 | −0.06 | 48 |
+| S, lr 2e-5, seed 2, u200 | −0.07 | 48 |
+| S, lr 1e-5, seed 2, u400 | −0.12 | 47 |
+| S, lr 2e-5, seed 1, u200 | −0.20 | 45 |
+| S, lr 1e-5, seed 1, u400 | −0.22 | 44 |
+| S, lr 1e-5, seed 1, u200 | −0.80 | 31 |
+| S, lr 2e-5, seed 1, u100 | −0.87 | 30 |
+| S, lr 1e-5, seed 2, u200 | −0.96 | 28 |
+| S, lr 1e-5, seed 1, u100 | −1.30 | 21 |
+
+Direct matches vs fox-master (h2h seeds 41+42, 384 games):
+- S lr 2e-5 u400: seed 1 193–191, seed 2 207–177; pooled 400–368 (52.1%).
+- S lr 1e-5 u400: seed 1 175–209, seed 2 181–203 (46.4% pooled).
+- M lr 2e-5: u100 170–214 (44.3%), u200 279–105 (72.7%). M vs its BC parent 179–13.
+- M lr 2e-5 × 200 updates took 299 min with the rl-v3 speed flags (they work at M; fox-master's 100 rl-v2 updates took 219 min).
+- M anchor KL: 0.047 (u100), 0.089 (u200), same range as S at lr 2e-5.
+
+Reading (now on two training seeds at S, one at M):
+- Training seeds now agree within ~0.1–0.25 logits at u200 and u400.
+- More updates help at both lrs; at lr 2e-5 u200 → u400 is +0.15 logits (both seeds), at lr 1e-5 +0.6–0.8.
+- lr 2e-5 beats 1e-5 clearly at u200 (both seeds, ~0.7 logits), slightly at u400 (~0.2).
+- lr 2e-5 × 200 ≈ lr 1e-5 × 400 (−0.14 vs −0.17 average): the trade-off holds on two seeds. lr 4e-5 × 200 ≈ lr 2e-5 × 200.
+- S levels off at about fox-master's strength (~50%).
+- The large result: M with lr 2e-5 × 200 updates beats fox-master 72.7% and rates ~1.1 logits above every S model.
+  fox-master was under-trained by RL, not limited by size. One M seed; M at u100 lost to fox-master 44%.
