@@ -1,0 +1,21 @@
+{
+ "a": "falco-S-bc2-hf28k-s1.rl2-s1-u200",
+ "b": "falco-S-bc2-hf28k-s1.rl2-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 139,
+ "b_wins": 53,
+ "draws": 0,
+ "a_win_rate": 0.724,
+ "wilson95": [
+  0.6568,
+  0.7823
+ ],
+ "p_two_sided": 4.3880791429227055e-10,
+ "stock_margin_a": 0.859,
+ "seconds": 269,
+ "commit": "f395552-dirty",
+ "finished": "2026-11-16T20:11:30+00:00"
+}

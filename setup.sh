@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage:
 #   bash setup.sh                       # install deps, emulator, ISO, download data
 #   bash setup.sh --run                 # also starts training after setup
-#   bash setup.sh --rsync               # pull pre-built shards from Machine A
+#   bash setup.sh --shards fox          # download a character's v2 shards from HF (erickfm/mimic-shards-v2)
 #   bash setup.sh --models              # also pull released checkpoints from HuggingFace
 #   bash setup.sh --run --model small   # extra args forwarded to train.py
 
@@ -14,14 +14,14 @@ DATA_DIR="${DATA_DIR:-data/fox_v2}"
 EMULATOR_DIR="emulator"
 ISO_PATH="melee.iso"
 RUN_AFTER=false
-RSYNC_DATA=false
+SHARDS_CHAR=""
 PULL_MODELS=false
 EXTRA_TRAIN_ARGS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --run)       RUN_AFTER=true; shift ;;
-        --rsync)     RSYNC_DATA=true; shift ;;
+        --shards)    SHARDS_CHAR="$2"; DATA_DIR="data/$2_hf/$2"; shift 2 ;;
         --models)    PULL_MODELS=true; shift ;;
         --data-dir)  DATA_DIR="$2"; shift 2 ;;
         *)           EXTRA_TRAIN_ARGS+=("$1"); shift ;;
@@ -149,6 +149,13 @@ echo ""
 echo "── Building native Melee simulator (sim/) ──"
 bash tools/build_native_sim.sh \
     || echo "  ⚠ Native sim build failed (see sim/build.log). Everything else still works."
+# Sim RL (tools/sim_rl.py) and sim h2h (tools/sim_h2h.py) start every game from the 6 .slp
+# templates in replays_doc_rt/ (realtime Dolphin games, 2026-10-20). They're gitignored (replays*/),
+# so a fresh clone doesn't have them: copy the folder from a machine that does.
+if ! ls replays_doc_rt/*.slp &>/dev/null; then
+    echo "  ⚠ replays_doc_rt/ is missing: sim RL and sim h2h need its 6 .slp templates."
+    echo "     Copy it from another machine: rsync -a replays_doc_rt/ <box>:<repo>/replays_doc_rt/"
+fi
 
 # ── 4. Data ─────────────────────────────────────────────────────────────────
 echo ""
@@ -156,16 +163,19 @@ echo "── Setting up training data ──"
 if [[ -d "$DATA_DIR" ]] && ls "$DATA_DIR"/train_shard_*.pt &>/dev/null; then
     SHARD_COUNT=$(ls "$DATA_DIR"/train_shard_*.pt | wc -l)
     echo "  Found $SHARD_COUNT shards in $DATA_DIR"
-elif $RSYNC_DATA; then
-    echo "  Pulling pre-built shards from Machine A ..."
-    mkdir -p "$DATA_DIR"
-    rsync -avz --progress -e "ssh -p 22877" \
-        root@194.14.47.19:/root/MIMIC/data/fox_v2/ "$DATA_DIR/"
-    echo "  Data synced to $DATA_DIR"
+elif [[ -n "$SHARDS_CHAR" ]]; then
+    # Same layout tools/allchar_queue.py uses: data/<char>_hf/<char>/ (shards + tensor_manifest.json + norm JSONs).
+    echo "  Downloading $SHARDS_CHAR shards from huggingface.co/datasets/erickfm/mimic-shards-v2 ..."
+    python3 -c "
+from huggingface_hub import snapshot_download
+snapshot_download('erickfm/mimic-shards-v2', repo_type='dataset', allow_patterns=['$SHARDS_CHAR/*'],
+                  local_dir='data/${SHARDS_CHAR}_hf', max_workers=8)
+" || { echo "  ❌ shard download failed"; exit 1; }
+    echo "  Data in $DATA_DIR"
 else
     echo "  No shards found in $DATA_DIR."
     echo "  Options:"
-    echo "    1. bash setup.sh --rsync          # pull shards from Machine A"
+    echo "    1. bash setup.sh --shards fox     # download from HF (erickfm/mimic-shards-v2)"
     echo "    2. python tools/slp_to_shards.py  # build from raw .slp replays"
     echo ""
     echo "  Skipping data setup."

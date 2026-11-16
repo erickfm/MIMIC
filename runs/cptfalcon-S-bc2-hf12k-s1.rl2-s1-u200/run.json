@@ -1,0 +1,12 @@
+{
+ "name": "cptfalcon-S-bc2-hf12k-s1.rl2-s1-u200",
+ "stage": "rl",
+ "recipe": null,
+ "seed": 1,
+ "parent": "cptfalcon-S-bc2-hf12k-s1",
+ "char": "cptfalcon",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/runs/cptfalcon-S-bc2-hf12k-s1.rl2-s1/policy_u200",
+ "note": "cptfalcon-S-bc2-hf12k-s1.rl2-s1 resumed to u200 with rl-v3 settings (lr 1e-5)",
+ "registered": "2026-11-16T21:30:06+00:00"
+}

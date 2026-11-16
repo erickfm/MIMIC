@@ -14,7 +14,7 @@ logs/, ckpt/ (BC) or rl/ (RL), policy/ (model.pt + norm JSONs: what sim_h2h / si
 and eval/ (one small *.result.json per h2h). runs/registry.tsv is rebuilt from those files.
 
   tools/run.py launch recipes/bc-S-v1.yaml --char fox --seed 1 [--tag 14k --set steps=14000] [--gpus N]
-  tools/run.py launch recipes/rl-v2.yaml --parent fox-S-bc1-s1 --seed 1
+  tools/run.py launch recipes/rl-v4.yaml --parent fox-S-bc1-s1 --seed 1
   tools/run.py h2h fox-S-bc1-s1.rl2-s1 fox-S-bc1-s1 [--games 192 --seed 41]
   tools/run.py register fox-S-bc1-s1 --recipe recipes/bc-S-v1.yaml --policy checkpoints/smallfox/base_full56k
   tools/run.py registry

@@ -338,7 +338,7 @@ New runs go through `tools/run.py`, not hand-written queue scripts.
   dataset by id (`recipes/datasets.yaml` pins each by manifest SHA-1 and lists where it lives on each
   machine) and the step budget. Never edit one in place: a change is a new version. `bc-S-v1`
   (`base_full56k`), `bc-S-proxy-v1` (the 5-minute proxy), `bc-M-v1` (cond-heads M), `bc-M-v2` (`bc-S-v1` at M), `bc-M-v3` (`bc-M-v2` at Muon LR 0.01, the current M recipe), `bc-S-v2` (`bc-S-v1` at Muon LR 0.01, the current S recipe), `bc-L-v1` (`bc-M-v3` at L, 24k steps; `--set steps=56000` for the matched budget), `rl-v1` (SF7; runs
-  only at `c2df04b`, the critic is gone after it), `rl-v2` (sim RL default until 2026-11-09), `rl-v3` (`rl-v2` + bf16 update + compiled learner forward: same math, ~21% faster; 96–96 vs `rl-v2` at Fox S, the current default). `bc-XS-v1` (`bc-S-v1` at
+  only at `c2df04b`, the critic is gone after it), `rl-v2` (sim RL default until 2026-11-09), `rl-v3` (`rl-v2` + bf16 update + compiled learner forward: same math, ~21% faster; 96–96 vs `rl-v2` at Fox S; default until 2026-11-16), `rl-v4` (`rl-v3` at lr 2e-5 × 200 updates: the best-known settings, ~1.1 logits above lr 1e-5 × 100 at Fox S on 2 seeds, = lr 1e-5 × 400; M at it beat fox-master 279–105; the current default, also sim_rl's dense defaults). `bc-XS-v1` (`bc-S-v1` at
   d_model 128, 1.66M params) is **deprecated (owner, 2026-10-28)**: XS loses 21.9% to S and 9.4% to M at the
   same recipe, trains only 1.6× faster than S on the 4090, and XS BC + RL (156 min) is weaker than S BC alone
   (125 min; `docs/research-notes-2026-10-28.md`). Don't launch it or build on XS.
@@ -723,17 +723,17 @@ misses) and NOT the old offset=−4 press proxy (which diverged from the truth).
 `rlvr/sim/melee_sim.py` (RL env: one game per process, `reset()`/`step(pads)`, ~2.2k fps,
 inputs land on f+1 like Dolphin), `tools/sim_replay_check.py` / `tools/sim_env_check.py`
 (byte-exact fidelity checks vs .slp). Status and limits: `docs/research-notes-2026-10-20b.md`.
-Sim RL: `tools/vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 100`. The opponent is the frozen
-base. The recipe is the sim_rl dense defaults, simplified 2026-10-27: PPO, 16,384 decisions per update × 100
-updates, 4 epochs, lr 1e-5, batch-mean baseline (no critic), and one KL term, the global anchor (exact KL to BC on
+Sim RL: `tools/run.py launch recipes/rl-v4.yaml --parent RUN --seed N` (or `tools/vr_rl_run.sh NAME "stock_delta:1,damage_delta:1" 200`). The opponent is the frozen
+base. The recipe is the sim_rl dense defaults (= `rl-v4` minus its two speed flags), simplified 2026-10-27: PPO, 16,384 decisions per update × 200
+updates (100 before 2026-11-16), 4 epochs, lr 2e-5 (1e-5 before 2026-11-16), batch-mean baseline (no critic), and one KL term, the global anchor (exact KL to BC on
 512 random learner frames per update, β 0.01; no per-decision KL). Chosen by the owner on the best pooled record:
 406–362 (52.9%) vs SF7u100 over 2 runs × h2h seeds 41/42, at 103.5 min vs SF7's 111.3. A retrain of SF7's own
 recipe scores 181–203 (47.1%) vs SF7u100, and single runs vary ±5–10 points, so one 192-game match vs one reference
 checkpoint can't rank recipes that differ by a few points (a greedy ablation flipped on that noise). Clearly worse:
 1 PPO epoch at 4× lr (153–231 over 2 runs); probably worse: 50 updates at 2× lr (172–212).
 Results are from one training seed; commit `c2df04b` reproduces SF7 (its dense defaults are SF7's recipe).
-SF7 on S-full 56k won 140–52 vs the base and beat fox-master 109–83 in the sim and 130–70 in Dolphin; gains stop by
-~100 updates (u150/u200 tied u100). `--resume rl_uNNNN.pt` restores the policy and AdamW; the KL reference stays
+SF7 on S-full 56k won 140–52 vs the base and beat fox-master 109–83 in the sim and 130–70 in Dolphin. "Gains stop by ~100 updates" (u150/u200 tied u100) held for SF7 only:
+at the 2026-10-27 recipe, u200 beats u100 66% and lr 1e-5 keeps rising to u400 (`docs/research-notes-2026-11-09.md`). `--resume rl_uNNNN.pt` restores the policy and AdamW; the KL reference stays
 the BC model. See `docs/research-notes-2026-10-26.md`, `docs/research-notes-2026-10-27.md`. Sim h2h:
 `tools/sim_h2h.py`, bf16.
 
@@ -990,16 +990,19 @@ MIMIC's backbone came from [HAL](https://github.com/ericyuegu/hal) (Eric Gu). Wh
 
 | Machine | Host | Port | User | GPU | Storage | Status |
 |---------|------|------|------|-----|---------|--------|
-| A | 74.2.96.39 | 11639 | root | 2× RTX 5090 (32 GB ea) | 2 TB `/workspace` | Active |
+| A | 174.91.120.34 | 46620 | root | 2× RTX 5090 (32 GB ea), 128 cores, 251 GB RAM | 2 TB `/workspace` | Active (vast.ai instance 60979334, since 2026-11-16) |
 
 ```bash
 ssh mimic-train                       # Machine A (alias in ~/.ssh/config)
-ssh -p 11639 root@74.2.96.39          # Machine A (2× RTX 5090)
+ssh -p 46620 root@174.91.120.34       # Machine A (2× RTX 5090)
 ```
 
 Port changes on each reprovision; the box also needs your SSH **public key**
 re-added to `~/.ssh/authorized_keys` after a fresh provision (publickey auth
-fails otherwise).
+fails otherwise). A fresh box has none of the gitignored files: copy `melee.iso` (the sim builds
+against it), `replays_doc_rt/` (the 6 sim templates every sim RL run and sim h2h uses) and any `runs/`
+or `checkpoints/` the job needs, then run `bash setup.sh` (installs deps, builds the native sim into `sim/`).
+The `coach` branch isn't on GitHub: clone from a `git bundle` of it.
 
 **Persistent storage is `/workspace` ONLY** — everything outside `/workspace`
 (e.g. `/root`, `/tmp`) is **ephemeral** and wiped on container restart. Clone the

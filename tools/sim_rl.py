@@ -51,7 +51,7 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--envs", type=int, default=64)
     ap.add_argument("--workers", type=int, default=16)
-    ap.add_argument("--updates", type=int, default=None, help="default: 100 dense, 60 L-cancel")
+    ap.add_argument("--updates", type=int, default=None, help="default: 200 dense, 60 L-cancel")
     ap.add_argument("--episodes-per-update", type=int, default=192,
                     help="minimum scored episodes per update")
     ap.add_argument("--misses-per-update", type=int, default=0,
@@ -63,7 +63,7 @@ def main():
                          "the 4 heads), not just the L-cancel episode frames PPO's KL term sees "
                          "(default: 0.01 dense, 0 L-cancel)")
     ap.add_argument("--anchor-frames", type=int, default=512, help="anchor sample size per update")
-    ap.add_argument("--lr", type=float, default=None, help="default: 1e-5 dense, 3e-5 L-cancel")
+    ap.add_argument("--lr", type=float, default=None, help="default: 2e-5 dense, 3e-5 L-cancel")
     ap.add_argument("--kl-beta", type=float, default=None,
                     help="per-decision KL to BC on the sampled actions (default: 0 dense, 0.003 L-cancel)")
     ap.add_argument("--ppo-epochs", type=int, default=4)
@@ -112,14 +112,15 @@ def main():
     ap.add_argument("--normalize", action="store_true",
                     help="dense mode: scale each VR's returns by its running std, so weights compare across VRs")
     a = ap.parse_args()
-    # Dense defaults: 16,384 decisions x 100 updates, 4 PPO epochs, lr 1e-5, the global KL anchor
-    # (0.01) and nothing else: no critic (batch-mean baseline) and no per-decision KL term. Chosen
-    # 2026-10-27 on the best pooled record vs SF7u100 (406-362 over 2 runs x 2 h2h seeds; a retrain of
-    # SF7, which had both, scores 181-203) at 103.5 vs 111.3 min (one training seed,
-    # docs/research-notes-2026-10-27.md; commit c2df04b reproduces SF7). Gains stop at ~100
-    # updates (u150 and u200 tied u100). L-cancel keeps the July recipe.
+    # Dense defaults: 16,384 decisions x 200 updates, 4 PPO epochs, lr 2e-5, the global KL anchor
+    # (0.01) and nothing else: no critic (batch-mean baseline) and no per-decision KL term. The
+    # no-critic / anchor-only design was chosen 2026-10-27 (406-362 vs SF7u100, docs/research-notes-
+    # 2026-10-27.md; commit c2df04b reproduces SF7). lr 2e-5 x 200 since 2026-11-16 (rl-v4): at Fox S
+    # it beat lr 1e-5 x 100 by ~1.1 logits on 2 training seeds, matched lr 1e-5 x 400, and lr 4e-5 was
+    # no better; at Fox M it beat fox-master 279-105 (docs/research-notes-2026-11-09.md). Before
+    # 2026-11-16 the defaults were lr 1e-5 x 100 (rl-v2/rl-v3 pin those). L-cancel keeps the July recipe.
     dense_defaults = a.vr is not None
-    for k, dense_v, lc_v in (("updates", 100, 60), ("lr", 1e-5, 3e-5), ("kl_beta", 0.0, 0.003),
+    for k, dense_v, lc_v in (("updates", 200, 60), ("lr", 2e-5, 3e-5), ("kl_beta", 0.0, 0.003),
                              ("global_kl_beta", 0.01, 0.0)):
         if getattr(a, k) is None:
             setattr(a, k, dense_v if dense_defaults else lc_v)

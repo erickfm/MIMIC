@@ -68,6 +68,10 @@ class ModelConfig:
     # earlier heads (the true class in training, the sampled class at inference) instead of their
     # detached logits, so the four heads model the joint distribution. Same parameter shapes.
     cond_heads: bool                = False
+    # Order of the cond-heads chain (2026-11-16): one letter per head, s=shoulder c=c-stick
+    # m=main stick b=buttons. "scmb" is the original chain (and the only order before this field
+    # existed, so old checkpoints load as it). Each head sees the one-hot classes of the heads before it.
+    cond_order: str                 = "scmb"
     # Training-time kernel for the Shaw relpos attention (--relpos-impl): "fp32" (the explicit
     # FP32 math), "sdpa" (Shaw term as an additive mask into fused SDPA) or "flex"
     # (FlexAttention; no attention dropout, needs
@@ -457,9 +461,15 @@ class MimicPredictionHeads(nn.Module):
 
     def __init__(self, d_model: int, n_stick_clusters: int = 63,
                  n_shoulder_bins: int = 3, n_cdir: int = 5,
-                 n_btn_classes: int = 5, cond: bool = False, softcap: float = 0.0):
+                 n_btn_classes: int = 5, cond: bool = False, softcap: float = 0.0,
+                 cond_order: str = "scmb"):
         super().__init__()
         self.cond = cond
+        if sorted(cond_order) != sorted("scmb"):
+            raise ValueError(f"cond_order {cond_order!r} must be a permutation of 'scmb'")
+        if cond_order != "scmb" and not cond:
+            raise ValueError("cond_order only applies with --cond-heads")
+        self.cond_order = cond_order
         self.softcap = softcap
         # Inference sampling temperature for cond heads (they sample inside forward).
         self.sample_temperature = 1.0
@@ -479,10 +489,14 @@ class MimicPredictionHeads(nn.Module):
         main_out = n_stick_clusters
         btn_out = n_btn_classes
 
-        self.shoulder_head = _head(d_model, shldr_out)
-        self.cdir_head     = _head(d_model + shldr_out, cdir_out)
-        self.main_head     = _head(d_model + shldr_out + cdir_out, main_out)
-        self.btn_head      = _head(d_model + shldr_out + cdir_out + main_out, btn_out)
+        # Each head's input is h plus the outputs (logits, or one-hot classes with --cond-heads) of the
+        # heads before it in cond_order; "scmb" gives the original shapes.
+        n_out = dict(s=shldr_out, c=cdir_out, m=main_out, b=btn_out)
+        extra = {k: sum(n_out[j] for j in cond_order[:cond_order.index(k)]) for k in "scmb"}
+        self.shoulder_head = _head(d_model + extra["s"], shldr_out)
+        self.cdir_head     = _head(d_model + extra["c"], cdir_out)
+        self.main_head     = _head(d_model + extra["m"], main_out)
+        self.btn_head      = _head(d_model + extra["b"], btn_out)
 
     def forward(self, h: torch.Tensor, btn_targets: Optional[torch.Tensor] = None,
                 cond_classes: Optional[tuple] = None) -> Dict[str, torch.Tensor]:
@@ -504,29 +518,32 @@ class MimicPredictionHeads(nn.Module):
         )
 
     def _forward_cond(self, h, cond_classes):
-        """Conditional chain shoulder -> c -> main -> buttons. cond_classes = (shoulder, c, main)
-        class tensors (B, T) in training / val (teacher forcing: the loss is the joint NLL). None
-        at inference: each head is sampled (Gumbel-max at self.sample_temperature; argmax when
+        """Conditional chain in self.cond_order (default shoulder -> c -> main -> buttons).
+        cond_classes = (shoulder, c, main[, button]) class tensors (B, T) in training / val (teacher
+        forcing: the loss is the joint NLL); the button class is needed only when buttons aren't last.
+        None at inference: each head is sampled (Gumbel-max at self.sample_temperature; argmax when
         <= 0) and its one-hot fed to the next; the samples are returned as "cond_sample"
-        (B, T, 4) in (main, c, shoulder, button) order."""
+        (B, T, 4) in (main, c, shoulder, button) order whatever the chain order."""
         oh = lambda idx, n: Fn.one_hot(idx.long(), n).to(h.dtype)
-        n_s, n_c, n_m = (self.shoulder_head[3].out_features, self.cdir_head[3].out_features,
-                         self.main_head[3].out_features)
+        heads = dict(s=self.shoulder_head, c=self.cdir_head, m=self.main_head, b=self.btn_head)
+        given = {} if cond_classes is None else dict(zip("scmb", cond_classes))
         sampling = cond_classes is None
-        shoulder = self.shoulder_head(h)
-        s_idx = _cond_sample(shoulder, self.sample_temperature) if sampling else cond_classes[0]
-        ctx = oh(s_idx, n_s)
-        cdir = self.cdir_head(torch.cat([h, ctx], dim=-1))
-        c_idx = _cond_sample(cdir, self.sample_temperature) if sampling else cond_classes[1]
-        ctx = torch.cat([ctx, oh(c_idx, n_c)], dim=-1)
-        main = self.main_head(torch.cat([h, ctx], dim=-1))
-        m_idx = _cond_sample(main, self.sample_temperature) if sampling else cond_classes[2]
-        ctx = torch.cat([ctx, oh(m_idx, n_m)], dim=-1)
-        btn = self.btn_head(torch.cat([h, ctx], dim=-1))
-        out = dict(main_xy=main, shoulder_val=shoulder, c_dir_logits=cdir, btn_logits=btn)
+        logits, idx, ctx = {}, {}, []
+        for j, k in enumerate(self.cond_order):
+            logits[k] = heads[k](torch.cat([h, *ctx], dim=-1) if ctx else h)
+            if j == 3 and not sampling:
+                break
+            if sampling:
+                idx[k] = _cond_sample(logits[k], self.sample_temperature)
+            elif k in given:
+                idx[k] = given[k]
+            else:
+                raise ValueError(f"cond_order {self.cond_order!r}: teacher forcing needs the {k!r} class "
+                                 "(pass (shoulder, c, main, button))")
+            ctx.append(oh(idx[k], heads[k][3].out_features))
+        out = dict(main_xy=logits["m"], shoulder_val=logits["s"], c_dir_logits=logits["c"], btn_logits=logits["b"])
         if sampling:
-            b_idx = _cond_sample(btn, self.sample_temperature)
-            out["cond_sample"] = torch.stack([m_idx, c_idx, s_idx, b_idx], dim=-1)
+            out["cond_sample"] = torch.stack([idx["m"], idx["c"], idx["s"], idx["b"]], dim=-1)
         return out
 
 
@@ -577,6 +594,7 @@ class FramePredictor(nn.Module):
             n_btn_classes=cfg.n_controller_combos if cfg.mimic_controller_encoding else 5,
             cond=getattr(cfg, "cond_heads", False),
             softcap=getattr(cfg, "logit_softcap", 0.0),
+            cond_order=getattr(cfg, "cond_order", "scmb") or "scmb",
         )
         variants = [k for k in ("qk_norm", "attn_gate", "zero_init_proj", "value_residual",
                                 "unet_skips", "canon") if getattr(cfg, k, False)]
