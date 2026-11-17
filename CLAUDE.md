@@ -1002,7 +1002,6 @@ re-added to `~/.ssh/authorized_keys` after a fresh provision (publickey auth
 fails otherwise). A fresh box has none of the gitignored files: copy `melee.iso` (the sim builds
 against it), `replays_doc_rt/` (the 6 sim templates every sim RL run and sim h2h uses) and any `runs/`
 or `checkpoints/` the job needs, then run `bash setup.sh` (installs deps, builds the native sim into `sim/`).
-The `coach` branch isn't on GitHub: clone from a `git bundle` of it.
 
 **Persistent storage is `/workspace` ONLY** — everything outside `/workspace`
 (e.g. `/root`, `/tmp`) is **ephemeral** and wiped on container restart. Clone the

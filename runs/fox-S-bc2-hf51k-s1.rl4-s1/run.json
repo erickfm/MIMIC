@@ -1,0 +1,12 @@
+{
+ "name": "fox-S-bc2-hf51k-s1.rl4-s1",
+ "stage": "rl",
+ "recipe": "recipes/rl-v4.yaml",
+ "seed": 1,
+ "parent": "fox-S-bc2-hf51k-s1",
+ "char": "fox",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/runs/fox-S-bc2-hf51k-s1.rl3-lr2e5-s1/policy_u200",
+ "note": "= fox-S-bc2-hf51k-s1.rl3-lr2e5-s1-u200: rl-v3 at lr 2e-5 (constant), resumed u100 -> u200 with the same settings, i.e. rl-v4's settings",
+ "registered": "2026-11-16T23:10:42+00:00"
+}

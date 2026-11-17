@@ -140,9 +140,11 @@ def live_policy(char):
     key = RUN_CHAR.get(char)
     runs = ROOT / "runs"
     if key:
-        cands = sorted(runs.glob(f"{key}-S-*.rl2-s*/policy/model.pt"), key=lambda q: q.stat().st_mtime)
-        if key == "fox" and (runs / "fox-S-bc1-s1.rl1-s0/policy/model.pt").exists():
-            cands.insert(0, runs / "fox-S-bc1-s1.rl1-s0/policy/model.pt")   # SF7u100, until a Fox S rl2 run exists
+        # preference rises along the list: SF7u100 (Fox), then rl2 (100 updates), then rl-v4 (200, owner 2026-11-16)
+        cands = [runs / "fox-S-bc1-s1.rl1-s0/policy/model.pt"] if key == "fox" else []
+        for tag in ("rl2", "rl4"):
+            cands += sorted(runs.glob(f"{key}-S-*.{tag}-s[0-9]/policy/model.pt"), key=lambda q: q.stat().st_mtime)
+        cands = [c for c in cands if c.exists()]
         cands = [c for c in cands if (c.parent.parent / "run.json").exists()
                  and json.loads((c.parent.parent / "run.json").read_text()).get("status") in ("done", "legacy")]
         if cands:

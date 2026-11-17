@@ -56,6 +56,7 @@ fox-S-bc2-hf51k-s1.rl3-s2	rl	rl-v3	fox-S-bc2-hf51k-s1	2	done	2026-11-10 02:14 AM
 fox-S-bc2-hf51k-s1.rl3-s2-u200	rl		fox-S-bc2-hf51k-s1		legacy						vs fox-S-bc2-hf51k-s1.rl2-fast-s1-u200: 80-112 (41.7%); vs fox-S-bc2-hf51k-s1.rl2-fast-s1: 113-79 (58.9%); vs fox-S-bc2-hf51k-s1.rl2-fast-s1: 108-84 (56.2%); vs fox-S-bc2-hf51k-s1.rl2-s1: 110-82 (57.3%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s1-u200: 38-58 (39.6%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s1-u400: 22-74 (22.9%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s1: 46-50 (47.9%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s2-u200: 27-69 (28.1%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s2-u400: 17-79 (17.7%); vs fox-S-bc2-hf51k-s1.rl3-lr4e5-u200-s1: 28-68 (29.2%); vs fox-S-bc2-hf51k-s1.rl3-s2-u400: 31-65 (32.3%)
 fox-S-bc2-hf51k-s1.rl3-s2-u400	rl		fox-S-bc2-hf51k-s1		legacy						vs fox-M-bc2-mlr01-s1.rl2-s1: 84-108 (43.8%); vs fox-M-bc2-mlr01-s1.rl2-s1: 97-95 (50.5%); vs fox-S-bc2-hf51k-s1.rl2-fast-s1-u400: 100-92 (52.1%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s1-u200: 54-42 (56.2%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s1-u400: 46-50 (47.9%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s1: 67-29 (69.8%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s2-u200: 98-94 (51.0%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s2-u200: 49-47 (51.0%); vs fox-S-bc2-hf51k-s1.rl3-lr2e5-s2-u400: 44-52 (45.8%); vs fox-S-bc2-hf51k-s1.rl3-lr4e5-u200-s1: 52-44 (54.2%)
 fox-S-bc2-hf51k-s1.rl3-se2-s1	rl	rl-v3	fox-S-bc2-hf51k-s1	1	done	2026-11-10 12:45 AM	64.0	aurora	dd80834-dirty		vs fox-S-bc2-hf51k-s1.rl2-fast-s1: 97-95 (50.5%); vs fox-S-bc2-hf51k-s1.rl2-fast-s1: 106-86 (55.2%); vs fox-S-bc2-hf51k-s1.rl2-s1: 104-88 (54.2%); vs fox-S-bc2-hf51k-s1: 150-42 (78.1%)
+fox-S-bc2-hf51k-s1.rl4-s1	rl	rl-v4	fox-S-bc2-hf51k-s1	1	legacy						
 fox-XS-bc1-s1	bc	bc-XS-v1		1	done	2026-10-27 11:41 PM	77.5	aurora	b25c988		vs fox-M-bc2-s1: 18-174 (9.4%); vs fox-M-bc2-s1: 12-180 (6.2%); vs fox-M-bc2-s1: 24-168 (12.5%); vs fox-S-bc1-s1: 45-147 (23.4%); vs fox-S-bc1-s1: 46-146 (24.0%); vs fox-S-bc1-s1: 35-157 (18.2%)
 fox-XS-bc1-s1.rl2-s1	rl	rl-v2	fox-XS-bc1-s1	1	done	2026-10-28 04:37 AM	78.2	aurora	b25c988-dirty		vs fox-S-bc1-s1: 72-120 (37.5%); vs fox-S-bc1-s1: 80-112 (41.7%); vs fox-S-bc1-s1: 65-127 (33.9%); vs fox-XS-bc1-s1: 143-49 (74.5%)
 gameandwatch-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 08:39 AM	7.7	aurora	9c1a8fb-dirty		
@@ -80,7 +81,7 @@ pikachu-S-bc2-hf4k-s1	bc	bc-S-v2		1	done	2026-11-06 06:39 PM	12.7	aurora	ce596bf
 pikachu-S-bc2-hf4k-s1.rl2-s1	rl	rl-v2	pikachu-S-bc2-hf4k-s1	1	done	2026-11-06 06:52 PM	99.5	aurora	08f5bcd-dirty		vs pikachu-S-bc2-hf4k-s1: 137-55 (71.4%)
 puff-S-bc2-hf14k-s1	bc	bc-S-v2		1	done	2026-11-06 07:28 AM	34.8	aurora	d15224a-dirty		
 puff-S-bc2-hf14k-s1.rl2-s1	rl	rl-v2	puff-S-bc2-hf14k-s1	1	done	2026-11-06 08:03 AM	99.6	aurora	2f71728-dirty		vs puff-S-bc2-hf14k-s1: 164-28 (85.4%)
-puff-S-bc2-hf14k-s1.rl2-s1-u200	rl		puff-S-bc2-hf14k-s1	1	legacy						
+puff-S-bc2-hf14k-s1.rl2-s1-u200	rl		puff-S-bc2-hf14k-s1	1	legacy						vs puff-S-bc2-hf14k-s1.rl2-s1: 123-69 (64.1%)
 roy-S-bc2-hf3k-s1	bc	bc-S-v2		1	done	2026-11-07 12:34 PM	7.6	aurora	573e047-dirty		
 roy-S-bc2-hf3k-s1.rl2-s1	rl	rl-v2	roy-S-bc2-hf3k-s1	1	done	2026-11-07 12:42 PM	104.6	aurora	8c6d328-dirty		vs roy-S-bc2-hf3k-s1: 147-45 (76.6%)
 samus-S-bc2-hf9k-s1	bc	bc-S-v2		1	done	2026-11-06 02:27 PM	24.8	aurora	ae7bd35-dirty		

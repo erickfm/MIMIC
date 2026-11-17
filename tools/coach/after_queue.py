@@ -5,7 +5,8 @@ A value model reads its policy's trunk, so each character's value model is retra
 policy's features (and re-validated against sim rollouts, tools/coach/value_check.py) before the
 coach uses that policy. Per character:
   1. the policy: the character's S RL run (owner, 2026-11-06: the coach uses S RL models throughout,
-     the same ones live play uses); Fox's S rl2 run (queued), else SF7u100 (fox-S-bc1-s1.rl1-s0, rl-v1);
+     the same ones live play uses): its rl-v4 run (200 updates, owner 2026-11-16), else its rl2 run, else
+     for Fox SF7u100 (fox-S-bc1-s1.rl1-s0, rl-v1);
   2. replays: ~/Slippi when it has enough games of that character, else ranked archives from
      erickfm/melee-ranked-replays (master-vs-master first, about 1.5 GB; see ranked_replays);
   3. value.py extract --policy (GPU) -> data/coach_rank/vfeat_<char>_rl.npz; train -> value_<char>.pt
@@ -45,10 +46,12 @@ def rl_policy(char):
     key = RUN_CHAR.get(char)
     if not key:
         return None
-    runs = sorted((ROOT / "runs").glob(f"{key}-S-*.rl2-s*"), key=lambda q: q.stat().st_mtime)
-    runs = [r for r in runs if run_status(r.name) == "done" and (r / "policy" / "model.pt").exists()]
-    if runs:
-        return str((runs[-1] / "policy").relative_to(ROOT))
+    # rl-v4 (200 updates, owner 2026-11-16) first, then the 100-update rl2 runs; newest of each
+    for tag in ("rl4", "rl2"):
+        runs = sorted((ROOT / "runs").glob(f"{key}-S-*.{tag}-s[0-9]"), key=lambda q: q.stat().st_mtime)
+        runs = [r for r in runs if run_status(r.name) in ("done", "legacy") and (r / "policy" / "model.pt").exists()]
+        if runs:
+            return str((runs[-1] / "policy").relative_to(ROOT))
     if char in FIXED and (ROOT / FIXED[char] / "model.pt").exists():
         return FIXED[char]
     return None
