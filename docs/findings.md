@@ -36,7 +36,7 @@ it should be checked against the code before being relied on.
 - **Conditional heads** (`--cond-heads`, default since 2026-10-22): each head is fed the classes of
   the heads before it, so the four heads model the joint distribution of one input. Beat the same
   recipe without them 611–445 (−4.2% val). Chain order: shoulder → c-stick → main stick → buttons;
-  `--arch cond_order=XXXX` makes it configurable (2026-11-16, see section 5).
+  `--arch cond_order=XXXX` makes it configurable (2026-11-16); no other order has beaten it (section 5).
 - **Muon optimizer** (default since 2026-10-22) on the hidden matrices, AdamW on the rest. At M,
   Muon LR 0.01 beat 0.02 by 57.6% over 3 h2h seeds; 0.005, 0.04 and AdamW were no better. At S,
   0.01 tied 0.02 (2026-10-28/29).
@@ -136,11 +136,16 @@ This is also the main argument for RL: an outcome reward is weighted by conseque
 Runs are launched by `tools/run.py launch RECIPE` and recorded under `runs/<name>/`; `tools/rl_queue.sh`
 runs one RL recipe over a list of BC parents on one GPU.
 
-## 5. Open (2026-11-16)
+## 5. Open (2026-11-17)
 
-- **Cond-heads chain order:** all 24 orders on the fast proxy (S, 1,900 steps), then h2h of any order
-  that beats the current one on val.
-- **Promotion of the M lr 2e-5 × 200 model** as fox-master: realtime Dolphin matches vs the current
-  fox-master, then upload.
-- **Win rate vs RL updates** for the full-attention S 56k base under rl-v4 (every 25 updates vs its BC).
-- **S + rl-v4 for all 23 characters** (the coach's models, on the coach branch).
+- **S + rl-v4 for all 23 characters** (the coach's models, on the coach branch). Done: fox 162–30,
+  falco 169–23, marth 181–11, sheik 178–14 (each vs its BC parent). Puff and Captain Falcon were
+  stopped partway (u100, u65) and 17 characters were never started when the rented box was shut
+  down; the coach uses their rl-v2 models until then (`docs/research-notes-2026-11-17.md`).
+- **Cond-heads chain order at a real budget.** On the fast proxy the 24 orders span 0.7753–0.7772
+  val (current order 0.7766). The four best (cbms, mbsc, bcms, mbcs) played the current order to a
+  pooled 383–385; only cbms was above 50% (108–84, p = 0.10). Nothing tested at S 56k; `scmb` stays.
+
+Closed since 2026-11-16: the M lr 2e-5 × 200 model was promoted to fox-master (18–2 vs the previous one
+in realtime Dolphin). Win rate vs RL updates for Fox S under rl-v4 rises from 63.5% at u25 to
+~84–88% at u125–u200 vs its BC parent (`docs/research-notes-2026-11-17.md`).

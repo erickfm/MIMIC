@@ -584,12 +584,16 @@ Set `--run-name` to `{char}-{YYYYMMDD}-{descriptor}`; step suffix is
 appended when promoting the `_best.pt`.
 
 Current per-character production:
-- `fox-master` — `fox-M-bc2-mlr01-s1.rl2-s1` since 2026-10-29: M BC (`bc-M-v3` recipe, 56k
+- `fox-master` — `fox-M-bc2-mlr01-s1.rl3-lr2e5-u200-s1` since 2026-11-16: M BC (`bc-M-v3`, 56k steps) +
+  200 sim RL updates at lr 2e-5 (= `rl-v4`). Beat the previous `fox-master` (below) 279–105 (72.7%) in the sim
+  (bf16, 2 × 192 games) and 18–2 in realtime Dolphin (20 matches, alternating ports, 6 stages; canaries green:
+  center-stick 36%, L-cancel 91%).
+- previous `fox-master` — `fox-M-bc2-mlr01-s1.rl2-s1`, 2026-10-29 to 2026-11-16: M BC (`bc-M-v3` recipe, 56k
   steps) + 100 sim RL updates (`rl-v2`). Beat the previous `fox-master` (below) 467–109 (81.1%) in
   the sim (bf16, 3 × 192 games); not yet played against it in Dolphin. Uses cond-heads, so the bot
   needs code from 2026-10-22 or later. vs Phillip's released agents (realtime Dolphin, 20 games
   each): 11–9 vs the `master` tier, 2–18 vs `gm`.
-- previous `fox-master` — `fox-mastfox-20260717-cstick9-nomirror` (tail-SWA of steps
+- earlier `fox-master` — `fox-mastfox-20260717-cstick9-nomirror` (tail-SWA of steps
   224k–280k = `AVG_c9nm.pt`), promoted 2026-07-18. Champion recipe (280k
   steps, eff batch 768, seed 42) on freshly rebuilt v2 shards with the
   **nearest-of-9 c-stick history encoding** (commit `fb7bb1a`), **no mirror
@@ -991,16 +995,15 @@ MIMIC's backbone came from [HAL](https://github.com/ericyuegu/hal) (Eric Gu). Wh
 
 ### Remote GPU
 
-| Machine | Host | Port | User | GPU | Storage | Status |
-|---------|------|------|------|-----|---------|--------|
-| A | 174.91.120.34 | 46620 | root | 2× RTX 5090 (32 GB ea), 128 cores, 251 GB RAM | 2 TB `/workspace` | Active (vast.ai instance 60979334, since 2026-11-16) |
+**No box is rented as of 2026-11-17** (`vastai show instances` lists none). The two 2× RTX 5090 vast.ai
+boxes used 2026-11-16/17 (instances 60979334 and 60995156) are destroyed; anything not copied off them is
+gone. Rent through the `vastai` CLI and run `tools/box_check.py` on a new box before queuing work.
 
 ```bash
-ssh mimic-train                       # Machine A (alias in ~/.ssh/config)
-ssh -p 46620 root@174.91.120.34       # Machine A (2× RTX 5090)
+ssh mimic-train                       # alias in ~/.ssh/config; update host/port for a new box
 ```
 
-Port changes on each reprovision; the box also needs your SSH **public key**
+The port changes on each reprovision; the box also needs your SSH **public key**
 re-added to `~/.ssh/authorized_keys` after a fresh provision (publickey auth
 fails otherwise). A fresh box has none of the gitignored files: copy `melee.iso` (the sim builds
 against it), `replays_doc_rt/` (the 6 sim templates every sim RL run and sim h2h uses) and any `runs/`
