@@ -941,6 +941,9 @@ after the kill (gate hit-recency statefully, not with a backward scan).
 
 ## Research notes
 
+**`docs/findings.md` summarizes the established results** (BC, RL, evaluation, recipes) in one
+page, with links to the notes that measured them; update it when a result changes.
+
 The chronological dev journal lives in `docs/research-notes-*.md`,
 one file per day (sometimes with `b` / `c` / `d` suffixes when
 multiple notes land on the same date). They capture experiment
