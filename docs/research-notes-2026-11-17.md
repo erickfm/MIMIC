@@ -81,3 +81,28 @@ model's own order (`_forward_cond`).
   orders split evenly between passes.
 - These are 1,900-step proxy models, one training seed and one h2h seed each. Not tested at S 56k.
 - `scmb` stays the default. Policy folders and full reports: `checkpoints/fastproxy/h2h/co-*`.
+
+## Costume probe: how the offline character select assigns Fox costumes
+
+`python3 tools/costume_probe.py` (realtime Dolphin, both ports pick Fox, Y pressed N times on one
+port after both are locked in, costume read from the first in-game frame). Background: `play.py`'s
+costumes follow the port, not the model, so `--alternate-ports` swaps the colours between matches.
+
+| Y presses | port 1 costume | port 2 costume |
+|---|---|---|
+| none | 1 | 0 |
+| port 1 × 1 | 3 | 0 |
+| port 1 × 2 | 2 | 0 |
+| port 1 × 3 | 1 | 0 |
+| port 2 × 1 | 1 | 3 |
+| port 2 × 2 | 1 | 2 |
+
+- With no presses port 2 gets costume 0 and port 1 gets costume 1. Port 2 locked in first in every
+  trial (frame 16 vs 19), so this run does not separate "port 1 is bumped" from "the second to lock
+  in is bumped".
+- Each Y press moves that port's costume down by one with wrap-around and skips the costume the
+  other port holds: port 1 goes 1 → 3 → 2 → 1, port 2 goes 0 → 3 → 2.
+- Presses after both ports are locked in do take effect, so a fixed colour per model is reachable
+  from the offline CSS by pressing Y a computed number of times. `play.py` is not changed.
+- One trial per row, Fox only. A first run crashed after trial 1 on a numpy int in the JSON output
+  (fixed in the script); the table is from the rerun.
