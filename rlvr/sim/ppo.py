@@ -202,7 +202,7 @@ def head_logits(model, batch, last, sampled_indices=None, h=None):
         if sampled_indices is None:
             raise ValueError("cond-heads logits need the sampled classes to condition on")
         si = sampled_indices.unsqueeze(1)
-        out = raw.heads(h, cond_classes=(si[..., 1], si[..., 2], si[..., 0]))
+        out = raw.heads(h, cond_classes=(si[..., 1], si[..., 2], si[..., 0], si[..., 3]))
     else:
         out = raw.heads(h)
     return {k: v[:, 0] for k, v in out.items() if k in ("main_xy", "shoulder_val", "c_dir_logits", "btn_logits")}

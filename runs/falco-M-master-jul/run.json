@@ -1,0 +1,12 @@
+{
+ "name": "falco-M-master-jul",
+ "stage": "bc",
+ "recipe": null,
+ "seed": null,
+ "parent": null,
+ "char": "falco",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/hf_eval/falco",
+ "note": "falco-20260719-master-c9-s99 (HF falco, July)",
+ "registered": "2026-11-08T10:22:34+00:00"
+}

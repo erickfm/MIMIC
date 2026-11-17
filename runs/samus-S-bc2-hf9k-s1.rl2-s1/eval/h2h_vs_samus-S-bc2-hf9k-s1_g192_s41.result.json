@@ -1,0 +1,21 @@
+{
+ "a": "samus-S-bc2-hf9k-s1.rl2-s1",
+ "b": "samus-S-bc2-hf9k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 135,
+ "b_wins": 57,
+ "draws": 0,
+ "a_win_rate": 0.7031,
+ "wilson95": [
+  0.635,
+  0.7633
+ ],
+ "p_two_sided": 1.7645397095009083e-08,
+ "stock_margin_a": 0.87,
+ "seconds": 483,
+ "commit": "391e010-dirty",
+ "finished": "2026-11-07T00:40:39+00:00"
+}

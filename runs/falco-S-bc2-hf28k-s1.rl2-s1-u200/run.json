@@ -1,0 +1,12 @@
+{
+ "name": "falco-S-bc2-hf28k-s1.rl2-s1-u200",
+ "stage": "rl",
+ "recipe": null,
+ "seed": 1,
+ "parent": "falco-S-bc2-hf28k-s1",
+ "char": "falco",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/runs/falco-S-bc2-hf28k-s1.rl2-s1/policy_u200",
+ "note": "falco-S-bc2-hf28k-s1.rl2-s1 resumed to u200 with rl-v3 settings (lr 1e-5)",
+ "registered": "2026-11-16T20:07:00+00:00"
+}

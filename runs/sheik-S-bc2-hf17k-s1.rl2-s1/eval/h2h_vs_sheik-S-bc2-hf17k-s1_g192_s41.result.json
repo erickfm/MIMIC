@@ -1,0 +1,21 @@
+{
+ "a": "sheik-S-bc2-hf17k-s1.rl2-s1",
+ "b": "sheik-S-bc2-hf17k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 155,
+ "b_wins": 37,
+ "draws": 0,
+ "a_win_rate": 0.8073,
+ "wilson95": [
+  0.7457,
+  0.8568
+ ],
+ "p_two_sided": 2.2424679560604087e-18,
+ "stock_margin_a": 1.25,
+ "seconds": 423,
+ "commit": "d15224a-dirty",
+ "finished": "2026-11-06T15:28:26+00:00"
+}

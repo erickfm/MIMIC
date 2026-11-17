@@ -51,7 +51,7 @@ def main():
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--envs", type=int, default=64)
     ap.add_argument("--workers", type=int, default=16)
-    ap.add_argument("--updates", type=int, default=None, help="default: 100 dense, 60 L-cancel")
+    ap.add_argument("--updates", type=int, default=None, help="default: 200 dense, 60 L-cancel")
     ap.add_argument("--episodes-per-update", type=int, default=192,
                     help="minimum scored episodes per update")
     ap.add_argument("--misses-per-update", type=int, default=0,
@@ -63,13 +63,17 @@ def main():
                          "the 4 heads), not just the L-cancel episode frames PPO's KL term sees "
                          "(default: 0.01 dense, 0 L-cancel)")
     ap.add_argument("--anchor-frames", type=int, default=512, help="anchor sample size per update")
-    ap.add_argument("--lr", type=float, default=None, help="default: 1e-5 dense, 3e-5 L-cancel")
+    ap.add_argument("--lr", type=float, default=None, help="default: 2e-5 dense, 3e-5 L-cancel")
     ap.add_argument("--kl-beta", type=float, default=None,
                     help="per-decision KL to BC on the sampled actions (default: 0 dense, 0.003 L-cancel)")
     ap.add_argument("--ppo-epochs", type=int, default=4)
     ap.add_argument("--ppo-minibatch", type=int, default=0,
                     help="decisions per update forward (memory only; default: 64 at 180 frames, fewer for "
                          "longer contexts)")
+    ap.add_argument("--compile-learner", action=argparse.BooleanOptionalAction, default=False,
+                    help="torch.compile the learner's rollout forward like the frozen opponent's (S: 4.6 -> "
+                         "2.5 ms per 64-env step); it follows the in-place optimizer updates. Off = every "
+                         "recipe up to rl-v2")
     ap.add_argument("--ppo-amp", action=argparse.BooleanOptionalAction, default=False,
                     help="bf16 autocast for the update's forwards (old log-prob scoring, PPO epochs, "
                          "global anchor), like BC training; attention math stays fp32. Off = the "
@@ -98,17 +102,25 @@ def main():
     ap.add_argument("--guard-lr", type=float, default=0.2, help="guard weight step per unit relative gap")
     ap.add_argument("--guard-init", type=float, default=0.1)
     ap.add_argument("--guard-max", type=float, default=2.0)
+    ap.add_argument("--baseline", choices=["mean", "ridge"], default="mean",
+                    help="dense mode: what each decision's return is compared with. mean = the batch mean (every "
+                         "recipe up to rl-v3); ridge = a per-state value from a ridge regression of the returns on "
+                         "the frozen BC's final-norm features, fit on the previous --baseline-replay updates only "
+                         "(never on the batch it is applied to), then the batch z-score as before")
+    ap.add_argument("--baseline-replay", type=int, default=3)
+    ap.add_argument("--baseline-ridge", type=float, default=1e-3, help="ridge strength, relative to mean diag(X'X)")
     ap.add_argument("--normalize", action="store_true",
                     help="dense mode: scale each VR's returns by its running std, so weights compare across VRs")
     a = ap.parse_args()
-    # Dense defaults: 16,384 decisions x 100 updates, 4 PPO epochs, lr 1e-5, the global KL anchor
-    # (0.01) and nothing else: no critic (batch-mean baseline) and no per-decision KL term. Chosen
-    # 2026-10-27 on the best pooled record vs SF7u100 (406-362 over 2 runs x 2 h2h seeds; a retrain of
-    # SF7, which had both, scores 181-203) at 103.5 vs 111.3 min (one training seed,
-    # docs/research-notes-2026-10-27.md; commit c2df04b reproduces SF7). Gains stop at ~100
-    # updates (u150 and u200 tied u100). L-cancel keeps the July recipe.
+    # Dense defaults: 16,384 decisions x 200 updates, 4 PPO epochs, lr 2e-5, the global KL anchor
+    # (0.01) and nothing else: no critic (batch-mean baseline) and no per-decision KL term. The
+    # no-critic / anchor-only design was chosen 2026-10-27 (406-362 vs SF7u100, docs/research-notes-
+    # 2026-10-27.md; commit c2df04b reproduces SF7). lr 2e-5 x 200 since 2026-11-16 (rl-v4): at Fox S
+    # it beat lr 1e-5 x 100 by ~1.1 logits on 2 training seeds, matched lr 1e-5 x 400, and lr 4e-5 was
+    # no better; at Fox M it beat fox-master 279-105 (docs/research-notes-2026-11-09.md). Before
+    # 2026-11-16 the defaults were lr 1e-5 x 100 (rl-v2/rl-v3 pin those). L-cancel keeps the July recipe.
     dense_defaults = a.vr is not None
-    for k, dense_v, lc_v in (("updates", 100, 60), ("lr", 1e-5, 3e-5), ("kl_beta", 0.0, 0.003),
+    for k, dense_v, lc_v in (("updates", 200, 60), ("lr", 2e-5, 3e-5), ("kl_beta", 0.0, 0.003),
                              ("global_kl_beta", 0.01, 0.0)):
         if getattr(a, k) is None:
             setattr(a, k, dense_v if dense_defaults else lc_v)
@@ -166,9 +178,10 @@ def main():
     import numpy as np
     vr_w = np.asarray(vr_w, np.float64)
     vr_scale = np.ones(len(vr_ids))          # running std of each VR's returns (--normalize)
+    base_replay = []                          # --baseline ridge: [(features + 1, raw per-VR returns)] per update
     rate_ema = None                           # EMA of (learner, BC) per-frame rates, for the guards
     scale_seen = np.zeros(len(vr_ids), bool)
-    v = VecSim(templates, {"LEARN": dict(dir=a.policy_dir, model=learner, cfg=cfg, amp=True, compile=False),
+    v = VecSim(templates, {"LEARN": dict(dir=a.policy_dir, model=learner, cfg=cfg, amp=True, compile=a.compile_learner),
                            "OPP": dict(dir=a.policy_dir, amp=True, compile=True)},
                a.envs, a.workers, rng=a.rng, seed=a.seed, assign=assign, vr_ids=vr_ids)
 
@@ -372,6 +385,26 @@ def main():
                     _logprob_at_indices(head_logits(ref, None, None, idx, h=feats_of(ref, i, j, pk)), idx).cpu()
                 for fr, x, y in zip(chunk, lp, lr_):   # the reference never changes: score it once
                     fr.logprob_old, fr.logprob_ref = x, y
+        bstats = {}
+        raw_return_mean = float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None
+        if a.baseline == "ridge" and dense and episodes:
+            with torch.no_grad(), amp_ctx():
+                F_ = torch.cat([feats_of(ref, i, j, pk).float().reshape(j - i, -1) for i, j, pk in spans])
+            X = torch.cat([F_, torch.ones(len(F_), 1, device=F_.device)], 1)
+            Gt = torch.tensor(Gm, dtype=torch.float32, device=X.device)            # (N, n_vr) raw returns
+            wv = torch.tensor(vr_w / vr_scale, dtype=torch.float32, device=X.device)
+            R = Gt @ wv                                                            # = terminal_reward
+            if base_replay:   # fit on earlier updates only: the baseline never sees this batch's returns
+                XX = torch.cat([x for x, _ in base_replay]); YY = torch.cat([y for _, y in base_replay])
+                A = XX.T @ XX
+                A = A + a.baseline_ridge * A.diagonal().mean() * torch.eye(len(A), device=A.device)
+                # 257 x 257: solved on the CPU (CUBLAS_WORKSPACE_CONFIG=:0:0 leaves cuBLAS no workspace for trsm)
+                Wb = torch.linalg.solve(A.double().cpu(), (XX.T @ YY).double().cpu()).float().to(X.device)
+                resid = R - (X @ Wb) @ wv
+                bstats = dict(baseline_ev=round(float(1 - resid.var() / R.var().clamp_min(1e-12)), 4))
+                for ep, x in zip(episodes, resid.tolist()):
+                    ep.terminal_reward = x
+            base_replay = (base_replay + [(X, Gt)])[-a.baseline_replay:]
         extra = None
         if a.global_kl_beta > 0 and anchor:
             # KL(policy || BC) summed over the 4 heads at each anchor frame: exact for independent
@@ -424,7 +457,7 @@ def main():
                        vr={i: dict(learn=round(float(x) / n * 3600, 4), opp=round(float(y) / n * 3600, 4))
                            for i, x, y in zip(vr_ids, dstats["vr_learn"], dstats["vr_opp"])},
                        games=dict(win=dstats["win"], loss=dstats["loss"], draw=dstats["draw"]),
-                       return_mean=float(np.mean([ep.terminal_reward for ep in episodes])) if episodes else None,
+                       return_mean=raw_return_mean, **bstats,
                        guards=guard_stats or None, vr_scale=[round(float(x), 4) for x in vr_scale])
         print(json.dumps(rec), flush=True)
         log.write(json.dumps(rec) + "\n")

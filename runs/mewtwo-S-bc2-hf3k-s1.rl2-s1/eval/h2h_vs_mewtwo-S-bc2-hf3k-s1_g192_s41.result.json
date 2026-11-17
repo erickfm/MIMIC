@@ -1,0 +1,21 @@
+{
+ "a": "mewtwo-S-bc2-hf3k-s1.rl2-s1",
+ "b": "mewtwo-S-bc2-hf3k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 120,
+ "b_wins": 72,
+ "draws": 0,
+ "a_win_rate": 0.625,
+ "wilson95": [
+  0.5547,
+  0.6904
+ ],
+ "p_two_sided": 0.0006550303498023515,
+ "stock_margin_a": 0.505,
+ "seconds": 530,
+ "commit": "da9a3d6-dirty",
+ "finished": "2026-11-08T04:34:41+00:00"
+}

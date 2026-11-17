@@ -176,8 +176,9 @@ _CDIR_5_TO_9 = torch.tensor([0, 4, 3, 2, 1], dtype=torch.long)
 
 
 def _cond_head_classes(targets, shoulder_centers, n_cdir):
-    """(shoulder, c_dir, main) target classes, exactly as compute_loss derives its CE
-    targets: what --cond-heads conditions the later heads on in training."""
+    """(shoulder, c_dir, main, button) target classes, exactly as compute_loss derives its CE
+    targets: what --cond-heads conditions the later heads on in training (the button class is
+    used only when cond_order puts buttons before another head)."""
     l_bin, r_bin = targets["l_bin"].long(), targets["r_bin"].long()
     shldr = (_combine_shoulder_targets(l_bin, r_bin, shoulder_centers)
              if shoulder_centers is not None else l_bin)
@@ -185,7 +186,16 @@ def _cond_head_classes(targets, shoulder_centers, n_cdir):
     cdir = cdir_tgt.argmax(dim=-1)
     if n_cdir == 9 and cdir_tgt.size(-1) == 5:
         cdir = _CDIR_5_TO_9.to(cdir.device)[cdir]
-    return (shldr, cdir, targets["main_cluster"].long())
+    return (shldr, cdir, targets["main_cluster"].long(), _btn_single_targets(targets))
+
+
+def _btn_single_targets(targets):
+    """Single-label button classes, as compute_loss derives them."""
+    if targets.get("btns_single") is not None:
+        return targets["btns_single"].long()
+    if _combo_map is not None:
+        return _multi_hot_to_combo_label(targets.get("btns", targets.get("btns_float")).float())
+    raise ValueError("no btns_single targets and no controller_combos.json combo map")
 
 
 def compute_loss(preds, targets, shoulder_centers=None, n_cdir=5, lite=False):
@@ -229,13 +239,7 @@ def compute_loss(preds, targets, shoulder_centers=None, n_cdir=5, lite=False):
     loss_cdir = _ce(c_logits.reshape(-1, c_logits.size(-1)), cdir_classes.reshape(-1))
 
     # Single-label buttons: use pre-computed early_release labels if available
-    btn_single_pre = targets.get("btns_single")
-    if btn_single_pre is not None:
-        btn_single = btn_single_pre.long()
-    elif _combo_map is not None:
-        btn_single = _multi_hot_to_combo_label(btn_tgt)
-    else:
-        raise ValueError("no btns_single targets and no controller_combos.json combo map")
+    btn_single = _btn_single_targets(targets)
     loss_btn = _ce(btn_pred.reshape(-1, btn_pred.size(-1)), btn_single.reshape(-1))
     task_losses = (loss_main, loss_shldr, torch.tensor(0.0, device=loss_main.device), loss_cdir, loss_btn)
     if lite:
@@ -437,8 +441,8 @@ def _auto_run_name(preset: str, lr: float, seq_len: int, extra: dict = None) -> 
 _ARCH_FLAGS = {"cond_heads": "--cond-heads / --no-cond-heads", "attn_window": "--attn-window N",
                **{k: f"--arch {k}=..." for k in ("qk_norm", "attn_gate", "mlp_act", "zero_init_proj",
                                                  "logit_softcap", "value_residual", "unet_skips",
-                                                 "canon", "use_rmsnorm", "use_swiglu")}}
-_ARCH_DEFAULTS = {"mlp_act": "gelu"}
+                                                 "canon", "use_rmsnorm", "use_swiglu", "cond_order")}}
+_ARCH_DEFAULTS = {"mlp_act": "gelu", "cond_order": "scmb"}
 
 
 def parse_arch(spec):
@@ -755,7 +759,11 @@ def train(epochs: int = None, max_steps: int = None, max_samples: int = MAX_SAMP
         if _diffs and not warm_restart:   # warm starts may switch architecture on purpose
             raise _arch_error(resume, _diffs, "resume; use --warm-restart to start a new run from "
                                               "these weights with a different architecture")
-        model.load_state_dict(ckpt['model_state_dict'])
+        _sd = ckpt['model_state_dict']
+        _want = next(iter(model.state_dict())).startswith("_orig_mod.")   # compiled now?
+        if next(iter(_sd)).startswith("_orig_mod.") != _want:   # saved compiled, loaded with --no-compile (or back)
+            _sd = {(("_orig_mod." + k) if _want else k.removeprefix("_orig_mod.")): v for k, v in _sd.items()}
+        model.load_state_dict(_sd)
         if not no_load_optim:
             _base_lrs = [g['lr'] for g in optimiser.param_groups]   # this run's per-group base LRs
             try:

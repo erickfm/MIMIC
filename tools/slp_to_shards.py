@@ -654,12 +654,16 @@ def extract_replay(
     Returns a list of 2 (states, targets, n_frames) tuples, or None on failure.
     """
     try:
-        return _extract_replay_inner(
+        result = _extract_replay_inner(
             slp_path, schema, norm_stats, cat_maps,
             stick_centers, shoulder_centers, hal_norm,
             combo_map, n_combos)
     except Exception:
         return None
+    code = os.environ.get("MIMIC_KEEP_CODE")
+    if code and result is not None:   # --keep-code: only that player's perspective (port order)
+        result = [result[i] for i in _code_index(slp_path, code)]
+    return result
 
 
 def _extract_replay_inner(
@@ -960,6 +964,19 @@ def _init_worker(schema, norm_stats, cat_maps, stick_centers, shoulder_centers,
     _W["hal_norm"] = hal_norm
     _W["combo_map"] = combo_map
     _W["n_combos"] = n_combos
+
+
+def _code_index(slp_path: str, code: str) -> List[int]:
+    """Indices (0 = lower port) of the game's two players whose netplay connect code is `code`."""
+    import peppi_py
+    try:
+        g = peppi_py.read_slippi(slp_path, skip_frames=True)
+    except Exception:
+        return []
+    ps = sorted(g.start.players, key=lambda p: p.port.value if hasattr(p.port, "value") else int(p.port))
+    if len(ps) != 2:
+        return []
+    return [i for i, p in enumerate(ps) if p.netplay is not None and p.netplay.code.replace("\uff03", "#") == code]
 
 
 def _worker_fn(slp_path: str):
@@ -1597,7 +1614,12 @@ def main():
     parser.add_argument("--character", type=int, default=None,
                         help="Only keep perspective where self_character matches "
                              "this index (e.g. 1 for Fox)")
+    parser.add_argument("--keep-code", default=None,
+                        help="Only keep the perspective of the player with this connect code "
+                             "(e.g. STUC#911): a model of one specific player")
     args = parser.parse_args()
+    if args.keep_code:
+        os.environ["MIMIC_KEEP_CODE"] = args.keep_code   # read by the workers (_worker_fn)
 
     if args.resume and args.clean:
         parser.error("--resume and --clean are mutually exclusive")

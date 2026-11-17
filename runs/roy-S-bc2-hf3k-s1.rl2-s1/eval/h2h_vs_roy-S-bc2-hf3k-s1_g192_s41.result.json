@@ -1,0 +1,21 @@
+{
+ "a": "roy-S-bc2-hf3k-s1.rl2-s1",
+ "b": "roy-S-bc2-hf3k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 147,
+ "b_wins": 45,
+ "draws": 0,
+ "a_win_rate": 0.7656,
+ "wilson95": [
+  0.7009,
+  0.82
+ ],
+ "p_two_sided": 7.824674896926302e-14,
+ "stock_margin_a": 1.078,
+ "seconds": 327,
+ "commit": "8c6d328-dirty",
+ "finished": "2026-11-07T22:32:28+00:00"
+}

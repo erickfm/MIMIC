@@ -1,0 +1,21 @@
+{
+ "a": "ness-S-bc2-hf3k-s1.rl2-s1",
+ "b": "ness-S-bc2-hf3k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 147,
+ "b_wins": 45,
+ "draws": 0,
+ "a_win_rate": 0.7656,
+ "wilson95": [
+  0.7009,
+  0.82
+ ],
+ "p_two_sided": 7.824674896926302e-14,
+ "stock_margin_a": 0.964,
+ "seconds": 605,
+ "commit": "075c8f0-dirty",
+ "finished": "2026-11-08T00:34:06+00:00"
+}

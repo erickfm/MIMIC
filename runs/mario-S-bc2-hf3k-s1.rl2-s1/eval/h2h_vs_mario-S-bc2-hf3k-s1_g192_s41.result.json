@@ -1,0 +1,21 @@
+{
+ "a": "mario-S-bc2-hf3k-s1.rl2-s1",
+ "b": "mario-S-bc2-hf3k-s1",
+ "games": 192,
+ "seed": 41,
+ "precision": "bf16",
+ "templates": "replays_doc_rt",
+ "a_wins": 133,
+ "b_wins": 59,
+ "draws": 0,
+ "a_win_rate": 0.6927,
+ "wilson95": [
+  0.6242,
+  0.7537
+ ],
+ "p_two_sided": 9.66284917133976e-08,
+ "stock_margin_a": 0.812,
+ "seconds": 411,
+ "commit": "573e047-dirty",
+ "finished": "2026-11-07T20:34:43+00:00"
+}

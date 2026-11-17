@@ -1,0 +1,12 @@
+{
+ "name": "fox-S-bc2-hf51k-s1.rl3-lr2e5-s2-u400",
+ "stage": "rl",
+ "recipe": null,
+ "seed": null,
+ "parent": "fox-S-bc2-hf51k-s1",
+ "char": "fox",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/runs/fox-S-bc2-hf51k-s1.rl3-lr2e5-s2/policy_u400",
+ "note": "fox-S-bc2-hf51k-s1.rl3-lr2e5-s2 checkpoint u400 (same settings)",
+ "registered": "2026-11-12T04:15:53+00:00"
+}

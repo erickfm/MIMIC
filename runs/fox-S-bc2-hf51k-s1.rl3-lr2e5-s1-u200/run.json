@@ -1,0 +1,12 @@
+{
+ "name": "fox-S-bc2-hf51k-s1.rl3-lr2e5-s1-u200",
+ "stage": "rl",
+ "recipe": null,
+ "seed": null,
+ "parent": "fox-S-bc2-hf51k-s1",
+ "char": "fox",
+ "status": "legacy",
+ "legacy_policy": "/home/erick/projects/MIMIC/runs/fox-S-bc2-hf51k-s1.rl3-lr2e5-s1/policy_u200",
+ "note": "fox-S-bc2-hf51k-s1.rl3-lr2e5-s1 resumed to u200 with the same settings",
+ "registered": "2026-11-10T18:05:31+00:00"
+}
